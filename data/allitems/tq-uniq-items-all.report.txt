@@ -1,0 +1,39 @@
+tq-uniq-items-all.jsonl - every record of the catalogue, one copy each
+written 2026-09-25T14:50:00.0000000Z
+
+rows         1588 = 0 carried + 1588 generated
+header       entries 1588, collected 1588, pendingIn 0, pendingOut 0, set "tq-uniq-items"
+records      uniq-records.txt (1588 records)
+journal      none - every row is generated
+output       tq-uniq-items-all.jsonl (488360 bytes)
+
+THE ROW OF A GENERATED RECORD - the collection page's prototype recipe
+(utReplicaBuild), so it is what the mod writes when that prototype is deposited:
+  record          the folded key: lower case, '\' -> '/'
+  deposited       this run's stamp
+  stack           1
+  base            the record with '/' -> '\' (the engine's spelling)
+  prefix, suffix, relic, relicBonus, relic2, relicBonus2    empty
+  seed            FNV-1a of the key folded into 1..32767 (deterministic, never 0)
+  var1, var2, b8  0 (var2 = the second relic's shard count; no second relic)
+  seeds used      1542 distinct among 1588 rows, 3..32745
+
+PER ITEM CLASS (generated rows)
+  ArmorJewelry_Amulet                         85
+  ArmorJewelry_Ring                           84
+  ArmorProtective_Forearm                    160
+  ArmorProtective_Head                       167
+  ArmorProtective_LowerBody                  145
+  ArmorProtective_UpperBody                  241
+  ItemArtifact                                90
+  WeaponArmor_Shield                         105
+  WeaponHunting_Bow                           78
+  WeaponHunting_RangedOneHand                 41
+  WeaponHunting_Spear                         76
+  WeaponMagical_Staff                         81
+  WeaponMelee_Axe                             73
+  WeaponMelee_Mace                            77
+  WeaponMelee_Sword                           85
+  TOTAL                                     1588
+
+RECORDS NOT GENERATED: none. Every record of the list is in the file.

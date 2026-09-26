@@ -1,0 +1,28 @@
+Test fixtures, not shipped.
+
+The DLL generates catalogue.bin, uniq-records.txt, uniq-groups.txt and uniq-excluded.txt into its
+own mod folder at start-up (src\gen, behind catalogue.stamp). The copies here are what the Python
+reference tools wrote from Titan Quest AE 2.10 (Text_EN); the catalogue harness
+(tools\build_test_catalogue.bat, --catalogue and --ensure) compares the DLL's output against them
+byte for byte, and the model suite (build_model.bat) loads catalogue.bin.
+
+The text files are CRLF, because that is what the DLL writes; the repository's .gitattributes
+marks data\oracle\ as -text so git keeps the real bytes (a fresh clone must not LF-normalise them).
+
+To regenerate (the game folder from %TQ_GAME_DIR%, else the Steam registry; read only):
+
+    python tools\build_catalogue.py      catalogue.json (not tracked), catalogue-stats.md,
+                                         uniq-records.txt, uniq-groups.txt, uniq-excluded.txt
+    python tools\pack_catalogue.py       catalogue.bin (format GDUT v2) from catalogue.json
+    python tools\ui_slotart.py --oracle data\oracle\slotart.txt
+                                         slotart.txt (the equipment window's slot positions,
+                                         which the viewgate suite compares with src\ut_slotart.h)
+
+and then run tools\build_test_catalogue.bat and build_model.bat. A mod folder the DLL wrote can
+be checked against these files with:
+
+    python tools\build_catalogue.py --compare <mod folder>
+
+catalogue.json is the 1 MB intermediate; it is regenerated, never tracked.
+
+Nothing in this folder goes into a release package.

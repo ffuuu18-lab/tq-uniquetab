@@ -1,0 +1,15 @@
+# Windows batch files need CRLF (cmd label lookup)
+*.bat text eol=crlf
+
+# The files under data\oracle\ are compared BYTE FOR BYTE against what the DLL writes into its
+# own mod folder, so their CRLF line endings are content. Git must not translate them on the way
+# in or out, or the catalogue harness fails on a fresh clone (GD HANDOFF 7).
+data/oracle/** -text
+
+# The documents that ship in the player zip: LF on every checkout, so package.ps1 in a fresh
+# clone gives a byte-identical zip whatever core.autocrlf says.
+*.md text eol=lf
+LICENSE text eol=lf
+
+# The all-items collection file ships in the zip as it is committed: LF, byte for byte.
+data/allitems/** -text

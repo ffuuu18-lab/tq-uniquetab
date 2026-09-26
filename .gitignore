@@ -1,0 +1,30 @@
+# build outputs (regenerable: build.bat, tools\build_test_*.bat, build_model.bat, tools\package.ps1)
+/build/
+/bin/
+/out/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.asi
+*.log
+
+# Python caches
+__pycache__/
+*.pyc
+
+# build_model.bat drops the model suite's transcript here.
+tests/model_test.out.txt
+
+# the 1 MB catalogue intermediate (tools\build_catalogue.py regenerates it)
+/data/oracle/catalogue.json
+
+# a maintainer's own extra patterns for tools\release_check.py - never tracked
+tools/release_check.local
+
+# the test fixtures, regenerated from a game folder per data\oracle\ORACLE.txt (not tracked here)
+/data/oracle/catalogue-stats.md
+/data/oracle/catalogue.bin
+/data/oracle/slotart.txt
+/data/oracle/uniq-*.txt
