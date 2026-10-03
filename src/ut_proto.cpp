@@ -132,7 +132,10 @@ bool addToSack(TqSack* s, TqItem* item, unsigned id, int col, int row) {
     utGuardEnter();
     g_placingTid = GetCurrentThreadId();   // the AddItem guard lets the mod's own through
     __try {
-        ok = g_tq.SackAddItemVec(s, &at, item, 0) && g_tq.SackContainsItem(s, id);
+        // the last argument is the engine's "silent" flag: false makes AddItem call the item's
+        // PlayDropSound (Item vtable +0x130), so every window rebuild would play every item's drop
+        // sound; a prototype is placed silently. Real deposits and takes keep their own sounds.
+        ok = g_tq.SackAddItemVec(s, &at, item, 1) && g_tq.SackContainsItem(s, id);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         ok = false;
     }

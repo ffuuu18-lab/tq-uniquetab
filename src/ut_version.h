@@ -3,4 +3,4 @@
 // tools\release_check.py refuses a tree that spells the version anywhere else in the code.
 #pragma once
 
-#define UT_VERSION "1.0.0"
+#define UT_VERSION "1.0.1"

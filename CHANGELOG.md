@@ -3,6 +3,11 @@
 What changed in each release, newest first. `README.md` says how everything works; this file says
 when it arrived.
 
+## 1.0.1 - 3 October 2026
+
+- Scrolling the collection page or switching its group no longer plays the drop sound of every item
+  on the page. Putting an item in and taking one out sound as before.
+
 ## 1.0.0 - 26 September 2026
 
 The first release.

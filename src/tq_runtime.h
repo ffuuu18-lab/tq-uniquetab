@@ -208,6 +208,8 @@ TQ_EXPECT_CC(TQ_CURSOR_ISRELICVAULTCAPABLE, TQCC_THISCALL);
 
 // GAME::InventorySack. Resolved, never hooked and never called.
 typedef bool(__thiscall* PfnSack_AddItem)(TqSack*, TqItem*, Bool32);
+// the Bool32 of both AddItem forms is "silent": when it is false the sack calls the item's
+// PlayDropSound (vtable +0x130) after the insert; the mod places its prototypes with it set.
 typedef bool(__thiscall* PfnSack_AddItemVec)(TqSack*, const TqVec2*, TqItem*, Bool32);
 typedef bool(__thiscall* PfnSack_RemoveItem)(TqSack*, unsigned itemId);
 typedef bool(__thiscall* PfnSack_IsSpaceForItem)(const TqSack*, const TqItem*);
