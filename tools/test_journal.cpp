@@ -19,8 +19,10 @@
 #include <string>
 
 #include "../src/ut_depositgate.h"   // utJournalStack
+#include "../src/ut_folders.h"       // the one-time move of a mod's journal
 #include "../src/ut_log.h"
 #include "../src/ut_rescue.h"
+#include "../src/ut_relicroute.h"   // the relic / charm choices the takes make
 #define UT_PROTO_PURE_ONLY
 #include "../src/ut_proto.h"          // the take's row -> replica -> row (utReplicaFromIdentity)
 
@@ -291,6 +293,55 @@ int loadMode(const char* file) {
 
 }  // namespace
 
+// The seeding tool's output (tools\seed_relic_rows.py) through the reader: every row of the file
+// kept (no copy aside), and each named record's partial rows settled and counted in shards by the
+// red slot's own count. `kv` = key, shards, key, shards, ...
+int shardsMode(const char* file, int n, char** kv) {
+    const std::string text = readAll(file);
+    if (text.empty()) {
+        printf("shards: %s is missing or empty\n", file);
+        return 1;
+    }
+    size_t lines = 0;
+    for (size_t at = 0; at < text.size();) {
+        size_t nl = text.find('\n', at);
+        if (nl == std::string::npos) nl = text.size();
+        if (text.find_first_not_of(" \t\r", at) < nl) ++lines;
+        at = nl + 1;
+    }
+    const size_t fileRows = lines ? lines - 1 : 0;
+    const char* leaf = "tq-uniq-items-seed";
+    clean(leaf);
+    char path[MAX_PATH];
+    pathOf(leaf, "jsonl", path);
+    writeAll(path, text);
+    int fails = 0;
+    const bool opened = ut::journalOpenSet(leaf) && ut::journalUsable();
+    const std::string head = text.substr(0, text.find('\n'));
+    const bool whole = opened && ut::journalCount() == fileRows &&
+                       headerNumber(head, "entries") == (unsigned)fileRows;
+    printf("  %s %s: %u rows in the file, header entries %u, %u read\n", whole ? "PASS" : "FAIL", file,
+           (unsigned)fileRows, headerNumber(head, "entries"), (unsigned)ut::journalCount());
+    if (!whole) ++fails;
+    static ut::UtRelicRowFacts fx[512];
+    for (int i = 0; i + 1 < n; i += 2) {
+        const size_t got = ut::journalRowsOf(kv[i], fx, 512);
+        const size_t have = got < 512 ? got : 512;
+        unsigned settled = 0;
+        for (size_t j = 0; j < have; ++j)
+            if (fx[j].pending == ut::kUtRelicPendNone && !fx[j].bonus[0]) ++settled;
+        const unsigned shards = ut::utRelicRedShards(fx, (int)have);
+        const unsigned want = (unsigned)strtoul(kv[i + 1], nullptr, 10);
+        const bool good = got > 0 && settled == (unsigned)got && shards == want;
+        printf("  %s %s: %u row(s), %u settled partial, red count %u shard(s) (expected %u)\n",
+               good ? "PASS" : "FAIL", kv[i], (unsigned)got, settled, shards, want);
+        if (!good) ++fails;
+    }
+    if (fails) printf("SHARDS FAILED (%d)\n", fails);
+    else printf("SHARDS PASSED\n");
+    return fails ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         printf("usage: test_journal <empty folder under build\\test>\n");
@@ -303,6 +354,12 @@ int main(int argc, char** argv) {
     _snwprintf_s(logPath, MAX_PATH, _TRUNCATE, L"%S\\test_journal.log", g_dir);
     ut::logInit(logPath);
     ut::logSetLevel("debug");
+    if (argc >= 6 && strcmp(argv[2], "--shards") == 0) {
+        const bool init = ut::journalInit(nullptr);
+        const int rc = init ? shardsMode(argv[3], argc - 4, argv + 4) : 1;
+        ut::logShutdown();
+        return rc;
+    }
     if (argc >= 4 && strcmp(argv[2], "--load") == 0) {
         const bool init = ut::journalInit(nullptr);
         const int rc = init ? loadMode(argv[3]) : 1;
@@ -933,8 +990,562 @@ int main(int argc, char** argv) {
         journalOpenSet(nullptr);
     }
 
+    printf("\nO. a mod's journal moves into mods\\<leaf>\\ once: all or nothing, the .jsonl last\n");
+    {
+        using namespace ut;
+        char game[80];
+        check(!utSaveSetGame("tq-uniq-items", game, sizeof(game)) &&
+                  !utSaveSetGame("tq-uniq-items-custom", game, sizeof(game)),
+              "the main game's two sets have no folder of their own (the root files)");
+        char leaf[96];
+        check(utSaveSetLeaf(true, "MYMOD", true, false, leaf, sizeof(leaf)) &&
+                  utSaveSetGame(leaf, game, sizeof(game)) && !strcmp(game, "mymod") &&
+                  utGameOfSet(leaf) == "mymod",
+              "a mod's set names its folder: tq-uniq-items-mymod -> mods\\mymod (ONE leaf function)");
+        check(utSaveSetLeaf(true, "My Mod", true, true, leaf, sizeof(leaf)) &&
+                  utGameOfSet(leaf) == std::string(leaf + 14) &&
+                  utSaveSetLeaf(true, "custom", true, true, leaf, sizeof(leaf)) &&
+                  utGameOfSet(leaf) == "mod_custom",
+              "a lossy name keeps its hash in the folder; a mod named custom is mod_custom");
+        const std::string base(g_dir);
+        auto put = [&](const char* name, const char* text) {
+            writeAll((base + "\\" + name).c_str(), text);
+        };
+        auto at = [&](const std::string& rel) { return readAll((base + "\\" + rel).c_str()); };
+        auto there = [&](const std::string& rel) {
+            return GetFileAttributesA((base + "\\" + rel).c_str()) != INVALID_FILE_ATTRIBUTES;
+        };
+
+        // 1. the rename: a real journal with a row, its csv and a .bad- copy
+        clean("tq-uniq-items-mv1");
+        check(journalOpenSet("tq-uniq-items-mv1"), "a mod's set opened in the root (an older build's place)");
+        unsigned long long seq = 0;
+        bool rb = false;
+        check(journalDepositCommit(cap(kRing, 5), &seq, &rb), "one row deposited");
+        journalOpenSet(nullptr);
+        const std::string rows1 = at("tq-uniq-items-mv1.jsonl");
+        put("tq-uniq-items-mv1.csv", "record\r\n");
+        put("tq-uniq-items-mv1.jsonl.bad-x", "bad\n");
+        UtJournalMove m = utJournalMoveSet(base, "tq-uniq-items-mv1");
+        check(m.result == kUtMoveDone && m.files.size() == 3 && m.files.back() == "tq-uniq-items-mv1.jsonl",
+              "moved: the csv and the .bad- copy first, the .jsonl LAST");
+        check(!there("tq-uniq-items-mv1.jsonl") && !there("tq-uniq-items-mv1.csv") &&
+                  !there("tq-uniq-items-mv1.jsonl.bad-x") &&
+                  at("mods\\mv1\\tq-uniq-items-mv1.jsonl") == rows1 &&
+                  at("mods\\mv1\\tq-uniq-items-mv1.csv") == "record\r\n" &&
+                  at("mods\\mv1\\tq-uniq-items-mv1.jsonl.bad-x") == "bad\n",
+              "nothing is left in the root; every file is in mods\\mv1\\ byte for byte");
+        check(utJournalSetRel(base, "tq-uniq-items-mv1") == "mods\\mv1", "the set is read from mods\\mv1 now");
+        check(journalOpenSet("tq-uniq-items-mv1", 0, 0, false, "mods\\mv1") && journalUsable() &&
+                  journalRows(kRingKey) == 1 && !strncmp(journalPath() + strlen(g_dir), "\\mods\\mv1\\", 10),
+              "and opens there with its row");
+        journalOpenSet(nullptr);
+        check(utJournalMoveSet(base, "tq-uniq-items-mv1").result == kUtMoveNothing,
+              "a second start finds nothing to move");
+
+        // 2. a taken target: nothing moves, nothing merges, both are kept
+        put("tq-uniq-items-mv2.jsonl", "root rows\n");
+        put("tq-uniq-items-mv2.csv", "root csv\n");
+        CreateDirectoryA((base + "\\mods").c_str(), nullptr);
+        CreateDirectoryA((base + "\\mods\\mv2").c_str(), nullptr);
+        put("mods\\mv2\\tq-uniq-items-mv2.jsonl", "folder rows\n");
+        m = utJournalMoveSet(base, "tq-uniq-items-mv2");
+        check(m.result == kUtMoveTaken && at("tq-uniq-items-mv2.jsonl") == "root rows\n" &&
+                  at("tq-uniq-items-mv2.csv") == "root csv\n" &&
+                  at("mods\\mv2\\tq-uniq-items-mv2.jsonl") == "folder rows\n" &&
+                  !there("mods\\mv2\\tq-uniq-items-mv2.csv"),
+              "a taken target: refused before anything moved, both files kept as they were");
+        check(utJournalSetRel(base, "tq-uniq-items-mv2") == "mods\\mv2", "the mod uses mods\\mv2 (GD's rule)");
+        utJournalMoveLog("tq-uniq-items-mv2", m, "at start");
+
+        // 3. a held file: the .jsonl open in another program (no delete sharing)
+        put("tq-uniq-items-mv3.jsonl", "rows 3\n");
+        put("tq-uniq-items-mv3.csv", "csv 3\n");
+        HANDLE held = CreateFileA((base + "\\tq-uniq-items-mv3.jsonl").c_str(), GENERIC_READ,
+                                  FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        m = utJournalMoveSet(base, "tq-uniq-items-mv3");
+        check(held != INVALID_HANDLE_VALUE && m.result == kUtMoveRolledBack &&
+                  at("tq-uniq-items-mv3.jsonl") == "rows 3\n" && at("tq-uniq-items-mv3.csv") == "csv 3\n" &&
+                  !there("mods\\mv3\\tq-uniq-items-mv3.csv") && !there("mods\\mv3\\tq-uniq-items-mv3.jsonl"),
+              "a held .jsonl: the moved csv went BACK, the whole set is in the root");
+        check(utJournalSetRel(base, "tq-uniq-items-mv3") == "", "and is read from the root (never split)");
+        utJournalMoveLog("tq-uniq-items-mv3", m, "at start");
+        CloseHandle(held);
+        m = utJournalMoveSet(base, "tq-uniq-items-mv3");
+        check(m.result == kUtMoveDone && at("mods\\mv3\\tq-uniq-items-mv3.jsonl") == "rows 3\n" &&
+                  !there("tq-uniq-items-mv3.jsonl"),
+              "the next start (the file released) moves the set");
+
+        // 4. a split set rolled back: a .bad- copy in the middle is held
+        put("tq-uniq-items-mv4.jsonl", "rows 4\n");
+        put("tq-uniq-items-mv4.csv", "csv 4\n");
+        put("tq-uniq-items-mv4.jsonl.bad-1", "bad 1\n");
+        put("tq-uniq-items-mv4.jsonl.bad-2", "bad 2\n");
+        held = CreateFileA((base + "\\tq-uniq-items-mv4.jsonl.bad-2").c_str(), GENERIC_READ,
+                           FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        m = utJournalMoveSet(base, "tq-uniq-items-mv4");
+        check(m.result == kUtMoveRolledBack && m.why.find("bad-2") != std::string::npos &&
+                  at("tq-uniq-items-mv4.csv") == "csv 4\n" && at("tq-uniq-items-mv4.jsonl.bad-1") == "bad 1\n" &&
+                  at("tq-uniq-items-mv4.jsonl") == "rows 4\n" &&
+                  !there("mods\\mv4\\tq-uniq-items-mv4.csv") && !there("mods\\mv4\\tq-uniq-items-mv4.jsonl.bad-1"),
+              "two files moved, the third failed: both rolled back, the .jsonl never left the root");
+        CloseHandle(held);
+
+        // 5. the start pass: only the mods' sets move
+        put("tq-uniq-items.jsonl", "main\n");
+        put("tq-uniq-items-custom.jsonl", "custom\n");
+        put("tq-uniq-items-mv5.jsonl", "rows 5\n");
+        utJournalMoveAll(base);
+        check(at("tq-uniq-items.jsonl") == "main\n" && at("tq-uniq-items-custom.jsonl") == "custom\n" &&
+                  !there("mods\\custom") && at("mods\\mv5\\tq-uniq-items-mv5.jsonl") == "rows 5\n" &&
+                  at("mods\\mv4\\tq-uniq-items-mv4.jsonl") == "rows 4\n",
+              "at start: the main game's and the custom set stay in the root, every mod's set moves");
+        check(at("tq-uniq-items-mv2.jsonl") == "root rows\n", "the taken one is still left alone");
+
+        // 6. a split set: the .jsonl's rename fails AND the .csv cannot be moved back
+        put("tq-uniq-items-mv6.jsonl", "rows 6\n");
+        put("tq-uniq-items-mv6.csv", "csv 6\n");
+        put("tq-uniq-items-mv6.jsonl.bad-1", "bad 6\n");
+        folders_detail::g_moveFileHook = [](const char* from, const char* to) -> bool {
+            const std::string f(from);
+            const bool jsonl = f.size() > 6 && f.compare(f.size() - 6, 6, ".jsonl") == 0;
+            const bool csvBack = f.find("\\mods\\mv6\\") != std::string::npos &&
+                                 f.compare(f.size() - 4, 4, ".csv") == 0;
+            if (jsonl || csvBack) {
+                SetLastError(jsonl ? ERROR_SHARING_VIOLATION : ERROR_ACCESS_DENIED);
+                return false;
+            }
+            return MoveFileExA(from, to, MOVEFILE_WRITE_THROUGH) != 0;
+        };
+        m = utJournalMoveSet(base, "tq-uniq-items-mv6");
+        folders_detail::g_moveFileHook = nullptr;
+        check(m.result == kUtMoveSplit && m.why.find("mv6.csv could NOT be moved back") != std::string::npos &&
+                  at("tq-uniq-items-mv6.jsonl") == "rows 6\n" && at("tq-uniq-items-mv6.jsonl.bad-1") == "bad 6\n" &&
+                  at("mods\\mv6\\tq-uniq-items-mv6.csv") == "csv 6\n" && !there("tq-uniq-items-mv6.csv") &&
+                  !there("mods\\mv6\\tq-uniq-items-mv6.jsonl"),
+              "a split set: the .jsonl never left the root, only the named .csv is in mods\\mv6\\");
+        check(utJournalSetRel(base, "tq-uniq-items-mv6") == "", "a split set is read from the root");
+        utJournalMoveLog("tq-uniq-items-mv6", m, "at start");
+        m = utJournalMoveSet(base, "tq-uniq-items-mv6");
+        check(m.result == kUtMoveDone && m.files.size() == 2 && at("mods\\mv6\\tq-uniq-items-mv6.jsonl") == "rows 6\n" &&
+                  at("mods\\mv6\\tq-uniq-items-mv6.csv") == "csv 6\n" &&
+                  at("mods\\mv6\\tq-uniq-items-mv6.jsonl.bad-1") == "bad 6\n" && !there("tq-uniq-items-mv6.jsonl"),
+              "the next start heals a split set: everything in mods\\mv6\\");
+
+        // 7. only a .csv in the way (a split remnant, then a session that wrote the root's .csv)
+        put("tq-uniq-items-mv7.jsonl", "rows 7\n");
+        put("tq-uniq-items-mv7.csv", "new csv 7\n");
+        CreateDirectoryA((base + "\\mods\\mv7").c_str(), nullptr);
+        put("mods\\mv7\\tq-uniq-items-mv7.csv", "old csv 7\n");
+        m = utJournalMoveSet(base, "tq-uniq-items-mv7");
+        check(m.result == kUtMoveTaken && m.blocker == "mods\\mv7\\tq-uniq-items-mv7.csv" && m.readRel == "" &&
+                  utJournalSetRel(base, "tq-uniq-items-mv7") == "" && at("tq-uniq-items-mv7.jsonl") == "rows 7\n" &&
+                  at("mods\\mv7\\tq-uniq-items-mv7.csv") == "old csv 7\n",
+              "a .csv in the way: refused, and the WARN names the root's journal as the one read");
+        utJournalMoveLog("tq-uniq-items-mv7", m, "at start");
+        DeleteFileA((base + "\\mods\\mv7\\tq-uniq-items-mv7.csv").c_str());
+        check(utJournalMoveSet(base, "tq-uniq-items-mv7").result == kUtMoveDone &&
+                  at("mods\\mv7\\tq-uniq-items-mv7.jsonl") == "rows 7\n" &&
+                  at("mods\\mv7\\tq-uniq-items-mv7.csv") == "new csv 7\n",
+              "the named file removed, the next start moves the set");
+
+        // 8. a crash between two renames: the .csv and .bad-1 in mods\mv8\, .bad-2 and the .jsonl in the root
+        CreateDirectoryA((base + "\\mods\\mv8").c_str(), nullptr);
+        put("mods\\mv8\\tq-uniq-items-mv8.csv", "csv 8\n");
+        put("mods\\mv8\\tq-uniq-items-mv8.jsonl.bad-1", "bad 8a\n");
+        put("tq-uniq-items-mv8.jsonl.bad-2", "bad 8b\n");
+        put("tq-uniq-items-mv8.jsonl", "rows 8\n");
+        check(utJournalSetRel(base, "tq-uniq-items-mv8") == "", "a crash remnant is read from the root");
+        m = utJournalMoveSet(base, "tq-uniq-items-mv8");
+        check(m.result == kUtMoveDone && m.files.size() == 2 && at("mods\\mv8\\tq-uniq-items-mv8.jsonl") == "rows 8\n" &&
+                  at("mods\\mv8\\tq-uniq-items-mv8.jsonl.bad-2") == "bad 8b\n" &&
+                  at("mods\\mv8\\tq-uniq-items-mv8.csv") == "csv 8\n" &&
+                  utJournalSetRel(base, "tq-uniq-items-mv8") == "mods\\mv8",
+              "the next start heals a crash remnant: everything in mods\\mv8\\");
+
+        // 9. the folder cannot be created (a FILE named mods\mv9)
+        put("tq-uniq-items-mv9.jsonl", "rows 9\n");
+        put("mods\\mv9", "a file\n");
+        m = utJournalMoveSet(base, "tq-uniq-items-mv9");
+        check(m.result == kUtMoveNoFolder && at("tq-uniq-items-mv9.jsonl") == "rows 9\n" &&
+                  utJournalSetRel(base, "tq-uniq-items-mv9") == "",
+              "no folder: nothing moved, read from the root");
+        utJournalMoveLog("tq-uniq-items-mv9", m, "at start");
+
+        // 10. a path that would not fit MAX_PATH is refused, never written under a cut name
+        check(!journalOpenSet("tq-uniq-items-mvl", 0, 0, false, std::string(240, 'x').c_str()) &&
+                  !journalUsable() && !there(std::string(240, 'x')),
+              "a set whose longest path passes MAX_PATH is refused");
+        const std::string logText = readAll((base + "\\test_journal.log").c_str());
+        (void)logText;
+    }
+
     ut::journalOpenSet(nullptr);
     ut::logShutdown();
+    {
+        const std::string logText = readAll((std::string(g_dir) + "\\test_journal.log").c_str());
+        check(logText.find("the journal tq-uniq-items-mv5 moved into mods\\mv5\\ (at start)") != std::string::npos &&
+                  logText.find("was NOT moved into mods\\mv2\\") != std::string::npos &&
+                  logText.find("the files already moved went back") != std::string::npos,
+              "the log says what moved, what was refused and what went back");
+        check(logText.find("the mod uses mods\\mv2\\tq-uniq-items-mv2.jsonl") != std::string::npos &&
+                  logText.find("the mod reads the root's tq-uniq-items-mv7.jsonl, which holds the rows") !=
+                      std::string::npos &&
+                  logText.find("Move or delete mods\\mv7\\tq-uniq-items-mv7.csv by hand") != std::string::npos,
+              "a refused move names the journal in use and the file in the way");
+        check(logText.find("could NOT be moved back to the root") != std::string::npos &&
+                  logText.find("the folder mods\\mv9 could not be created") != std::string::npos &&
+                  logText.find("A file in the way of that folder") != std::string::npos &&
+                  logText.find("would need paths of up to") != std::string::npos,
+              "the log says what split, which folder could not be made and which path was too long");
+    }
+    {   // journal_dir as the mod reads it (utJournalDirResolved): the same rule as the uninstall guard's
+        const std::string base = ut::utJournalDirResolved(g_dir);
+        const std::string q = std::string("\"") + g_dir;
+        char file[MAX_PATH];
+        _snprintf_s(file, sizeof(file), _TRUNCATE, "%s\\jd-a-file.txt", g_dir);
+        if (FILE* f = fopen(file, "wb")) fclose(f);
+        check(!base.empty() && base == g_dir, "journal_dir: an existing folder is taken as it is");
+        check(ut::utJournalDirResolved((std::string(g_dir) + "\\").c_str()) == base &&
+                  ut::utJournalDirResolved((std::string(g_dir) + "/ \\ ").c_str()) == base &&
+                  ut::utJournalDirResolved((q + "\"").c_str()) == base &&
+                  ut::utJournalDirResolved(q.c_str()) == base &&
+                  ut::utJournalDirResolved((q + "\\\"  ").c_str()) == base,
+              "journal_dir: trailing slashes, spaces and quotes cut, a leading quote alone cut");
+        check(ut::utJournalDirResolved(nullptr).empty() && ut::utJournalDirResolved("").empty() &&
+                  ut::utJournalDirResolved("\" \\").empty() &&
+                  ut::utJournalDirResolved((std::string(g_dir) + "\\no-such-folder").c_str()).empty() &&
+                  ut::utJournalDirResolved(file).empty(),
+              "journal_dir: empty, a missing folder or a file gives \"\" (the mod folder)");
+        DeleteFileA(file);
+    }
+    printf("\nR. relic and charm rows: takes by row, one shard per take, the crash window\n");
+    {
+        using namespace ut;
+        const std::string::size_type npos = std::string::npos;
+        const char* kRelic = "records\\xpack\\item\\relics\\01_act4_test.dbr";
+        const char* kRelicKey = "records/xpack/item/relics/01_act4_test.dbr";
+        const char* kBonus = "records\\xpack\\item\\relics\\bonus\\b_one.dbr";
+        auto rcap = [&](unsigned seed, unsigned var1, const char* bonus) {
+            UtReplicaCapture c = cap(kRelic, seed);
+            c.var1 = var1;
+            _snprintf_s(c.str[kUtIdRelicBonus], kUtIdStrMax, _TRUNCATE, "%s", bonus);
+            return c;
+        };
+        UtRelicRowFacts fx[16];
+        auto facts = [&]() { return (int)journalRowsOf(kRelicKey, fx, 16); };
+        auto redShards = [&]() { return utRelicRedShards(fx, facts()); };
+        auto lineOf = [&](const std::string& t, const char* needle) {
+            const size_t at = t.find(needle);
+            if (at == npos) return std::string();
+            const size_t b = t.rfind('\n', at);
+            const size_t e = t.find('\n', at);
+            return t.substr(b == npos ? 0 : b + 1, e == npos ? npos : e - (b == npos ? 0 : b + 1));
+        };
+        bool rb = false;
+        char p[MAX_PATH];
+
+        // R1. the green take by row: the oldest, a stale page refused
+        const char* Lg = "tq-uniq-items-rl1";
+        clean(Lg);
+        check(journalOpenSet(Lg), "set rl1");
+        unsigned long long g1 = 0, g2 = 0, g3 = 0, pp = 0;
+        journalDepositCommit(rcap(1, 3, kBonus), &g1, &rb);
+        journalDepositCommit(rcap(2, 3, kBonus), &g2, &rb);
+        journalDepositCommit(rcap(3, 3, kBonus), &g3, &rb);
+        check(journalRows(kRelicKey) == 3 && journalSaveObserved(now() + 10) == 3,
+              "three copies of one completed relic, saved");
+        check(!journalTakeRow(kRelicKey, g3, &rb) && journalPendingOut() == 0 && journalCount() == 3,
+              "a take naming the newest copy: refused (stale page), nothing changed");
+        check(journalTakeRow(kRelicKey, g1, &rb) && journalPendingOut() == 1 && journalRows(kRelicKey) == 2,
+              "a take naming the OLDEST copy: taken (pending out)");
+        int n = facts();
+        check(n == 3 && fx[utRelicGreenChoice(fx, n, kBonus)].seq == g2 && utRelicGreenCount(fx, n, kBonus) == 2,
+              "the slot now hands out the next oldest and counts 2 (the out row left out)");
+        check(!journalTakeRow(kRelicKey, g1, &rb) && !journalTakeRow(kRelicKey, 999999, &rb),
+              "the row taken already, or no such row: refused");
+        journalDepositCommit(rcap(4, 2, ""), &pp, &rb);
+        check(!journalTakeRow(kRelicKey, pp, &rb) && journalCount() == 4,
+              "a whole take of a 2-shard partial: refused (the red slot splits it)");
+        UtReplicaCapture got;
+        int pend = -1;
+        check(journalRowBySeq(g2, &got, &pend) && got.seed == 2 && got.var1 == 3 && pend == 0 &&
+                  !strcmp(got.str[kUtIdRelicBonus], kBonus) && !journalRowBySeq(999999, &got, &pend),
+              "journalRowBySeq: the row's identity and state; an unknown seq -> false");
+
+        // R1b. a dropped piece reads var1 0 = ONE shard: counted 1, handed out whole, byte-exact
+        {
+            const char* kSetZero = "tq-uniq-items-rl0";
+            clean(kSetZero);
+            check(journalOpenSet(kSetZero), "set rl0");
+            unsigned long long z = 0, two = 0, zout = 0;
+            unsigned zleft = 9;
+            journalDepositCommit(rcap(13134, 0, ""), &z, &rb);
+            journalDepositCommit(rcap(25, 2, ""), &two, &rb);
+            check(journalSaveObserved(now() + 10) == 2 && redShards() == 1 + 2,
+                  "a var1 0 piece and a 2/3 piece, saved: the red count is 3 shards");
+            bool sp0 = true;
+            int n0 = facts();
+            const int src0 = utRelicShardSource(fx, n0, &sp0);
+            check(src0 >= 0 && fx[src0].seq == z && !sp0,
+                  "the shard source is the var1 0 row, handed out whole (not split)");
+            check(journalTakeShard(kRelicKey, z, &zout, &zleft, &rb) && zout == z && zleft == 0u &&
+                      journalCount() == 2 && journalPendingOut() == 1 && redShards() == 2,
+                  "the take: the var1 0 row itself goes out, no row appended; 2 shards stay");
+            UtReplicaCapture g0;
+            int pend0 = -1;
+            check(journalRowBySeq(z, &g0, &pend0) && g0.var1 == 0u && g0.seed == 13134u && pend0 == 2 &&
+                      !g0.str[kUtIdRelicBonus][0],
+                  "the row handed out keeps var1 0 and its seed (the item the slot hands out, byte-exact)");
+            char p0[MAX_PATH];
+            pathOf(kSetZero, "jsonl", p0);
+            const std::string t0 = readAll(p0);
+            const std::string lo = lineOf(t0, "\"pending\":\"out\"");
+            check(!lo.empty() && lo.find("\"seed\":13134,\"var1\":0,") != npos,
+                  "on disk: the out row is the stored var1 0 row");
+        }
+
+        // R2. a split from a SETTLED row: the rows and the bytes
+        unsigned long long sp = 0, ss = 0;
+        unsigned left = 0;
+        auto settledSplit = [&](const char* L) {
+            clean(L);
+            bool ok = journalOpenSet(L);
+            ok = ok && journalDepositCommit(rcap(7, 2, ""), &sp, &rb) && journalSaveObserved(now() + 10) == 1;
+            return ok && journalTakeShard(kRelicKey, sp, &ss, &left, &rb) && ss != sp && left == 1u;
+        };
+        check(settledSplit("tq-uniq-items-rl2"), "a settled 2/3 piece: one shard taken (split), 1 left");
+        check(!journalTakeShard(kRelicKey, ss, nullptr, nullptr, &rb), "a shard take naming the out row: refused");
+        n = facts();
+        check(n == 2 && fx[0].seq == sp && fx[0].var1 == 1 && fx[0].pending == 0 && fx[1].seq == ss &&
+                  fx[1].var1 == 1 && fx[1].pending == 2 && redShards() == 1,
+              "rows: the source keeps its seq with 1 shard (settled), the shard row is out; red count 1");
+        pathOf("tq-uniq-items-rl2", "jsonl", p);
+        std::string t = readAll(p);
+        std::string lr = lineOf(t, "\"pending\":\"out\"");
+        const size_t firstRow = t.find('\n') + 1;
+        std::string ls = t.substr(firstRow, t.find('\n', firstRow) - firstRow);
+        check(!lr.empty() && lr.find("\"seed\":7,\"var1\":1,") != npos && lr.find("\"taken\":\"") != npos &&
+                  ls.find("\"seed\":7,\"var1\":1,") != npos && ls.find("\"pending\"") == npos &&
+                  fieldText(ls, "deposited") == fieldText(lr, "deposited") && t.find("depositedVar1") == npos,
+              "on disk: the source 1 shard settled, the shard row var1 1 out, the same deposit time and seed");
+        UtReplicaCapture src, shard;
+        check(journalRowBySeq(sp, &src, nullptr) && journalRowBySeq(ss, &shard, nullptr) &&
+                  utReplicaSame(src, shard),
+              "the shard row's identity is the source's with var1 1 (the item handed out)");
+        unsigned long long whole = 0;
+        check(journalTakeShard(kRelicKey, sp, &whole, &left, &rb) && whole == sp && left == 0u &&
+                  journalPendingOut() == 2 && redShards() == 0,
+              "the next shard: the 1-shard source is taken WHOLE (no split)");
+
+        // R3. the settled source's events (design table 5.3, every row exact)
+        check(settledSplit("tq-uniq-items-rl3") && journalSaveObserved(now() + 10) == 1 &&
+                  journalCount() == 1 && redShards() == 1,
+              "a save after the take: the shard row erased, the source untouched (1 + the save's 1)");
+        check(settledSplit("tq-uniq-items-rl4"), "split again (rl4)");
+        journalSetHeldSeq(ss);
+        check(journalSaveObserved(now() + 10) == 0 && journalPendingOut() == 1,
+              "a save while the shard is on the cursor: the shard row kept");
+        journalSetHeldSeq(0);
+        check(journalTouchOut(ss) && journalSaveObserved(now() + 10) == 1 && journalCount() == 1,
+              "it leaves the cursor, the next save erases it");
+        check(settledSplit("tq-uniq-items-rl5"), "split again (rl5)");
+        unsigned long long back = 0;
+        check(journalDepositCommit(rcap(7, 1, ""), &back, &rb) && back == ss && journalPendingOut() == 0 &&
+                  journalCount() == 2 && redShards() == 2,
+              "the shard dropped back before a save: the take is cancelled, 1 + 1 shards in two rows");
+        check(settledSplit("tq-uniq-items-rl6"), "split again (rl6)");
+        journalFlushNow();
+        check(journalOpenSet("tq-uniq-items-tb") && journalOpenSet("tq-uniq-items-rl6", 1, now() + 1000) &&
+                  journalCount() == 2 && journalPendingOut() == 0 && redShards() == 2,
+              "a crash, a load by save times: the shard row RESTORED - 2 shards, exact");
+        for (int present = 0; present < 2; ++present) {
+            const char* L = present ? "tq-uniq-items-rl7" : "tq-uniq-items-rl8";
+            check(settledSplit(L), "split again (deferred)");
+            journalFlushNow();
+            journalOpenSet("tq-uniq-items-tb");
+            journalOpenSet(L, 0, 0, true);
+            UtPendingRow pr[4];
+            const size_t np = journalUnresolvedRows(pr, 4);
+            UtVerdictItem v = {np ? pr[0].seq : 0, np ? utPendingVerdict(pr[0].state,
+                                                                        present ? kUtFoundPresent : kUtFoundAbsent)
+                                                      : 0, present ? "inventory" : nullptr};
+            check(np == 1 && pr[0].state == 2 && pr[0].id.var1 == 1u && pr[0].id.seed == 7u &&
+                      journalApplyVerdicts(&v, 1) == 1 && journalCount() == (present ? 1u : 2u) &&
+                      journalUnresolved() == 0,
+                  present ? "deferred load, the shard found: its row erased (1 shard left)"
+                          : "deferred load, the shard nowhere: its row restored (2 shards)");
+        }
+
+        // R4. a split from a row PENDING IN (no save since its deposit)
+        auto inSplit = [&](const char* L) {
+            clean(L);
+            bool ok = journalOpenSet(L) && journalDepositCommit(rcap(9, 3, ""), &sp, &rb);
+            return ok && journalTakeShard(kRelicKey, sp, &ss, &left, &rb) && ss != sp && left == 2u;
+        };
+        check(inSplit("tq-uniq-items-ri1"), "a 3-shard piece pending in: one shard taken (split), 2 left");
+        pathOf("tq-uniq-items-ri1", "jsonl", p);
+        t = readAll(p);
+        check(t.find("\"var1\":2,\"var2\":0,\"b8\":0,\"pending\":\"in\",\"depositedVar1\":3}") != npos &&
+                  t.find("\"var1\":1,\"var2\":0,\"b8\":0,\"pending\":\"out\",\"taken\":\"") != npos,
+              "on disk: the source 2 shards pending in with depositedVar1 3, the shard row out");
+        check(journalTakeShard(kRelicKey, sp, &ss, &left, &rb) && left == 1u &&
+                  readAll(p).find("\"pending\":\"in\",\"depositedVar1\":3}") != npos,
+              "a second split keeps depositedVar1 3 (the count the character file holds)");
+        check(journalSaveObserved(now() + 10) == 3 && journalFlushNow() && journalCount() == 1 &&
+                  redShards() == 1 && readAll(p).find("depositedVar1") == npos,
+              "a save after the takes: the source settles (the key goes), both shard rows erased");
+        check(inSplit("tq-uniq-items-ri2"), "split again (ri2)");
+        journalSetHeldSeq(ss);
+        check(journalSaveObserved(now() + 10) == 1 && journalPendingIn() == 0 && journalPendingOut() == 1,
+              "a save while the shard is on the cursor: the source settles, the shard row kept");
+        journalSetHeldSeq(0);
+        check(inSplit("tq-uniq-items-ri3") && journalDepositCommit(rcap(9, 1, ""), &back, &rb) && back == ss &&
+                  journalPendingOut() == 0 && journalPendingIn() == 1 && redShards() == 3,
+              "the shard dropped back before a save: cancelled; the source still pending in");
+        check(inSplit("tq-uniq-items-ri4"), "split again (ri4)");
+        journalFlushNow();
+        journalOpenSet("tq-uniq-items-tb");
+        journalOpenSet("tq-uniq-items-ri4", 0, 0, true);
+        {
+            UtPendingRow pr[4];
+            const size_t np = journalUnresolvedRows(pr, 4);
+            int ri = -1, si = -1;
+            for (size_t i = 0; i < np; ++i) (pr[i].state == 1 ? ri : si) = (int)i;
+            check(np == 2 && ri >= 0 && si >= 0 && pr[ri].id.var1 == 3u && pr[si].id.var1 == 1u,
+                  "a crash, a deferred load: the source is looked for with depositedVar1 3, the shard with 1");
+            UtVerdictItem v[2] = {{pr[ri >= 0 ? ri : 0].seq, utPendingVerdict(1, kUtFoundPresent), "inventory"},
+                                  {pr[si >= 0 ? si : 0].seq, utPendingVerdict(2, kUtFoundAbsent), nullptr}};
+            check(journalApplyVerdicts(v, 2) == 2 && journalCount() == 1 && redShards() == 1,
+                  "the 3/5 piece is in the bags: the source erased, the shard restored (the taken shard "
+                  "is the named duplicate, never a loss)");
+        }
+        check(inSplit("tq-uniq-items-ri5"), "split again (ri5)");
+        journalFlushNow();
+        journalOpenSet("tq-uniq-items-tb");
+        journalOpenSet("tq-uniq-items-ri5", 0, 0, true);
+        check(journalUnresolvedFallback("test") == 2 && journalCount() == 2 && journalPendingIn() == 1 &&
+                  journalPendingOut() == 0,
+              "the check cannot run: today's rule - the shard restored, the source reported");
+        journalFlushNow();
+        pathOf("tq-uniq-items-ri5", "jsonl", p);
+        check(readAll(p).find("\"pending\":\"in\",\"depositedVar1\":3}") != npos,
+              "depositedVar1 round-trips through a reload and a write");
+        check(journalSaveObserved(now() + 10) == 1 && journalPendingIn() == 0 && redShards() == 3,
+              "the next save settles the source: 2 + 1 shards (all 3 duplicated at worst - today's case)");
+
+        // R5. a failed write puts the pre-image back
+        clean("tq-uniq-items-rf");
+        check(journalOpenSet("tq-uniq-items-rf") && journalDepositCommit(rcap(5, 3, ""), &sp, &rb),
+              "set rf: one 3-shard piece pending in");
+        pathOf("tq-uniq-items-rf", "jsonl", p);
+        const std::string before = readAll(p);
+        HANDLE lock = CreateFileA(p, GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        rb = false;
+        const bool took = journalTakeShard(kRelicKey, sp, &ss, &left, &rb);
+        if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
+        n = facts();
+        check(lock != INVALID_HANDLE_VALUE && !took && rb && ss == 0 && n == 1 && fx[0].var1 == 3 &&
+                  fx[0].pending == 1 && readAll(p) == before,
+              "the file locked: the split fails, rolled back - one row of 3 shards, the bytes unchanged");
+        journalFlushNow();
+
+        // R6. identical rows against the containers: k = 3 rows of one identity, m live items
+        for (int state = 1; state <= 2; ++state) {
+            for (int m = 0; m <= 3; ++m) {
+                char L[64];
+                _snprintf_s(L, sizeof(L), _TRUNCATE, "tq-uniq-items-rk%d%d", state, m);
+                clean(L);
+                journalOpenSet(L);
+                for (int k = 0; k < 3; ++k) journalDepositCommit(rcap(11, 1, ""), &sp, &rb);
+                if (state == 2) {
+                    journalSaveObserved(now() + 10);
+                    for (int k = 0; k < 3; ++k) {
+                        n = facts();
+                        bool sx = false;
+                        const int s = utRelicShardSource(fx, n, &sx);
+                        if (s >= 0) journalTakeShard(kRelicKey, fx[s].seq, &ss, &left, &rb);
+                    }
+                }
+                journalFlushNow();
+                journalOpenSet("tq-uniq-items-tb");
+                journalOpenSet(L, 0, 0, true);
+                UtPendingRow pr[4];
+                const size_t np = journalUnresolvedRows(pr, 4);
+                const UtReplicaCapture* ids[4];
+                int found[4] = {0, 0, 0, 0};
+                for (size_t i = 0; i < np; ++i) ids[i] = &pr[i].id;
+                const UtReplicaCapture live = rcap(11, 1, "");
+                for (int j = 0; j < m; ++j) {
+                    const int hit = utMatchLive(ids, found, (int)np, live);
+                    if (hit >= 0) found[hit] = 1;
+                }
+                UtVerdictItem v[4];
+                for (size_t i = 0; i < np; ++i) {
+                    v[i].seq = pr[i].seq;
+                    v[i].verdict = utPendingVerdict(pr[i].state, found[i] ? kUtFoundPresent : kUtFoundAbsent);
+                    v[i].where = found[i] ? "inventory" : nullptr;
+                }
+                const int applied = journalApplyVerdicts(v, np);
+                char what[160];
+                _snprintf_s(what, sizeof(what), _TRUNCATE,
+                            "3 identical rows pending %s against %d live item(s): %d erased, %d %s", state == 1 ? "in" : "out",
+                            m, m, 3 - m, state == 1 ? "settled" : "restored");
+                check(np == 3 && applied == 3 && journalCount() == (size_t)(3 - m) && journalUnresolved() == 0 &&
+                          journalPendingIn() == 0 && journalPendingOut() == 0,
+                      what);
+            }
+        }
+
+        // R7. the downgrade: a journal this build wrote, read by a reader that skips depositedVar1
+        clean("tq-uniq-items-rd");
+        check(journalOpenSet("tq-uniq-items-rd") && journalDepositCommit(rcap(21, 3, ""), &sp, &rb) &&
+                  journalTakeShard(kRelicKey, sp, &ss, &left, &rb) && journalDepositCommit(rcap(22, 2, ""), &pp, &rb),
+              "set rd: a split row pending in (depositedVar1 3), its shard out, a 2/3 piece");
+        pathOf("tq-uniq-items-rd", "jsonl", p);
+        std::string fixture = readAll(p);
+        {   // the 2/3 piece is made settled in the text: its "pending":"in" is the file's last one
+            const size_t lastIn = fixture.rfind(",\"pending\":\"in\"}");
+            if (lastIn != npos) fixture.erase(lastIn, strlen(",\"pending\":\"in\""));
+        }
+        const std::string key = ",\"depositedVar1\":3";
+        std::string stripped = fixture;
+        const size_t kat = stripped.find(key);
+        if (kat != npos) stripped.erase(kat, key.size());
+        check(kat != npos && fixture.find("\"seed\":22,\"var1\":2,\"var2\":0,\"b8\":0}") != npos,
+              "the fixture: a settled 2/3, a split row pending in with depositedVar1, a shard row out");
+        std::string written[2];
+        const char* leaves[2] = {"tq-uniq-items-rdn", "tq-uniq-items-rdo"};
+        for (int k = 0; k < 2; ++k) {
+            clean(leaves[k]);
+            pathOf(leaves[k], "jsonl", p);
+            writeAll(p, k == 0 ? fixture : stripped);
+            journalOpenSet("tq-uniq-items-tb");
+            journalOpenSet(leaves[k], 0, 0, true);
+            n = facts();
+            journalFlushNow();
+            check(journalCount() == 3 && n == 3 && countBad(leaves[k]) == 0,
+                  k == 0 ? "this build reads the three rows" : "the key stripped (today's reader): the same three rows");
+            const std::string w = readAll(p);
+            written[k] = w.substr(w.find('\n') + 1);
+        }
+        std::string expect = written[0];
+        const size_t wk = expect.find(key);
+        if (wk != npos) expect.erase(wk, key.size());
+        check(wk != npos && written[1] == expect,
+              "written back: every row byte-equal except the key (the out row restored by the same load rule)");
+        stripped = fixture;
+        if (kat != npos) stripped.replace(kat, key.size(), ",\"depositedVar1\":-1");
+        clean("tq-uniq-items-rdb");
+        pathOf("tq-uniq-items-rdb", "jsonl", p);
+        writeAll(p, stripped);
+        journalOpenSet("tq-uniq-items-rdb", 0, 0, true);
+        journalFlushNow();
+        check(journalCount() == 3 && readAll(p).find("depositedVar1") == npos,
+              "a depositedVar1 that is not a plain number: the row kept, the key dropped");
+        journalOpenSet(nullptr);
+    }
+
     printf("\n%s - %d passed, %d failed\n", g_fail ? "JOURNAL TESTS FAILED" : "ALL PASS", g_pass,
            g_fail);
     return g_fail ? 1 : 0;

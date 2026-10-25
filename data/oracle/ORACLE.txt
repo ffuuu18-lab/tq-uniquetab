@@ -11,12 +11,28 @@ marks data\oracle\ as -text so git keeps the real bytes (a fresh clone must not 
 
 To regenerate (the game folder from %TQ_GAME_DIR%, else the Steam registry; read only):
 
-    python tools\build_catalogue.py      catalogue.json (not tracked), catalogue-stats.md,
-                                         uniq-records.txt, uniq-groups.txt, uniq-excluded.txt
+    python tools\reach_scan.py --write-placed src\gen\placed_records.h
+                                         first, and only after a game update: the catalogue
+                                         records the level files place directly and the ones no path reaches, which both
+                                         generators read (EXCLUDE rule 7); the reach assertion in
+                                         tools\build_test_catalogue.bat fails while it is stale
+    python tools\build_catalogue.py --collect-mi catalogue.json (not tracked), catalogue-stats.md,
+                                         uniq-records.txt, uniq-groups.txt, uniq-excluded.txt,
+                                         uniq-relics.txt (the relic and charm list; the harness's
+                                         --ensure compares the DLL's with it)
     python tools\pack_catalogue.py       catalogue.bin (format GDUT v2) from catalogue.json
+                                         (the shipped default collect_mi=1: the monster infrequents)
+    python tools\build_catalogue.py --out <tmp>, then tools\pack_catalogue.py --in <tmp>\catalogue.json
+                                         --out <tmp>\catalogue.bin: the collect_mi=0 cut; copy its catalogue.bin
+                                         and three lists into nomi\ (the harness compares the DLL's
+                                         collect_mi=0 output with them)
     python tools\ui_slotart.py --oracle data\oracle\slotart.txt
                                          slotart.txt (the equipment window's slot positions,
                                          which the viewgate suite compares with src\ut_slotart.h)
+    python tools\build_catalogue.py --buttons-default data\oracle\uniq-groups.txt data\oracle\uniquetab-buttons.ini
+                                         uniquetab-buttons.ini: the default buttons file the DLL writes
+                                         at the first open of the tab (test_buttons compares the C++
+                                         utbDefaultText with it byte for byte); after uniq-groups.txt
 
 and then run tools\build_test_catalogue.bat and build_model.bat. A mod folder the DLL wrote can
 be checked against these files with:

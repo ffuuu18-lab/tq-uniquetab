@@ -83,6 +83,26 @@ inline bool utReplicaBuild(UtReplica* r, const char* record) {
     return true;
 }
 
+// The synthetic replica of a relic / charm slot that holds nothing: utReplicaBuild's, plus var1
+// (+0x80) = the shard count and relicBonus (+0x64) = `bonus` as its table spells it (case and
+// slashes kept; a text of 16 bytes or more lives in the replica's own buffer). The red slot's is
+// (record, 1, ""), a 1-shard piece; a green slot's is (record, N, its bonus), the completed item
+// with that bonus. False as utReplicaBuild, or when the bonus is too long or not printable.
+inline bool utReplicaBuildRelic(UtReplica* r, const char* record, unsigned var1, const char* bonus) {
+    if (!utReplicaBuild(r, record)) return false;
+    memset(r->longStr, 0, sizeof(r->longStr));
+    const char* b = bonus ? bonus : "";
+    const size_t n = strlen(b);
+    if (n > kUtReplicaMaxBase) return false;
+    for (size_t i = 0; i < n; ++i) {
+        const unsigned char c = (unsigned char)b[i];
+        if (c < 0x20 || c >= 0x7F) return false;
+    }
+    utVsStringSet(r->bytes + kUtReplicaStr[kUtIdRelicBonus], b, (unsigned)n, r->longStr[kUtIdRelicBonus]);
+    memcpy(r->bytes + kUtReplicaVar1, &var1, 4);
+    return true;
+}
+
 // ---- a replica from a journal row's IDENTITY, and back -----------------------------------
 // The seven strings byte-exact (the base is NOT converted: the row keeps the engine's own
 // spelling), seed / var1 / var2 at +0x7C / +0x80 / +0xB4, the +0xB8 byte; raw0 (an object id)
@@ -164,6 +184,14 @@ namespace ut {
 // ---- the engine half (ut_proto.cpp). Game thread only. ---------------------------------------
 // (kUtProtoMax and UtProtoPlace moved to ut_protoshift.h, unchanged.)
 
+// The grid in force's cells (ut_view viewSetGrid, game thread): the mod sack is SetDims'd to them
+// before every build; 16 x 15 is the derived grid.
+void protoSetGrid(int cols, int rows);
+// The page refresh's POST: the mod sack `s` re-dimmed to the grid in force (the engine has just
+// set 16 x 15). False when `s` is not the mod sack or SetDims did not give the cells; the live
+// cell in *cw / *ch.
+bool protoGridReapply(TqSack* s, unsigned* cw, unsigned* ch);
+
 // The mod sack: constructed on first use with the exported ctor (the object registers itself as
 // an options listener, so it lives on the PROCESS heap and is never freed), then sized 16 x 15
 // with SetDims from its own cell size. Null when anything about it is not as expected.
@@ -213,6 +241,11 @@ const void* protoItem(int i);
 // and a record with none as a bare prototype (dim). This says which: `seq` = the row (0 = bare).
 bool protoLookup(unsigned id, const char** record, unsigned long long* seq);
 bool protoAtSeq(int i, unsigned long long* seq);
+// The relic place key of prototype `id` (UtProtoPlace::slot: 0 = a unique's place, 1 = a relic's
+// red slot, 2 + i = its bonus i). False = not a live prototype.
+bool protoSlotOf(unsigned id, int* slot);
+// The same for prototype i (the last page's order). False past the end.
+bool protoSlotKindAt(int i, int* slot);
 // The take: the prototype `id` leaves the mod sack (InventorySack::RemoveItem on the MOD sack,
 // never a real one) and the mod forgets it WITHOUT destroying it - the object is the player's
 // item now. False when `id` is not a live prototype or the removal failed.
@@ -272,6 +305,10 @@ unsigned protoIdAtSlotCell(int col, int row);
 // original, the engine's own auto-place), else left in the sack, which is then retired (never
 // destroyed). ERROR per foreign id. `worldGone`: no return is tried (the world took the objects).
 int protoSweepForeign(bool worldGone);
+
+// The object is an Item: its vtable's GetItemReplicaInfo slot holds Item's own implementation -
+// the test every capture makes before that virtual call. Pure reads; any thread.
+bool protoIsItem(const void* obj);
 
 }  // namespace ut
 #endif

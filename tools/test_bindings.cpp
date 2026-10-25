@@ -38,6 +38,8 @@
 
 #include "../src/tq_exports.h"
 #include "../src/ut_bindings.h"
+#include "../src/ut_inputrec.h"
+#include "../src/ut_depositgate.h"   // the (another roll) getters' decoders
 
 namespace {
 
@@ -287,6 +289,56 @@ void runExportHalf(const std::string& game, Pe* engine, Pe* gamedll) {
            "the key gate: Display::HandleKeyEvent (a clean 5-byte prologue) and ButtonEvent::GetText",
            detail);
     }
+    {   // the game switch: Engine::InitializeMod and Engine::CleanseDatabase, where they are and the
+        // partition InitializeMod empties (partition 0 - the gray folder is a partition-1 source)
+        const unsigned long im = engine->fnRva(TQ_ENGINE_INITIALIZEMOD);
+        const unsigned long cl = engine->fnRva(TQ_ENGINE_CLEANSEDATABASE);
+        const unsigned long rm = engine->fnRva("?RemoveSourcesFromPartition@FileSystem@GAME@@QAEXW4Partition@12@@Z");
+        const unsigned char* pi = (const unsigned char*)engine->fn(TQ_ENGINE_INITIALIZEMOD);
+        const unsigned char* pc = (const unsigned char*)engine->fn(TQ_ENGINE_CLEANSEDATABASE);
+        // push esi; mov esi,ecx; cmp byte [esi+0x938],0 - the flag InitializeMod sets
+        static const unsigned char kCl[10] = {0x56, 0x8B, 0xF1, 0x80, 0xBE, 0x38, 0x09, 0x00, 0x00, 0x00};
+        static const unsigned char kRet8[3] = {0xC2, 0x08, 0x00};
+        unsigned long callee = 0;
+        bool push0 = false;
+        if (pi) {
+            push0 = pi[0xFA] == 0x6A && pi[0xFB] == 0x00;   // push 0 (the partition)
+            if (pi[0x111] == 0xE8) {
+                long rel = 0;
+                memcpy(&rel, pi + 0x112, 4);
+                callee = (unsigned long)((long)(im + 0x111 + 5) + rel);
+            }
+        }
+        _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                    "InitializeMod rva 0x%lX, CleanseDatabase rva 0x%lX, the call at +0x111 -> 0x%lX "
+                    "(RemoveSourcesFromPartition 0x%lX), partition %s",
+                    im, cl, callee, rm, push0 ? "0" : "?");
+        ok(im == 0x1413C0 && cl == 0x145790 && pi && pc && !memcmp(pc, kCl, sizeof(kCl)) &&
+               !memcmp(pi + 0x2FE, kRet8, 3) && rm && callee == rm && push0 &&
+               TQ_ENGINE_INITIALIZEMOD_CC == TQCC_THISCALL && TQ_ENGINE_CLEANSEDATABASE_CC == TQCC_THISCALL,
+           "the game switch: Engine::InitializeMod (ret 8, empties partition 0) and Engine::CleanseDatabase",
+           detail);
+    }
+    {   // the "(another roll)" line: Item::GetPrefixName / GetSuffixName, their bytes and convention
+        const unsigned long pr = gamedll->fnRva(TQ_ITEM_GETPREFIXNAME);
+        const unsigned long sr = gamedll->fnRva(TQ_ITEM_GETSUFFIXNAME);
+        const unsigned xp = ut::utRollGetterOffset(gamedll->fn(TQ_ITEM_GETPREFIXNAME));
+        const unsigned xs = ut::utRollGetterOffset(gamedll->fn(TQ_ITEM_GETSUFFIXNAME));
+        const unsigned rr = ut::utReplicaGetterOffset(gamedll->fn(TQ_ITEM_GETITEMREPLICAINFO));
+        _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                    "GetPrefixName rva 0x%lX reads this+0x%X, GetSuffixName rva 0x%lX reads this+0x%X, "
+                    "the replica at this+0x%X",
+                    pr, xp, sr, xs, rr);
+        // the replica's prefix / suffix strings sit at +0x1C / +0x34 (ut_proto.h kUtReplicaStr[1] / [2])
+        ok(pr == 0x1B8970 && sr == 0x1B8990 && rr != 0 && xp == rr + 0x1C && xs == rr + 0x34 &&
+               TQ_ITEM_GETPREFIXNAME_CC == TQCC_THISCALL && TQ_ITEM_GETSUFFIXNAME_CC == TQCC_THISCALL &&
+               strstr(TQ_ITEM_GETPREFIXNAME, "@QAEPBDXZ") != nullptr &&
+               strstr(TQ_ITEM_GETSUFFIXNAME, "@QAEPBDXZ") != nullptr &&
+               TQ_ITEM_GETPREFIXNAME_REQ == 0 && TQ_ITEM_GETSUFFIXNAME_REQ == 0,
+           "the (another roll) getters: Item::GetPrefixName / GetSuffixName return the c_str of the "
+           "replica's prefix / suffix (non-const __thiscall QAEPBDXZ, optional)",
+           detail);
+    }
 }
 
 // ---- cases 2 and 3: the decoders and the vftable slots, over Game.dll ----------------------------
@@ -353,6 +405,20 @@ void runDecoderHalf(const Pe& game) {
         ok(off == slots[i].expect, slots[i].what, detail);
     }
 
+    // -- ItemRelic::GetUIBitmapText: slot +0x144 of ??_7ItemRelic and of ??_7ItemCharm, its head --
+    {
+        const std::vector<unsigned> rv = game.vtable(game.fnRva(TQ_RELIC_VFTABLE), 512);
+        const std::vector<unsigned> cv = game.vtable(game.fnRva(TQ_CHARM_VFTABLE), 512);
+        const size_t k = ut::kUtRelicTextSlot / 4;
+        const unsigned fr = k < rv.size() ? rv[k] : 0;
+        const bool same = fr && k < cv.size() && cv[k] == fr;
+        const unsigned char* fb = fr ? game.at(fr) : nullptr;
+        _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                    "+0x%X of %u in ??_7ItemRelic -> rva 0x%X (AE 2.10 recorded 0x1C3B80), ItemCharm's "
+                    "the same %d", ut::kUtRelicTextSlot, (unsigned)rv.size(), fr, same ? 1 : 0);
+        ok(same && fb && ut::utRelicTextHead(fb), "relic.bitmapTextSlot", detail);
+    }
+
     // -- the eight CursorHandlerItemMove capability slots -> one shared stub ----------------------
     const unsigned long stub = game.fnRva(TQ_CURSOR_ISSTASHCAPABLE);
     const bool same = stub && stub == game.fnRva(TQ_CURSOR_ISTRANSFERCAPABLE) &&
@@ -386,12 +452,14 @@ void runExeHalf(const Pe& exe) {
         ok(false, "TQ.exe .text", "TQ.exe has no executable section");
         return;
     }
-    const ut::UtBindPattern* sigs[8] = {&ut::kUtSigTransferPage, &ut::kUtSigStreamOut,
+    const ut::UtBindPattern* sigs[10] = {&ut::kUtSigTransferPage, &ut::kUtSigStreamOut,
                                         &ut::kUtSigRightClick, &ut::kUtSigHeldPickup,
                                         &ut::kUtSigLeftClick, &ut::kUtSigLeftHandler,
                                         &ut::kUtSigPageDraw,   // the slot plates
-                                        &ut::kUtSigItemBackground};   // the rect route
-    for (int i = 0; i < 8; ++i) {
+                                        &ut::kUtSigItemBackground,   // the rect route
+                                        &ut::kUtSigRollDraw,   // the screen parts' draw site
+                                        &ut::kUtSigTransferSort};   // the sort block
+    for (int i = 0; i < 10; ++i) {
         const unsigned char* hits[4] = {nullptr, nullptr, nullptr, nullptr};
         const int n = ut::utBindScan(lo, hi, *sigs[i], hits, 4);
         const unsigned long rva = hits[0] ? (unsigned long)(hits[0] - lo) + va : 0;
@@ -534,6 +602,64 @@ void runRectRouteHalf(const Pe& exe) {
     _snprintf_s(detail, sizeof(detail), _TRUNCATE, "%d of 4 item-widget vtables hold TQ.exe+0x%X at +0x88",
                 held, (unsigned)ut::kUtSigItemBackground.rva210);
     ok(held == 4, "exe.itemBackground is the item widgets' background slot", detail);
+    // exe.rolloverDraw: the item rollover's vtable (0x2223E0, the HUD member +0x48240) holds it at
+    // +0x0C, and the HUD's pass-0 draw (0x131600) draws the caravan (lea ecx,[edi+0x4838C]) once
+    // and the rollover (lea ecx,[edi+0x48240]) once, after it, each through `FF 50 0C`.
+    const size_t ro = exe.toFile(0x2223E0 + 0x0C);
+    const bool slot = ro && ro + 4 <= exe.raw.size() &&
+                      *(const unsigned long*)&exe.raw[ro] == exe.imageBase + ut::kUtSigRollDraw.rva210;
+    _snprintf_s(detail, sizeof(detail), _TRUNCATE, "vtable 0x2223E0 +0x0C %s TQ.exe+0x%X",
+                slot ? "holds" : "does NOT hold", (unsigned)ut::kUtSigRollDraw.rva210);
+    ok(slot, "exe.rolloverDraw is the HUD item rollover's Draw slot", detail);
+    // exe.transferSortButton: the Transfer page's vtable run 0x21D1C0 holds the page draw at +0x0C,
+    // the page accessor (GetPlayerTransfer) at +0x20 and this handler at +0x144; the other
+    // caravan page's twin (0x4C1B70, no purchase button) sits in the run 0x21CFD8 at +0x12C.
+    {
+        const unsigned long want[3][2] = {{0x0C, ut::kUtSigPageDraw.rva210},
+                                          {0x20, ut::kUtSigTransferPage.rva210},
+                                          {0x144, ut::kUtSigTransferSort.rva210}};
+        int held3 = 0;
+        for (int i = 0; i < 3; ++i) {
+            const size_t o = exe.toFile(0x21D1C0 + want[i][0]);
+            if (o && o + 4 <= exe.raw.size() &&
+                *(const unsigned long*)&exe.raw[o] == exe.imageBase + want[i][1])
+                ++held3;
+        }
+        _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                    "%d of 3: vtable 0x21D1C0 +0x0C page draw, +0x20 accessor, +0x144 TQ.exe+0x%X",
+                    held3, (unsigned)ut::kUtSigTransferSort.rva210);
+        ok(held3 == 3, "exe.transferSortButton is the Transfer page's button handler", detail);
+        const size_t lo2 = exe.toFile(ut::kUtSigTransferSort.rva210 + 0x20);
+        const bool lea = lo2 && lo2 + 6 <= exe.raw.size() && exe.raw[lo2] == 0x8D &&
+                         exe.raw[lo2 + 1] == 0x81 && *(const long*)&exe.raw[lo2 + 2] == -0xB08;
+        ok(lea, "exe.transferSortButton.widget: lea eax,[ecx-0xB08] at +0x20",
+           lea ? "the sort widget at this-0xB08" : "NOT the expected lea");
+    }
+    const size_t f0 = exe.toFile(0x131600), f1 = exe.toFile(0x132D59);
+    long at[2] = {-1, -1};
+    int cnt[2] = {0, 0};
+    const unsigned long mem[2] = {0x4838C, 0x48240};
+    if (f0 && f1 > f0 && f1 <= exe.raw.size()) {
+        for (size_t i = f0; i + 6 <= f1; ++i) {
+            for (int m = 0; m < 2; ++m) {
+                if (exe.raw[i] != 0x8D || exe.raw[i + 1] != 0x8F ||
+                    *(const unsigned long*)&exe.raw[i + 2] != mem[m])
+                    continue;
+                for (size_t j = i + 6; j + 3 <= f1 && j < i + 6 + 24; ++j) {
+                    if (exe.raw[j] == 0xFF && exe.raw[j + 1] == 0x50 && exe.raw[j + 2] == 0x0C) {
+                        if (at[m] < 0) at[m] = (long)(i - f0);
+                        ++cnt[m];
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                "the caravan's draw call x%d at +0x%lX, the rollover's x%d at +0x%lX", cnt[0], at[0],
+                cnt[1], at[1]);
+    ok(cnt[0] == 1 && cnt[1] == 1 && at[1] > at[0],
+       "the HUD's pass 0 draws the item rollover after the caravan window", detail);
 }
 
 void runTintHalf(const Pe& exe) {
@@ -753,6 +879,108 @@ void runViewHalf(const Pe& exe) {
 }
 
 // ---- case 5: the pure decoders on synthetic bytes ------------------------------------------------
+// ---- the screen input log's three rows, over Engine.dll ---------------------------------------
+// The four checks: the device field; the front's vtable WITHOUT a live object (InputDevice::Create
+// stores it) and its two mouse slots; the record's size and type offset out of the exported
+// members; and copies of those bytes with one thing wrong, each refused.
+void runInputHalf(const Pe& engine) {
+    char detail[300];
+    const size_t span = ut::kUtFrontEvtSpan;
+
+    // 1. Engine::GetInputDevice -> +0x164, and the pump reads the same field.
+    const unsigned char* pg = engine.fn(TQ_INPUT_ENGINE_GETINPUTDEVICE);
+    const unsigned char* pp = engine.fn(TQ_INPUT_ENGINE_PROCESSUSERINPUT);
+    const unsigned field = pg ? ut::utInputDeviceField(pg, 8) : 0;
+    const unsigned twin = pp ? ut::utPumpDeviceField(pp, 0x50) : 0;
+    _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                "GetInputDevice rva 0x%lX reads +0x%X, ProcessUserInput rva 0x%lX reads +0x%X at +0x43",
+                engine.fnRva(TQ_INPUT_ENGINE_GETINPUTDEVICE), field,
+                engine.fnRva(TQ_INPUT_ENGINE_PROCESSUSERINPUT), twin);
+    ok(field == 0x164 && twin == field && TQ_INPUT_ENGINE_GETINPUTDEVICE_CC == TQCC_THISCALL &&
+           TQ_INPUT_ENGINE_PROCESSUSERINPUT_CC == TQCC_THISCALL,
+       "input.deviceField: Engine::GetInputDevice's bytes decode to 0x164, the pump reads the same",
+       detail);
+
+    // 2. the front's vtable through InputDevice::Create's C7 06 <VA> at +0x50, its slots 6 and 7.
+    const unsigned char* pc = engine.fn(TQ_INPUT_INPUTDEVICE_CREATE);
+    const unsigned long vtVa = pc ? ut::utCreateFrontVtable(pc, 0x58) : 0;
+    const unsigned long vtRva = vtVa > engine.imageBase ? vtVa - engine.imageBase : 0;
+    const std::vector<unsigned> slots = vtRva ? engine.vtable(vtRva, 8) : std::vector<unsigned>();
+    const unsigned s6 = slots.size() > 7 ? slots[6] : 0;
+    const unsigned s7 = slots.size() > 7 ? slots[7] : 0;
+    const unsigned char* p6 = s6 ? engine.at(s6) : nullptr;
+    const unsigned char* p7 = s7 ? engine.at(s7) : nullptr;
+    const unsigned long ctor = engine.fnRva(TQ_INPUT_MOUSEEVENT_CTOR);
+    const unsigned long lands = p7 ? ut::utFrontMouseEventCtor(p7, span, s7) : 0;
+    const bool evtOk = p7 && ut::utFrontMouseEventOk(p7, span);
+    const bool cntOk = p6 && ut::utFrontMouseCountOk(p6, ut::kUtFrontCountSpan);
+    _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                "Create stores vtable VA 0x%lX (rva 0x%lX); slot 7 = 0x%lX (bytes %s), slot 6 = "
+                "0x%lX (bytes %s); the call at +0x4A -> rva 0x%lX, the MouseEvent ctor rva 0x%lX",
+                vtVa, vtRva, engine.imageBase + s7, evtOk ? "match" : "DIFFER",
+                engine.imageBase + s6, cntOk ? "match" : "DIFFER", lands, ctor);
+    ok(vtRva == 0x2F7808 && engine.imageBase + s7 == 0x101A0E60 && evtOk && cntOk && ctor == 0x1320 &&
+           lands == ctor && engine.isCode(s7),
+       "input.mouseEventSlot: the front's slot +0x1C (no live object) is GetMouseEvent by its bytes, "
+       "slot +0x18 the count, the call at +0x4A the exported MouseEvent constructor",
+       detail);
+
+    // 3. the record: operator='s last movq displacement + 8, ConvertToButtonEvent's type read.
+    const unsigned char* pa = engine.fn(TQ_INPUT_MOUSEEVENT_ASSIGN);
+    const unsigned char* pv = engine.fn(TQ_INPUT_MOUSEEVENT_CONVERTTOBUTTONEVENT);
+    const unsigned size = pa ? ut::utMouseEventSizeFromAssign(pa, 0x40) : 0;
+    const int typeOff = pv ? ut::utMouseEventTypeOffFromConvert(pv, 0x28) : -1;
+    _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                "operator= rva 0x%lX copies 0x%X bytes, ConvertToButtonEvent rva 0x%lX reads the type "
+                "at +0x%X", engine.fnRva(TQ_INPUT_MOUSEEVENT_ASSIGN), size,
+                engine.fnRva(TQ_INPUT_MOUSEEVENT_CONVERTTOBUTTONEVENT), (unsigned)typeOff);
+    ok(size == 0x28 && size == ut::kUtMouseEventSize && typeOff == (int)ut::kUtMouseEvtTypeOff &&
+           pa && pv && ut::utMouseEventRecordOk(pa, 0x40, pv, 0x28),
+       "input.mouseEventRecord: operator= copies 0x28 bytes (kUtMouseEventSize), the type is at "
+       "+0x08 (kUtMouseEvtTypeOff)",
+       detail);
+
+    // 4. copies with one thing wrong, each refused.
+    if (!(p7 && pa && pv)) {
+        ok(false, "the negative cases", "the bytes they copy were not found");
+        return;
+    }
+    std::vector<unsigned char> op(p7, p7 + span);
+    op[0] = 0x81;   // sub esp,imm32 instead of sub esp,imm8
+    std::vector<unsigned char> slot(p7, p7 + span);
+    slot[ut::kUtFrontEvtForward + 5] = 0x18;   // the forward through the backend's slot +0x18
+    std::vector<unsigned char> call(p7, p7 + span);
+    call[ut::kUtFrontEvtCtorCall + 1] ^= 0x10;   // the call lands elsewhere
+    std::vector<unsigned char> stride(pa, pa + 0x40);
+    size_t last = 0;
+    for (size_t i = 0; i + 10 <= stride.size(); ++i) {
+        if (stride[i] == 0x66 && stride[i + 1] == 0x0F && stride[i + 2] == 0xD6 &&
+            stride[i + 3] == 0x41 && stride[i + 5] == 0x8B && stride[i + 6] == 0xC1)
+            last = i + 4;
+    }
+    if (last) stride[last] = 0x18;   // five qwords ending at +0x18: a 0x20-byte record
+    std::vector<unsigned char> typ(pv, pv + 0x28);
+    typ[ut::kUtConvertTypeRead + 2] = 0x0C;   // the type read from +0x0C
+    std::vector<unsigned char> cnt(p6, p6 + ut::kUtFrontCountSpan);
+    cnt[9] = 0x06;   // a different jump
+    const bool r1 = !ut::utFrontMouseEventOk(op.data(), op.size());
+    const bool r2 = !ut::utFrontMouseEventOk(slot.data(), slot.size());
+    const bool r3 = ut::utFrontMouseEventCtor(call.data(), call.size(), s7) != ctor;
+    const bool r4 = last != 0 && ut::utMouseEventSizeFromAssign(stride.data(), stride.size()) == 0x20 &&
+                    !ut::utMouseEventRecordOk(stride.data(), stride.size(), pv, 0x28);
+    const bool r5 = !ut::utMouseEventRecordOk(pa, 0x40, typ.data(), typ.size());
+    const bool r6 = !ut::utFrontMouseCountOk(cnt.data(), cnt.size());
+    _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                "changed opcode %s, forward via +0x18 %s, the ctor call moved %s, stride 0x20 %s, "
+                "type at +0x0C %s, count jump %s", r1 ? "refused" : "ACCEPTED",
+                r2 ? "refused" : "ACCEPTED", r3 ? "refused" : "ACCEPTED", r4 ? "refused" : "ACCEPTED",
+                r5 ? "refused" : "ACCEPTED", r6 ? "refused" : "ACCEPTED");
+    ok(r1 && r2 && r3 && r4 && r5 && r6,
+       "the negative cases: one changed opcode, another stride, a forward through another slot "
+       "(and a moved call, a moved type read, a changed count body) are each refused",
+       detail);
+}
+
 void runSyntheticHalf() {
     const unsigned char lea[8] = {0x8D, 0x81, 0x28, 0x29, 0x00, 0x00, 0xC3, 0xCC};
     const unsigned char mov[8] = {0x8B, 0x81, 0x24, 0x29, 0x00, 0x00, 0xC3, 0xCC};
@@ -803,7 +1031,11 @@ void runGateHalf() {
         {"cursor.disposal", 0xC10},   // PrimaryTransferActivate's disposal shape
         {"exe.transferPageDraw", 0xC31A0},   // the slot plates
         {"exe.itemBackground", 0x10A9B0},    // the rect route
+        {"exe.rolloverDraw", 0x18E6D0},      // the screen parts' draw site
+        {"exe.transferSortButton", 0xC4270},   // the sort block
+        {"exe.transferSortButton.widget", 0xFFFFF4F8},   // this-0xB08
         {"exe.quickMoveAdd.ret", 0x107A6C},
+        {"input.deviceField", 0x164},        // the screen input log
     };
     for (size_t i = 0; i < sizeof(early) / sizeof(early[0]); ++i) {
         ut::bindingsNote(early[i].name, early[i].value, true, "the offline harness said so");
@@ -811,13 +1043,29 @@ void runGateHalf() {
     ok(ut::bindingsGate(80, 0), "it passes once every early binding is confirmed",
        ut::bindingsSummary());
     printf("[bindings] the gate's INFO line reads: %s\n", ut::bindingsSummary());
-    ok(strstr(ut::bindingsSummary(), "80 by export, 8 by signature") != nullptr &&
-           strstr(ut::bindingsSummary(), "17 decoded (12 advisory)") != nullptr &&
-           strstr(ut::bindingsSummary(), "3 structural (2 advisory), 1 literal") != nullptr &&
+    ok(strstr(ut::bindingsSummary(), "80 by export, 10 by signature") != nullptr &&
+           strstr(ut::bindingsSummary(), "19 decoded (15 advisory)") != nullptr &&
+           strstr(ut::bindingsSummary(), "4 structural (3 advisory), 1 literal") != nullptr &&
+           strstr(ut::bindingsSummary(), "all confirmed") != nullptr &&
+           strstr(ut::bindingsSummary(), "late bindings pending") != nullptr,
+       "a healthy game reads 10 by signature, 19 decoded (15 advisory), all confirmed, the late "
+       "row pending",
+       ut::bindingsSummary());
+
+    // 2-late. The one LATE row (the screen input log's GetMouseEvent slot, read from the live
+    // device on the game thread): confirmed, the late report says the whole set once more; a
+    // refusal of that ADVISORY row never closes the gate.
+    ut::bindingsNote("input.mouseEventSlot", 0x1A0E60, true, "the offline harness said so");
+    ut::bindingsLateReport();
+    ok(strstr(ut::bindingsSummary(), "20 decoded (15 advisory)") != nullptr &&
            strstr(ut::bindingsSummary(), "all confirmed") != nullptr &&
            strstr(ut::bindingsSummary(), "pending") == nullptr,
-       "a healthy game reads 8 by signature, 17 decoded (12 advisory), all confirmed",
+       "the late row confirmed: 20 decoded, all confirmed, nothing pending", ut::bindingsSummary());
+    ut::bindingsNote("input.mouseEventSlot", 0, false, "the slot's bytes differ");
+    ok(ut::bindingsGate(80, 0) && ut::bindingsGateFailure()[0] == 0,
+       "a refused late advisory row (the screen input log) leaves the gate open",
        ut::bindingsSummary());
+    ut::bindingsNote("input.mouseEventSlot", 0x1A0E60, true, "restored");
 
     // 2a. THE CLASSIFICATION, row by row.
     {
@@ -827,7 +1075,7 @@ void runGateHalf() {
         };
         const int D = ut::UT_BIND_DECODED, S = ut::UT_BIND_STRUCTURAL, G = ut::UT_BIND_SIGNATURE;
         const int L = ut::UT_BIND_LITERAL;
-        const int E = ut::UT_BIND_EARLY;
+        const int E = ut::UT_BIND_EARLY, Lt = ut::UT_BIND_LATE;
         const int C = ut::UT_BIND_CRITICAL, A = ut::UT_BIND_ADVISORY;
         const Want want[] = {
             {"gameEngine.stashSack", D, E, C},     {"gameEngine.transferSack", D, E, C},
@@ -841,6 +1089,9 @@ void runGateHalf() {
             {"exe.leftClickUnderPoint", G, E, A},  {"exe.leftClickHandler", G, E, A},
             {"exe.transferPageDraw", G, E, A},
             {"exe.itemBackground", G, E, A},
+            {"exe.rolloverDraw", G, E, A},
+            {"exe.transferSortButton", G, E, A},
+            {"exe.transferSortButton.widget", D, E, A},
             {"page.cachedSack", D, E, A},          {"exe.rightClickUnderPoint.ret", D, E, A},
             {"exe.heldPickupUnderPoint.ret", D, E, A}, {"exe.leftClickUnderPoint.ret", D, E, A},
             {"exe.leftClickHandler.frame", D, E, A},
@@ -848,6 +1099,8 @@ void runGateHalf() {
             {"exe.quickMoveAdd.ret", D, E, A},
             {"ui.stashKind", L, E, C},
             {"msvc.map", S, E, A},                 {"msvc.vector", S, E, A},
+            {"input.deviceField", D, E, A},        {"input.mouseEventSlot", D, Lt, A},
+            {"input.mouseEventRecord", S, E, A},
         };
         const int nWant = (int)(sizeof(want) / sizeof(want[0]));
         int bad = 0, advisory = 0;
@@ -870,13 +1123,13 @@ void runGateHalf() {
         char detail[200];
         _snprintf_s(detail, sizeof(detail), _TRUNCATE, "%d rows, %d advisory, %d mismatch%s%s",
                     ut::bindingsRowCount(), advisory, bad, firstBad[0] ? ": " : "", firstBad);
-        ok(bad == 0 && ut::bindingsRowCount() == nWant && advisory == 22,   // + 2; + 1
+        ok(bad == 0 && ut::bindingsRowCount() == nWant && advisory == 28,   // + 2; + 1; + 3 (the screen input log); + 1 (the screen parts' draw site); + 2 (the sort block)
            "the classification is the expected list", detail);
     }
 
     // 2b. The early set is exactly the early reporters: every EARLY row that is not structural or
-    // literal is in early[] above, and no row is LATE (TQ.exe is plain: nothing needs the game
-    // thread).
+    // literal is in early[] above, and exactly one row is LATE: the screen input log's
+    // GetMouseEvent slot, read from the live device once it exists.
     {
         int mustReport = 0, mismatched = 0, late = 0;
         char firstBad[96] = "";
@@ -904,7 +1157,7 @@ void runGateHalf() {
                     "%d rows must report before the gate, the harness reports %u, %d late%s%s",
                     mustReport, (unsigned)(sizeof(early) / sizeof(early[0])), late,
                     firstBad[0] ? ", first mismatch: " : "", firstBad[0] ? firstBad : "");
-        ok(mismatched == 0 && late == 0 && mustReport == (int)(sizeof(early) / sizeof(early[0])),
+        ok(mismatched == 0 && late == 1 && mustReport == (int)(sizeof(early) / sizeof(early[0])),
            "the early set is exactly the early reporters", detail);
     }
 
@@ -913,7 +1166,7 @@ void runGateHalf() {
     ok(ut::bindingsGate(80, 0) && ut::bindingsGateFailure()[0] == 0,
        "a failed advisory signature leaves the gate open", ut::bindingsSummary());
     ok(strstr(ut::bindingsSummary(), "confirmed except 1 advisory") != nullptr &&
-           strstr(ut::bindingsSummary(), "7 by signature") != nullptr,   // 8 - the failed one
+           strstr(ut::bindingsSummary(), "9 by signature") != nullptr,   // 10 - the failed one
        "and the count line says which", ut::bindingsSummary());
 
     // 3b. a CRITICAL row fails - and the whole mod has to go off, naming it.
@@ -951,6 +1204,7 @@ int main() {
         ok(e && g && x, "TQ.exe, Engine.dll, Game.dll are x86 PE files",
            e && g && x ? "all three read" : "one of them could not be read as PE32");
         if (e && g) runExportHalf(dir, &engine, &game);
+        if (e) runInputHalf(engine);
         if (g) runDecoderHalf(game);
         if (x) {
             runExeHalf(exe);

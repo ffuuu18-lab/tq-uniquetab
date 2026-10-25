@@ -45,6 +45,12 @@ enum UtViewEvent {
     kUtViewEvFault,               // a WARN/ERROR raised by the view code, a caught exception
     kUtViewEvBindingsIncomplete,  // a view binding turned out unusable at run time
     kUtViewEvStreamOutModSack,    // G3 fired: StreamOut found the mod sack in the member
+    // the per-game DATA latch (gameOff): a fault in THIS game's generated set - its group table
+    // did not load, or a page of it could not be built - turns the tab off in this game only;
+    // the game switch clears it. The engine-fault latch (faulted: kUtViewEvFault,
+    // kUtViewEvStreamOutModSack) is never cleared: it stays for the process.
+    kUtViewEvDataFault,
+    kUtViewEvGameSwitch,          // the game in force switched (no world is up)
     kUtViewEvCount
 };
 
@@ -67,6 +73,8 @@ enum UtViewWhy {
     kUtViewWhyRefusedMp,
     kUtViewWhyRefusedClosed,
     kUtViewWhyRefusedNotTransfer,
+    kUtViewWhyDataFault,
+    kUtViewWhyRefusedGameData,
     kUtViewWhyCount
 };
 
@@ -88,6 +96,9 @@ inline const char* utViewWhyText(int why) {
         "the multiplayer state is unknown (refuse when unsure)",
         "the caravan is not open",
         "the caravan is not on the Transfer tab",
+        "a data fault in this game's generated set",
+        "this game's generated set did not load or a page of it could not be built (the tab is "
+        "off in this game; the next game switch starts clean)",
     };
     return (why >= 0 && why < kUtViewWhyCount) ? k[why] : "?";
 }
@@ -99,7 +110,8 @@ struct UtViewState {
     bool world = false;
     bool mp = false;          // the last KNOWN session state: multiplayer (hosted or joined)
     bool mpUnknown = false;   // the last read could not tell (refuse when unsure)
-    bool faulted = false;   // latched for the process
+    bool faulted = false;   // an ENGINE fault: latched for the process
+    bool gameOff = false;   // a DATA fault in this game's set: latched until the next game switch
     bool bindingsOk = false;
 };
 
@@ -113,11 +125,28 @@ struct UtViewStep {
 inline int utViewRefusal(const UtViewState& s) {
     if (!s.bindingsOk) return kUtViewWhyRefusedBindings;
     if (s.faulted) return kUtViewWhyRefusedFaulted;
+    if (s.gameOff) return kUtViewWhyRefusedGameData;
     if (!s.world) return kUtViewWhyRefusedNoWorld;
     if (s.mpUnknown) return kUtViewWhyRefusedMp;   // multiplayer itself is no refusal
     if (!s.open) return kUtViewWhyRefusedClosed;
     if (s.mode != 1) return kUtViewWhyRefusedNotTransfer;
     return kUtViewWhyOk;
+}
+
+// NpcCaravan::OnPlayerInteract around its original, from the open flag before the call and the
+// GameEngine::CaravanGoodbye calls counted before and after it. A click on the caravan driver
+// while the window is up runs the goodbye INSIDE the original: the engine closes the window and
+// opens it again in place. That is a close followed by an open - the open is counted and said, and
+// the view's state is told the caravan is open again (the goodbye inside left it closed).
+enum UtCaravanInteract {
+    kUtCaravanOpened = 0,   // the caravan was closed: an open
+    kUtCaravanAlready,      // a call while it is open, nothing closed: the open goes on
+    kUtCaravanReopened,     // a goodbye ran inside the call: a close, then an open in place
+};
+
+inline int utCaravanInteract(bool wasOpen, long goodbyesBefore, long goodbyesAfter) {
+    if (goodbyesAfter != goodbyesBefore) return kUtCaravanReopened;
+    return wasOpen ? kUtCaravanAlready : kUtCaravanOpened;
 }
 
 // G1: may the getter hand the mod sack to THIS call?
@@ -205,6 +234,13 @@ inline UtViewStep utViewApply(UtViewState* s, int ev, int arg) {
     case kUtViewEvStreamOutModSack:
         s->faulted = true;          // the door was reached: never again this process
         offWhy = kUtViewWhyStreamOut;
+        break;
+    case kUtViewEvDataFault:
+        s->gameOff = true;          // this game only: the switch clears it
+        offWhy = kUtViewWhyDataFault;
+        break;
+    case kUtViewEvGameSwitch:
+        s->gameOff = false;         // the next game starts clean; `faulted` stays
         break;
     default:
         return st;

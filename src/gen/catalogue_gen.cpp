@@ -2,14 +2,18 @@
 #include "gen/catalogue_gen.h"
 #include "gen/arc_reader.h"
 #include "gen/arz_reader.h"
+#include "gen/placed_records.h"
+#include "gen/ut_groups.h"
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <map>
 #include <set>
 #include <system_error>
+#include <unordered_set>
 
 namespace gen {
 
@@ -32,6 +36,7 @@ const ClassSlot kEquipSlot[] = {
 };
 const ClassSlot kOtherSlot[] = {
     {"ItemArtifact", "relic"},
+    {"ItemArtifactFormula", "blueprint"},
 };
 const char* const kBlueprintClasses[] = {"ItemArtifactFormula"};
 const char* const kRelicClass = "ItemArtifact";
@@ -77,6 +82,7 @@ std::string bitmapOf(const ArzRecord& rec) {
     std::string v = rec.str("bitmap");
     if (v.empty()) v = rec.str("artifactBitmap");
     if (v.empty()) v = rec.str("relicBitmap");
+    if (v.empty()) v = rec.str("artifactFormulaBitmapName");   // an arcane formula's recipe scroll
     return v;
 }
 bool hasTag(const std::unordered_map<std::string, std::string>& tags, const std::string& t) {
@@ -93,7 +99,8 @@ std::string stripTrailingBlanks(std::string s) {
     return s;
 }
 
-// records/(xpackN/)item(s)/ - the collection rule's path test, on the lower-cased key.
+// records/(xpackN/)item(s)/ - the game's item folders, on the lower-cased key. The collection
+// rule does not test it; inside them the reach walk does not decide (EXCLUDE rule 7).
 bool itemPath(const std::string& key) {
     if (!startsWith(key, "records/")) return false;
     std::size_t p = 8;
@@ -115,17 +122,52 @@ int expansionOf(const std::string& key) {
     return 0;
 }
 
-// GD's rule 4 ("FileDescription has no BLANK"), widened to TQ's template words (blank, test, template, copy of).
+// GD's rule 4 ("FileDescription has no BLANK"), widened to TQ's template words (blank, test,
+// template, copy of), each a whole word: no letter a-z right before or right after it.
 bool templateWords(const std::string& lowerText) {
     static const char* const kWords[] = {"blank", "test", "template", "copy of"};
-    for (const char* w : kWords) if (lowerText.find(w) != std::string::npos) return true;
+    auto letter = [](char c) { return c >= 'a' && c <= 'z'; };
+    for (const char* w : kWords) {
+        const std::size_t n = std::strlen(w);
+        for (std::size_t p = lowerText.find(w); p != std::string::npos; p = lowerText.find(w, p + 1)) {
+            const bool before = p > 0 && letter(lowerText[p - 1]);
+            const bool after = p + n < lowerText.size() && letter(lowerText[p + n]);
+            if (!before && !after) return true;
+        }
+    }
     return false;
 }
 
+// A creature folder anywhere in the lower-cased key (the gear NPCs and monsters wear): the
+// collection rule never looks there, in the base game and a custom game alike (GD's junk folders).
+bool junkPath(const std::string& key) {
+    const std::string k = "/" + key;
+    return k.find("/creature/") != std::string::npos || k.find("/creatures/") != std::string::npos;
+}
+
+bool isTemplate(const std::string& key, const ArzRecord& rec) {
+    return templateWords(lowerAscii(rec.str("FileDescription"))) || templateWords(key);
+}
+
+bool devFolder(const std::string& key, const char** which = nullptr) {
+    for (const char* d : kDevFolders) {
+        const std::string part = std::string("/") + d + "/";
+        if (key.find(part) != std::string::npos) { if (which) *which = d; return true; }
+    }
+    return false;
+}
+
+// A holder the reach walk never enters: a developer folder, or a template word in its path.
+bool walkSkipped(const std::string& key) { return devFolder(key) || templateWords(key); }
+
+// A record the reach walk passes through: a loot table (Class Loot*) or a record with no class.
+bool lootClass(const std::string& cls) { return cls.empty() || startsWith(cls, "Loot"); }
+
+// Not in a junk folder, and a name tag that resolves (a formula's: its crafted artifact's). The
+// template words are decided after the scan, with the holders.
 bool isShipped(const std::string& key, const ArzRecord& rec, const std::string& cls,
                const GameData& g) {
-    if (!itemPath(key)) return false;
-    if (templateWords(lowerAscii(rec.str("FileDescription"))) || templateWords(key)) return false;
+    if (junkPath(key)) return false;
     if (hasTag(g.tags, nameTagOf(rec, cls))) return true;
     std::string tgt = craftedRecord(rec, cls);
     if (!tgt.empty()) {
@@ -140,10 +182,12 @@ std::uint32_t rd32(const std::uint8_t* p) {
          | (std::uint32_t(p[3]) << 24);
 }
 
+} // namespace
+
 // TQ .tex: "TEX" + version; v1 = GD's v2 layout (the DDS surface at 12), v2 inserts one flag
 // byte (the surface at 13). The surface magic is "DDS " or TQ's "DDSR"; its height and width are
 // at +12 and +16. Only the header is read, never the pixels.
-const std::size_t kTexHeader = 64;
+static const std::size_t kTexHeader = 64;
 bool texSize(const std::vector<std::uint8_t>& d, int& w, int& h) {
     if (d.size() < 4 || d[0] != 'T' || d[1] != 'E' || d[2] != 'X') return false;
     std::size_t off;
@@ -160,7 +204,6 @@ bool texSize(const std::vector<std::uint8_t>& d, int& w, int& h) {
     return true;
 }
 
-} // namespace
 
 // ---------------------------------------------------------------- GameData
 GameData::~GameData() {
@@ -168,14 +211,18 @@ GameData::~GameData() {
     delete res;
 }
 
-bool GameData::load(const std::string& gameDir, const std::string& lang, std::string* error) {
+bool GameData::load(const std::string& gameDir, const std::string& lang, std::string* error,
+                    const std::string& gameArz, const std::string& gameResources) {
     delete db; delete res;
     db = new ArzDatabase;
     res = new ResourceArcs;
     tags.clear();
-    if (!db->loadGame(gameDir, error)) return false;
-    if (!loadTextTags(gameDir, lang, tags, error)) return false;
-    res->setRoot(gameDir);
+    if (!db->loadGame(gameDir, error, gameArz)) return false;
+    res->setRoot(gameDir, gameResources);
+    // a custom game's Text.arc that cannot be read is named with the archives it skips
+    std::vector<std::string> skipped;
+    if (!loadTextTags(gameDir, lang, tags, error, gameResources, &skipped)) return false;
+    for (const std::string& s : skipped) res->noteSkipped(s);
     // The DLC filter: an expansion counts as installed when its resource
     // folder is there. Immortal Throne's is "xpack", the later ones "XPack2".."XPack4".
     static const char* const kFolder[5] = {"", "xpack", "XPack2", "XPack3", "XPack4"};
@@ -188,12 +235,140 @@ bool GameData::load(const std::string& gameDir, const std::string& lang, std::st
     return true;
 }
 
+// ---------------------------------------------------------------- EXCLUDE rule 7
+// The classes whose worn gear and misc loot never drop, and the worn slots.
+static const char* const kNonDroppers[] = {"Npc", "Guard", "NpcMerchant", "NpcEnchanter",
+                                           "NpcSkillReallocator", "Pet"};
+static const char* const kWornSlots[] = {"Head", "Torso", "Forearm", "LowerBody", "RightHand",
+                                         "LeftHand", "Finger", "Neck"};
+static const char* const kUnobtainable = "unobtainable: ";
+static const char* const kKept = " (kept: collect_unobtainable=1)";
+static const char* const kUnreached = "only in loot tables nothing reaches";
+
+static bool isDigitChar(char c) { return c >= '0' && c <= '9'; }
+
+static bool isNonDropper(const std::string& cls) {
+    for (const char* c : kNonDroppers)
+        if (cls == c) return true;
+    return false;
+}
+
+// 'w' for loot<Slot>Item<n> (a worn slot) and defaultHeadPiece, 'm' for lootMisc<n>Item<n>,
+// 0 for every other field name (case as the database spells it).
+static char lootSlotKind(const std::string& f) {
+    if (f == "defaultHeadPiece") return 'w';
+    if (f.compare(0, 4, "loot") != 0) return 0;
+    std::size_t i = f.size();
+    while (i > 0 && isDigitChar(f[i - 1])) --i;
+    if (i == f.size() || i < 8 || f.compare(i - 4, 4, "Item") != 0) return 0;
+    std::string base = f.substr(4, i - 8);
+    std::size_t j = base.size();
+    while (j > 0 && isDigitChar(base[j - 1])) --j;
+    base.resize(j);
+    for (const char* s : kWornSlots)
+        if (base == s) return 'w';
+    return base == "Misc" ? 'm' : 0;
+}
+
+// dropItems as tools/tqarz.py ifield(rec, "dropItems", 1) reads it: the first value as an int; 1 when
+// the field is absent, has no value, or is a string that is not a whole number.
+static std::int32_t dropItemsOf(const ArzRecord& rec) {
+    const ArzField* f = rec.find("dropItems");
+    if (!f || f->raw.empty()) return 1;
+    if (f->type == kFtString) {
+        if (f->strs.empty() || f->strs[0].empty()) return 1;
+        char* end = nullptr;
+        const long v = std::strtol(f->strs[0].c_str(), &end, 10);
+        return (end && *end == 0) ? std::int32_t(v) : 1;
+    }
+    return rec.i32("dropItems");
+}
+
+// "" when a record path in this field of a record of class `cls` can drop; else the kind of
+// holder that never drops it (the text after "unobtainable: " in uniq-excluded.txt).
+static std::string nondropKind(const std::string& field, const std::string& cls, std::int32_t dropItems) {
+    if (field == "setMembers") return "setMembers";
+    if (cls == "ItemArtifactFormula" && field.compare(0, 7, "reagent") == 0) return "formula reagent";
+    const bool npc = isNonDropper(cls);
+    if (npc || (cls == "Monster" && dropItems == 0)) {
+        const char k = lootSlotKind(field);
+        if (k == 'w') return npc ? "worn by " + cls : std::string("worn by Monster with dropItems 0");
+        if (k == 'm' && npc) return "lootMisc of " + cls;
+    }
+    return std::string();
+}
+
+// ---------------------------------------------------------------- the relics and charms
+static bool isRelicClass(const std::string& cls) { return cls == "ItemRelic" || cls == "ItemCharm"; }
+
+// A field's first value as a number, as tools/build_catalogue.py relic_weight reads it: an int (or
+// bool) or a float; 0 for a string, an empty or an absent field.
+static double numberOf(const ArzField* f) {
+    if (!f || f->raw.empty()) return 0.0;
+    if (f->type == kFtInt || f->type == kFtBool) return double(std::int32_t(f->raw[0]));
+    if (f->type == kFtFloat) {
+        float v = 0.0f;
+        std::memcpy(&v, &f->raw[0], sizeof v);
+        return double(v);
+    }
+    return 0.0;
+}
+
+// The bonus records a completion bonus table names (build_catalogue.py relic_bonuses): every
+// randomizerName<n> (any letter case) holding one string, ordered by n, whose randomizerWeight<n>
+// is above 0; a repeat (case and slashes folded) is kept once, as the table spells it first.
+static void relicBonuses(const GameData& g, const std::string& table, std::vector<std::string>& out) {
+    out.clear();
+    ArzRecord t;
+    if (table.empty() || !g.db->get(table, t)) return;
+    struct Ent { unsigned long long n; std::string val; double w; };
+    std::vector<Ent> ents;
+    std::set<std::string> names;
+    for (const ArzField& f : t.fields) {
+        if (f.name.size() <= 14 || f.name.size() > 14 + 18 || lowerAscii(f.name.substr(0, 14)) != "randomizername")
+            continue;
+        const std::string digits = f.name.substr(14);
+        if (!std::all_of(digits.begin(), digits.end(), isDigitChar)) continue;
+        if (!names.insert(f.name).second) continue;     // a repeated name: the last field holds it
+        const ArzField* v = t.find(f.name.c_str());
+        if (!v || v->type != kFtString || v->strs.size() != 1 || v->strs[0].empty()) continue;
+        ents.push_back({std::strtoull(digits.c_str(), nullptr, 10), v->strs[0],
+                        numberOf(t.find(("randomizerWeight" + digits).c_str()))});
+    }
+    std::sort(ents.begin(), ents.end(), [](const Ent& a, const Ent& b) {
+        if (a.n != b.n) return a.n < b.n;
+        if (a.val != b.val) return a.val < b.val;
+        return a.w < b.w;
+    });
+    std::set<std::string> seen;
+    for (const Ent& e : ents) {
+        std::string f = e.val;
+        for (char& c : f) {
+            if (c == '\\') c = '/';
+            else if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+        }
+        if (e.w <= 0.0 || !seen.insert(f).second) continue;
+        out.push_back(e.val);
+    }
+}
+
 // ---------------------------------------------------------------- the collection
+// ---------------------------------------------------------------- monster infrequents
+bool isMiCandidate(const std::string& /*key*/, const std::string& cls,
+                   const std::string& classification, const std::string& /*fileDescription*/) {
+    // Every Rare record of the equipment classes. The key and the FileDescription stay in the
+    // signature: the callers pass them, and a later record-local rule needs no caller change.
+    return classification == "Rare" && equipSlot(cls) != nullptr;
+}
+
 bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
                   std::vector<ExcludedItem>& excluded, std::vector<std::string>& warnings,
-                  std::string* error) {
+                  std::string* error, bool collectUnobtainable, bool collectMi,
+                  std::vector<RelicItem>* relics, std::vector<ExcludedItem>* relicLeft) {
     items.clear();
     excluded.clear();
+    if (relics) relics->clear();
+    if (relicLeft) relicLeft->clear();
     if (!g.db || !g.res) { if (error) *error = "game data not loaded"; return false; }
     std::map<std::string, std::string> setNames;
     auto setDisplayName = [&](const std::string& setRec) -> std::string {
@@ -210,10 +385,10 @@ bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
         setNames[setRec] = nm;
         return nm;
     };
-    auto makeEntry = [&](const std::string& key, const ArzEntry& e, const std::string& src,
+    auto makeEntry = [&](const std::string& key, const std::string& record, const std::string& src,
                          const ArzRecord& rec, const std::string& cls) {
         CatalogueItem it;
-        it.record = e.name;
+        it.record = record;
         it.cls = cls;
         const char* s = equipSlot(cls);
         if (!s) s = otherSlot(cls);
@@ -235,91 +410,231 @@ bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
         it.isSetPiece = !it.setRecord.empty();
         it.isEquipment = equipSlot(cls) != nullptr;
         it.isExtra = false;
+        it.isMi = it.isEquipment && it.classification == "Rare";   // the KIND mark
+        // GD's fromMod: the custom game's layer (loaded last, tag "game") has it and no archive
+        // of the base game does
+        {
+            const auto& arcs = g.db->archives();
+            bool mine = !arcs.empty() && arcs.back().tag() == "game";
+            for (std::size_t ai = 0; mine && ai + 1 < arcs.size(); ++ai)
+                if (arcs[ai].entry(key)) mine = false;
+            it.fromMod = mine;
+        }
         return it;
     };
 
     // The reachability index, filled in the same pass: for every string of the table that names
     // a .dbr, the first record (winner index) whose field holds it, and whether a second,
     // different record holds it too. A record is referenced when a record OTHER than itself
-    // holds its path in any string field (as tools/build_catalogue.py decides it).
+    // holds its path in a string field that can drop it (as tools/build_catalogue.py decides
+    // it); the fields that never drop (rule 7) fill `nondrop` with their holder kinds instead.
     const std::vector<std::pair<std::size_t, const ArzEntry*>>& winners = g.db->winners();
     const std::size_t nArch = g.db->archives().size();
-    std::vector<std::vector<std::uint8_t>> isDbr(nArch), multi(nArch);
-    std::vector<std::vector<std::int32_t>> firstRef(nArch);
+    std::vector<std::vector<std::uint8_t>> isDbr(nArch), multi(nArch), rootMulti(nArch);
+    std::vector<std::vector<std::int32_t>> firstRef(nArch), rootFirst(nArch);
+    // The reach walk (EXCLUDE rule 3 and 7), filled in the same pass: per string, the first
+    // holder that is a root (not a loot table, not skipped) and whether a second one holds it;
+    // per loot table the walk may enter, its key and the strings its drop fields name.
+    std::unordered_map<std::string, std::uint32_t> lootOf;   // loot table key -> winner index
+    std::vector<std::size_t> lootBegin(winners.size(), 0), lootEnd(winners.size(), 0);
+    std::vector<std::uint32_t> lootEdges;   // a string index in the loot table's own archive
     for (std::size_t ai = 0; ai < nArch; ++ai) {
-        const std::vector<std::string>& strs = g.db->archives()[ai].strings();
-        isDbr[ai].resize(strs.size());
-        multi[ai].assign(strs.size(), 0);
-        firstRef[ai].assign(strs.size(), -1);
-        for (std::size_t i = 0; i < strs.size(); ++i) {
-            const std::string& t = strs[i];
-            isDbr[ai][i] = t.size() >= 4 && lowerAscii(t.substr(t.size() - 4)) == ".dbr";
+        const ArzArchive& arc = g.db->archives()[ai];
+        const std::size_t ns = arc.stringCount();
+        isDbr[ai].resize(ns);
+        multi[ai].assign(ns, 0);
+        firstRef[ai].assign(ns, -1);
+        rootMulti[ai].assign(ns, 0);
+        rootFirst[ai].assign(ns, -1);
+        for (std::size_t i = 0; i < ns; ++i) {
+            // the stored latin-1 bytes end in ".dbr" exactly when their UTF-8 form does
+            std::size_t len = 0;
+            const char* t = arc.raw(i, &len);
+            isDbr[ai][i] = len >= 4 && lowerAscii(std::string(t + len - 4, 4)) == ".dbr";
         }
     }
 
+    std::unordered_map<std::string, std::set<std::string>> nondrop;   // record key -> holder kinds
     std::vector<std::pair<CatalogueItem, std::size_t>> cands;   // item, winner index
+    std::vector<std::uint8_t> templ;                            // per candidate: a template word
+    std::vector<RelicItem> relicCands;                          // the relic and charm records
+    std::vector<std::uint8_t> relicTempl;                       // per relic candidate: a template word
     ArzRecord rec;
+    std::string winnerKey;   // the key of the winner in hand (its capacity reused)
     for (std::size_t wi = 0; wi < winners.size(); ++wi) {
         const auto& w = winners[wi];
         const ArzArchive& a = g.db->archives()[w.first];
         const ArzEntry& e = *w.second;
-        const std::string& key = e.key;
+        a.key(e, winnerKey);
+        const std::string& key = winnerKey;
         std::string why;
         if (!a.decode(e, rec, &why)) {
-            if (error) *error = "record " + e.name + " in " + a.path() + " does not decode (" + why + ")";
+            if (error) *error = "record " + a.name(e) + " in " + a.path() + " does not decode (" + why + ")";
             return false;
+        }
+        const std::string cls = rec.str("Class");
+        const std::int32_t dropItems = dropItemsOf(rec);
+        const bool skipped = walkSkipped(key);
+        const bool loot = lootClass(cls);
+        if (!skipped && loot) {
+            lootOf[key] = std::uint32_t(wi);
+            lootBegin[wi] = lootEdges.size();
         }
         for (const ArzField& f : rec.fields) {
             if (f.type != kFtString) continue;
+            int drops = -1;               // the field's rule 7 kind, worked out at its first .dbr
+            std::string kind;
             for (std::uint32_t idx : f.raw) {
                 if (idx >= isDbr[w.first].size() || !isDbr[w.first][idx]) continue;
+                if (drops < 0) {
+                    kind = nondropKind(f.name, cls, dropItems);
+                    drops = kind.empty() ? 1 : 0;
+                }
+                if (!drops) {
+                    const std::string k = ArzArchive::normKey(a.str(idx));
+                    if (k != key) nondrop[k].insert(kind);
+                    continue;
+                }
                 std::int32_t& fr = firstRef[w.first][idx];
                 if (fr < 0) fr = std::int32_t(wi);
                 else if (fr != std::int32_t(wi)) multi[w.first][idx] = 1;
+                if (skipped) continue;
+                if (loot) {
+                    lootEdges.push_back(idx);
+                } else {
+                    std::int32_t& rf = rootFirst[w.first][idx];
+                    if (rf < 0) rf = std::int32_t(wi);
+                    else if (rf != std::int32_t(wi)) rootMulti[w.first][idx] = 1;
+                }
             }
         }
-        std::string cls = rec.str("Class");
+        if (!skipped && loot) lootEnd[wi] = lootEdges.size();
+        if (isRelicClass(cls)) {
+            if (relics && isShipped(key, rec, cls, g)) {
+                std::vector<std::string> bonuses;
+                relicBonuses(g, rec.str("bonusTableName"), bonuses);
+                if (!bonuses.empty()) {
+                    RelicItem r;
+                    r.item = makeEntry(key, a.name(e), a.tag(), rec, cls);
+                    r.item.bitmap = rec.str("relicBitmap");
+                    r.shardBitmap = rec.str("shardBitmap");
+                    r.shards = rec.i32("completedRelicLevel");
+                    r.bonuses = std::move(bonuses);
+                    relicCands.push_back(std::move(r));
+                    relicTempl.push_back(isTemplate(key, rec) ? 1 : 0);
+                }
+            }
+            continue;
+        }
         if (!equipSlot(cls) && !otherSlot(cls)) continue;
         std::string cla = rec.str("itemClassification");
-        if (cla != "Epic" && cla != "Legendary") continue;
+        // an arcane formula is collected at every classification (a Quest one is a quest's reward:
+        // the EXCLUDE rule keeps it when a quest file places it); the rest takes Epic or
+        // Legendary, or the monster-infrequent rule
+        if (cla != "Epic" && cla != "Legendary" && !isBlueprintClass(cls)) {
+            // a monster infrequent: admitted with collect_mi=1 (build_catalogue.py counts the
+            // candidates always and asserts MI_CANDIDATES_EXPECT)
+            if (!isMiCandidate(key, cls, cla, rec.str("FileDescription")) || !isShipped(key, rec, cls, g))
+                continue;
+            if (collectMi) {
+                cands.emplace_back(makeEntry(key, a.name(e), a.tag(), rec, cls), wi);
+                templ.push_back(isTemplate(key, rec) ? 1 : 0);
+            }
+            continue;
+        }
         if (!isShipped(key, rec, cls, g)) continue;
-        cands.emplace_back(makeEntry(key, e, a.tag(), rec, cls), wi);
+        cands.emplace_back(makeEntry(key, a.name(e), a.tag(), rec, cls), wi);
+        templ.push_back(isTemplate(key, rec) ? 1 : 0);
     }
 
-    // referenced[key] = some record other than the one named key holds the path
+    // referenced[key] = some record other than the one named key holds the path; reachedKeys:
+    // the keys a root other than the record itself holds, then (the walk) every key a loot table
+    // the walk enters names, from the loot tables those roots name on
     std::unordered_map<std::string, bool> referenced;
+    std::unordered_set<std::string> reachedKeys;
+    std::vector<std::uint8_t> lootSeen(winners.size(), 0);
+    std::vector<std::uint32_t> queue;
+    auto reach = [&](const std::string& k) {
+        reachedKeys.insert(k);
+        const auto lt = lootOf.find(k);
+        if (lt != lootOf.end() && !lootSeen[lt->second]) {
+            lootSeen[lt->second] = 1;
+            queue.push_back(lt->second);
+        }
+    };
     for (std::size_t ai = 0; ai < nArch; ++ai) {
-        const std::vector<std::string>& strs = g.db->archives()[ai].strings();
-        for (std::size_t i = 0; i < strs.size(); ++i) {
+        const ArzArchive& arc = g.db->archives()[ai];
+        for (std::size_t i = 0; i < arc.stringCount(); ++i) {
             if (firstRef[ai][i] < 0) continue;
-            const std::string k = ArzArchive::normKey(strs[i]);
-            const bool other = multi[ai][i] || winners[std::size_t(firstRef[ai][i])].second->key != k;
+            const std::string k = ArzArchive::normKey(arc.str(i));
+            const auto& holder = winners[std::size_t(firstRef[ai][i])];
+            const bool other = multi[ai][i] || !g.db->archives()[holder.first].keyIs(*holder.second, k);
             bool& r = referenced[k];
             r = r || other;
+            if (rootFirst[ai][i] < 0) continue;
+            const auto& root = winners[std::size_t(rootFirst[ai][i])];
+            if (rootMulti[ai][i] || !g.db->archives()[root.first].keyIs(*root.second, k)) reach(k);
+        }
+    }
+    for (std::size_t qi = 0; qi < queue.size(); ++qi) {
+        const std::uint32_t wi = queue[qi];
+        const auto& lw = winners[wi];
+        const ArzArchive& la = g.db->archives()[lw.first];
+        for (std::size_t ei = lootBegin[wi]; ei < lootEnd[wi]; ++ei) {
+            const std::string k = ArzArchive::normKey(la.str(lootEdges[ei]));
+            if (!la.keyIs(*lw.second, k)) reach(k);
         }
     }
 
-    // The EXCLUDE rule, first reason that applies.
+    // The template words drop only what nothing hands out: no drop holder, not placed.
+    const std::unordered_set<std::string> placed(std::begin(kPlacedRecords), std::end(kPlacedRecords));
+    {
+        std::size_t keep = 0;
+        for (std::size_t ci = 0; ci < cands.size(); ++ci) {
+            if (templ[ci]) {
+                const std::string key = ArzArchive::normKey(cands[ci].first.record);
+                const auto r = referenced.find(key);
+                if (!placed.count(key) && !(r != referenced.end() && r->second)) continue;
+            }
+            if (keep != ci) cands[keep] = std::move(cands[ci]);
+            ++keep;
+        }
+        cands.resize(keep);
+        keep = 0;
+        for (std::size_t ci = 0; ci < relicCands.size(); ++ci) {
+            if (relicTempl[ci]) {
+                const std::string key = ArzArchive::normKey(relicCands[ci].item.record);
+                const auto r = referenced.find(key);
+                if (!placed.count(key) && !(r != referenced.end() && r->second)) continue;
+            }
+            if (keep != ci) relicCands[keep] = std::move(relicCands[ci]);
+            ++keep;
+        }
+        relicCands.resize(keep);
+    }
+
+    // The EXCLUDE rule, first reason that applies -> reason ("" none) and kept; a relic's icon
+    // is 1 x 1 cells. False on an archive that cannot be read.
+    const std::unordered_set<std::string> unreached(std::begin(kUnreachedRecords), std::end(kUnreachedRecords));
     std::vector<std::uint8_t> data;
-    for (auto& c : cands) {
-        CatalogueItem& it = c.first;
+    auto decide = [&](CatalogueItem& it, bool relic, std::string& reason, bool& kept) -> bool {
         const std::string key = ArzArchive::normKey(it.record);
-        std::string reason;
+        const bool reached = reachedKeys.count(key) != 0;
+        reason.clear();
+        kept = false;
+        const char* dev = nullptr;
         if (!g.expansionInstalled[it.expansion]) {
             reason = "expansion not installed";
         } else if (it.bitmap.empty()) {
             reason = "no icon field (bitmap / artifactBitmap)";
-        } else {
-            for (const char* d : kDevFolders) {
-                const std::string part = std::string("/") + d + "/";
-                if (key.find(part) != std::string::npos) { reason = std::string("developer folder ") + d; break; }
-            }
+        } else if (!reached && devFolder(key, &dev)) {
+            reason = std::string("developer folder ") + dev;
         }
-        if (reason.empty()) {
-            auto r = referenced.find(key);
-            if (r == referenced.end() || !r->second)
-                reason = "unreferenced (no loot table, merchant, container, formula, quest or monster holds it)";
-        }
+        const auto r = referenced.find(key);
+        const bool dropRef = r != referenced.end() && r->second;
+        const auto nd = nondrop.find(key);
+        if (reason.empty() && !dropRef && nd == nondrop.end() && !placed.count(key))
+            reason = "unreferenced (no loot table, merchant, container, formula, quest or monster holds it)";
         if (reason.empty()) {
             std::string err;
             int w = 0, h = 0;
@@ -330,7 +645,12 @@ bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
             } else {
                 it.footW = w / 32;
                 it.footH = h / 32;
-                if (it.footW < 1 || it.footW > 2 || it.footH < 1 || it.footH > 5) {
+                if (relic && (it.footW != 1 || it.footH != 1)) {
+                    char buf[96];
+                    std::snprintf(buf, sizeof buf, "footprint %dx%d (icon %dx%d) outside 1..1 x 1..1",
+                                  it.footW, it.footH, w, h);
+                    reason = buf;
+                } else if (it.footW < 1 || it.footW > 2 || it.footH < 1 || it.footH > 5) {
                     char buf[96];
                     std::snprintf(buf, sizeof buf, "footprint %dx%d (icon %dx%d) outside 1..2 x 1..5",
                                   it.footW, it.footH, w, h);
@@ -338,11 +658,49 @@ bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
                 }
             }
         }
-        if (!reason.empty()) excluded.push_back({it.record, reason});
-        else items.push_back(std::move(it));
+        // inside the item folders the reach scan's list decides (the walk cannot see the loot
+        // tables a quest file names); anywhere else the walk does
+        const bool walkOut = !reached && !itemPath(key);
+        if (reason.empty() && !placed.count(key) &&
+            ((!dropRef && nd != nondrop.end()) || (dropRef && (unreached.count(key) || walkOut)))) {
+            reason = kUnobtainable;
+            if (dropRef) {
+                reason += kUnreached;      // the only dropping holders are loot nothing reaches
+            } else {
+                bool first = true;
+                for (const std::string& k : nd->second) {
+                    if (!first) reason += ", ";
+                    reason += k;
+                    first = false;
+                }
+            }
+            if (collectUnobtainable) {
+                reason += kKept;
+                kept = true;
+            }
+        }
+        return true;
+    };
+    auto byRecord = [](const ExcludedItem& a, const ExcludedItem& b) { return a.record < b.record; };
+    for (auto& c : cands) {
+        CatalogueItem& it = c.first;
+        std::string reason;
+        bool kept = false;
+        if (!decide(it, false, reason, kept)) return false;
+        if (!reason.empty()) excluded.push_back({it.record, reason, kept});
+        if (reason.empty() || kept) items.push_back(std::move(it));
     }
-    std::sort(excluded.begin(), excluded.end(),
-              [](const ExcludedItem& a, const ExcludedItem& b) { return a.record < b.record; });
+    std::sort(excluded.begin(), excluded.end(), byRecord);
+    if (relics) {
+        for (RelicItem& r : relicCands) {
+            std::string reason;
+            bool kept = false;
+            if (!decide(r.item, true, reason, kept)) return false;
+            if (!reason.empty() && relicLeft) relicLeft->push_back({r.item.record, reason, kept});
+            if (reason.empty() || kept) relics->push_back(std::move(r));
+        }
+        if (relicLeft) std::sort(relicLeft->begin(), relicLeft->end(), byRecord);
+    }
 
     for (const CatalogueItem& it : items) {
         if (it.name.empty()) warnings.push_back("no display text for " + it.nameTag + ": " + it.record);
@@ -372,6 +730,7 @@ const std::uint32_t kGroupCount = 29;
 enum : std::uint16_t {
     kFSetPiece = 1, kFBlueprint = 2, kFAugment = 4, kFRelic = 8, kFFaction = 16,
     kFEquipment = 32, kFDefaultVisible = 64, kFHasBitmap = 128,
+    kFMi = 256,   // the KIND mark: a monster infrequent (model/catalogue.h ItemFlag::MonsterInfrequent)
 };
 
 struct StringTable {
@@ -430,11 +789,13 @@ bool packCatalogue(std::vector<CatalogueItem>& items, std::vector<std::uint8_t>&
         }
         rows.push_back(r);
     }
-    // slot group, item level, name, record - byte order on UTF-8 is code point order. TQ: the
-    // item level, not GD's level requirement, which TQ leaves 0 on 1,137 of the 1,588 records (the
-    // real requirement comes from the itemCostName equations); itemLevel is 0 on one record
+    // slot group, KIND (the uniques first), item level, name, record - byte order on UTF-8 is
+    // code point order. TQ sorts by the item level, not GD's level requirement, which TQ leaves 0
+    // on 1,134 of the 1,582 uniques (the real requirement comes from the itemCostName equations);
+    // itemLevel is 0 on one record
     std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
         if (a.grp != b.grp) return a.grp < b.grp;
+        if (a.it->isMi != b.it->isMi) return b.it->isMi;
         if (a.ilvl != b.ilvl) return a.ilvl < b.ilvl;
         int c = a.it->name.compare(b.it->name);
         if (c != 0) return c < 0;
@@ -476,7 +837,7 @@ bool packCatalogue(std::vector<CatalogueItem>& items, std::vector<std::uint8_t>&
         const CatalogueItem& it = *r.it;
         std::uint8_t cls;
         if (it.classification == "Epic" || it.classification == "Rare"
-            || it.classification == "Common") cls = 0;
+            || it.classification == "Common" || it.classification == "Quest") cls = 0;
         else if (it.classification == "Legendary") cls = 1;
         else { if (error) *error = "unexpected itemClassification '" + it.classification + "' on " + it.record; return false; }
         ItemRow row;
@@ -497,6 +858,7 @@ bool packCatalogue(std::vector<CatalogueItem>& items, std::vector<std::uint8_t>&
         if (it.isEquipment) f |= kFEquipment;
         if (it.isEquipment || it.isRelic) f |= kFDefaultVisible;
         if (!it.bitmap.empty()) f |= kFHasBitmap;
+        if (it.isMi) f |= kFMi;
         row.flags = f;
         row.fw = std::uint8_t(it.footW);
         row.fh = std::uint8_t(it.footH);
@@ -558,8 +920,10 @@ bool packCatalogue(std::vector<CatalogueItem>& items, std::vector<std::uint8_t>&
         stats->equipment = equipment; stats->relics = relics; stats->defaultVisible = visible;
         stats->bytes = out.size();
         stats->relicsRare = stats->relicsEpic = stats->relicsLegendary = stats->extras = 0;
+        stats->mi = 0;
         for (const CatalogueItem& it : items) {
             if (it.isExtra) ++stats->extras;
+            if (it.isMi) ++stats->mi;
             if (!it.isRelic) continue;
             if (it.classification == "Rare") ++stats->relicsRare;
             else if (it.classification == "Epic") ++stats->relicsEpic;
@@ -574,28 +938,31 @@ bool packCatalogue(std::vector<CatalogueItem>& items, std::vector<std::uint8_t>&
 // G / E lines). The page records and the F / P / V geometry lines stay with the page,.
 namespace {
 
-struct SlotInfo { const char* slot; const char* label; };
-// GD's layout order, with Titan Quest's labels on the slots TQ has.
-const SlotInfo kSlotOrder[] = {
-    {"head", "Helms"}, {"shoulders", "Shoulders"}, {"chest", "Torso"}, {"hands", "Arms"},
-    {"waist", "Belts"}, {"legs", "Legs"}, {"feet", "Boots"}, {"amulet", "Amulets"},
-    {"medal", "Medals"}, {"ring", "Rings"}, {"offhand", "Off-hands"}, {"shield", "Shields"},
-    {"axe1h", "Axes"}, {"dagger", "Daggers"}, {"mace1h", "Maces"}, {"scepter", "Staves"},
-    {"sword1h", "Swords"}, {"ranged1h", "Throwing"}, {"axe2h", "2H Axes"}, {"mace2h", "2H Maces"},
-    {"spear2h", "Spears"}, {"sword2h", "2H Swords"}, {"ranged2h", "Bows"}, {"relic", "Artifacts"},
-};
-// The host page: TQ's Transfer sack is a 16 x 15 grid of 32 px cells (measured), so a group's grid is
-// as many of its largest footprint as that holds.
-const int kHostCols = 16, kHostRows = 15, kCellPx = 32;
+// The groups come from the group rules (ut_groups.h, ut_groups_default.h): every record is tried
+// against the blocks, the first match decides its group, and the groups are written in their
+// declaration order with their labels, ids and tags.
+// The host page: the grid the caller passes (ui_geometry.h: TQ's Transfer sack, 16 x 15 cells of
+// 32 px in every game), so a group's grid is as many of its largest footprint as that holds.
+const int kCellPx = 32;
 
-int slotOrder(const std::string& slot) {
-    for (int i = 0; i < int(sizeof kSlotOrder / sizeof *kSlotOrder); ++i)
-        if (slot == kSlotOrder[i].slot) return i;
-    return 99;
-}
-std::string slotLabel(const std::string& slot) {
-    for (const SlotInfo& s : kSlotOrder) if (slot == s.slot) return s.label;
-    return slot.empty() ? "?" : slot;
+// What the group rules read of a catalogue record (GD's groupItem): a class the catalogue has no
+// slot for ("other") is unknown, so an auto group can take it. fromMod: only a custom game's
+// layer has the record (a record the game overrides is the base game's); none lies in a faction
+// folder.
+utg::Item groupItem(const CatalogueItem& it) {
+    utg::Item g;
+    g.record = it.record;
+    g.cls = it.cls;
+    g.rank = it.classification;
+    if (it.isSetPiece) g.flags |= utg::kFlagSet;
+    if (it.isRelic) g.flags |= utg::kFlagRelic;
+    if (it.isEquipment || it.isMi) g.flags |= utg::kFlagEquipment;
+    if (it.isBlueprint) g.flags |= utg::kFlagBlueprint;
+    if (it.isAugment) g.flags |= utg::kFlagAugment;
+    if (it.isExtra) g.flags |= utg::kFlagExtra;
+    g.fromMod = it.fromMod;
+    g.knownClass = it.slot != "other";
+    return g;
 }
 int rankOf(const std::string& c) {
     if (c == "Legendary") return 0;
@@ -626,24 +993,38 @@ std::string fmt(const char* f, int a, int b = 0) {
 } // namespace
 
 void buildLists(const std::vector<CatalogueItem>& items, const std::vector<ExcludedItem>& excluded,
-                ListsOutput& out) {
+                ListsOutput& out, const utg::GroupSet& rules, const std::vector<std::string>& viewKeys,
+                int hostCols, int hostRows) {
     out = ListsOutput();
+    std::vector<utg::Item> gitems;
+    gitems.reserve(items.size());
+    for (const CatalogueItem& it : items) gitems.push_back(groupItem(it));
+    utg::Assignment assign;
+    utg::assignGroups(rules, gitems, viewKeys, assign);
     struct Picked { const CatalogueItem* it; int order, rank; std::string lname; };
+    // the page order: group, rank, lower-case name, item level, record. The item level puts one
+    // name's tiers in order (normal < epic < legendary): TQ's level requirement comes from it,
+    // levelRequirement being 0 on the monster infrequents; catalogue.bin orders them the same way
     std::vector<Picked> picked;
     picked.reserve(items.size());
-    for (const CatalogueItem& it : items)
-        picked.push_back(Picked{&it, slotOrder(it.slot), rankOf(it.classification), lowerName(it.name)});
+    for (std::size_t ii = 0; ii < items.size(); ++ii) {
+        const int grp = assign.groupOf[ii];
+        if (grp < 0) { ++out.unpaged; continue; }   // an [exclude], or a known class no block takes
+        const CatalogueItem& it = items[ii];
+        picked.push_back(Picked{&it, grp, rankOf(it.classification), lowerName(it.name)});
+    }
     std::sort(picked.begin(), picked.end(), [](const Picked& a, const Picked& b) {
         if (a.order != b.order) return a.order < b.order;
         if (a.rank != b.rank) return a.rank < b.rank;
         int c = a.lname.compare(b.lname);
         if (c != 0) return c < 0;
+        if (a.it->itemLevel != b.it->itemLevel) return a.it->itemLevel < b.it->itemLevel;
         return a.it->record < b.it->record;
     });
-    struct Group { std::string slot; std::vector<const Picked*> items; int cw = 0, ch = 0; };
+    struct Group { int def = -1; std::vector<const Picked*> items; int cw = 0, ch = 0; };
     std::vector<Group> groups;
     for (const Picked& p : picked) {
-        if (groups.empty() || groups.back().slot != p.it->slot) { groups.push_back(Group()); groups.back().slot = p.it->slot; }
+        if (groups.empty() || groups.back().def != p.order) { groups.push_back(Group()); groups.back().def = p.order; }
         Group& gr = groups.back();
         gr.items.push_back(&p);
         gr.cw = std::max(gr.cw, p.it->footW);
@@ -651,11 +1032,17 @@ void buildLists(const std::vector<CatalogueItem>& items, const std::vector<Exclu
     }
     for (std::size_t gi = 0; gi < groups.size(); ++gi) {
         const Group& gr = groups[gi];
-        const int cols = std::max(1, kHostCols / std::max(1, gr.cw));
-        const int rows = std::max(1, kHostRows / std::max(1, gr.ch));
-        out.groups += fmt("G\t%d\t", int(gi)) + slotLabel(gr.slot) + fmt("\t%d\t%d", cols, rows)
-                    + fmt("\t%d\t%d", gr.cw * kCellPx, gr.ch * kCellPx)
-                    + fmt("\t%d\r\n", int(gr.items.size()));
+        const int cols = std::max(1, hostCols / std::max(1, gr.cw));
+        const int rows = std::max(1, hostRows / std::max(1, gr.ch));
+        const utg::GroupDef& def = assign.groups[std::size_t(gr.def)];
+        utg::GLine gl;
+        gl.index = int(gi);
+        gl.label = def.label;
+        gl.cols = cols; gl.rows = rows; gl.cellW = gr.cw * kCellPx; gl.cellH = gr.ch * kCellPx;
+        gl.count = int(gr.items.size());
+        gl.id = def.id;
+        gl.tag = def.tag;
+        out.groups += utg::formatGLine(gl) + "\r\n";
         for (const Picked* p : gr.items) {
             out.records += p->it->record + "\r\n";
             out.groups += "E\t" + p->it->record + fmt("\t%d\t%d\r\n", p->it->footW, p->it->footH);

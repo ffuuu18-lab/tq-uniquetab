@@ -125,11 +125,36 @@ _XPACK = re.compile(r"^xpack\d*$")
 
 
 class ResourceArcs:
-    """The item archives, opened on first use: a resource path names its archive."""
+    """The item archives, opened on first use: a resource path names its archive.
 
-    def __init__(self, game_dir: str):
+    game_resources: a custom game's Resources folder ("" = the start-up game), searched FIRST,
+    entry by entry (arc_reader.h ResourceArcs): the same names under it, then, for an expansion
+    path, <res>/XPack<n>.arc whose entries keep the archive's name; the first that holds the entry
+    wins, anything else is the base game's.
+
+    A custom game's archive that does not load is skipped, never fatal: kept as absent, named once
+    in `skipped`, and the lookup goes on to the next candidate and the base game's archive. A base
+    game's archive that does not load raises (the installation itself is broken)."""
+
+    def __init__(self, game_dir: str, game_resources: str = ""):
         self.root = os.path.join(game_dir, "Resources")
+        self.game_root = game_resources
         self._arcs: Dict[str, Optional[ArcArchive]] = {}
+        self.skipped: List[str] = []      # "<path>: <reason>", in the order they were met
+
+    def _open(self, root: str, rel: str, ck: str):
+        if ck not in self._arcs:
+            full = os.path.join(root, rel)
+            a = None
+            if os.path.isfile(full):
+                try:
+                    a = ArcArchive(full, ck)
+                except (OSError, ValueError, struct.error) as ex:
+                    if not ck.startswith("game:"):
+                        raise
+                    self.skipped.append(skipped_archive_text(full, str(ex)))
+            self._arcs[ck] = a
+        return self._arcs[ck]
 
     def _archive_for(self, res_path: str):
         key = res_path.replace("\\", "/")
@@ -147,14 +172,19 @@ class ResourceArcs:
         cands = [arc_name + ".arc"]
         if arc_name.lower() == "items":
             cands.append("Item.arc")
+        if self.game_root:      # a custom game's archives first, entry by entry
+            mine = [(os.path.join(folder, c) if folder else c, inner) for c in cands]
+            if folder:
+                mine.append((folder + ".arc", "/".join(parts[1:])))
+            for rel, inn in mine:
+                a = self._open(self.game_root, rel, "game:" + rel.replace("/", "\\").lower())
+                if a is not None and inn in a:
+                    return a, inn
         for c in cands:
             rel = os.path.join(folder, c) if folder else c
-            ck = rel.replace("/", "\\").lower()
-            if ck not in self._arcs:
-                full = os.path.join(self.root, rel)
-                self._arcs[ck] = ArcArchive(full, ck) if os.path.isfile(full) else None
-            if self._arcs[ck] is not None:
-                return self._arcs[ck], inner
+            a = self._open(self.root, rel, rel.replace("/", "\\").lower())
+            if a is not None:
+                return a, inner
         return None, inner
 
     def read(self, res_path: str, limit: int = 0) -> Optional[bytes]:
@@ -208,16 +238,48 @@ def parse_tag_file(data: bytes) -> Dict[str, str]:
     return out
 
 
-def load_text_tags(game_dir: str, lang: str = "EN") -> Dict[str, str]:
-    """Merged tag -> text over every .txt of Text/Text_<lang>.arc (later files win)."""
-    tags: Dict[str, str] = {}
-    arc = ArcArchive(os.path.join(game_dir, "Text", f"Text_{lang}.arc"), "text")
+def skipped_archive_text(path: str, why: str) -> str:
+    """"<path>: <reason>" for an archive that did not load (arc_reader.h skippedArchiveText): the
+    reader's message already starts with the path when it names it."""
+    return why if why.startswith(path) else path + ": " + why
+
+
+def _merge_text_arc(path: str, tag: str, tags: Dict[str, str]) -> Dict[str, str]:
+    arc = ArcArchive(path, tag)
     for key in arc.keys():
         if not key.endswith(".txt"):
             continue
-        data = arc.read(key)
+        try:
+            data = arc.read(key)
+        except zlib.error:
+            data = None
+        if data is None:                  # as the C++: an entry that does not read fails the archive
+            raise ValueError(f"{arc.path}: cannot read {arc.entries[key].name}")
         if data:
             tags.update(parse_tag_file(data))
+    return tags
+
+
+def load_text_tags(game_dir: str, lang: str = "EN", game_resources: str = "",
+                   skipped: Optional[List[str]] = None) -> Dict[str, str]:
+    """Merged tag -> text over every .txt of Text/Text_<lang>.arc (later files win); a language
+    other than EN has Text_EN.arc merged first and Text_<lang>.arc over it, so a tag the
+    translation lacks keeps its English text. Then a custom game's <Resources>/Text.arc the same
+    way: a tag the game defines replaces the base one. A game's Text.arc that cannot be read is
+    skipped whole ("<path>: <reason>" appended to `skipped`); a base text archive raises."""
+    tags: Dict[str, str] = {}
+    if lang.upper() != "EN":
+        _merge_text_arc(os.path.join(game_dir, "Text", "Text_EN.arc"), "text", tags)
+    _merge_text_arc(os.path.join(game_dir, "Text", f"Text_{lang}.arc"), "text", tags)
+    mine = os.path.join(game_resources, "Text.arc") if game_resources else ""
+    if mine and os.path.isfile(mine):
+        try:
+            game = _merge_text_arc(mine, "gametext", {})
+        except (OSError, ValueError, struct.error, zlib.error) as ex:
+            if skipped is not None:
+                skipped.append(skipped_archive_text(mine, str(ex)))
+        else:
+            tags.update(game)
     return tags
 
 

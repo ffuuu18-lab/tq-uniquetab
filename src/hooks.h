@@ -38,6 +38,10 @@ long hookCaravanOpens();
 // engine's own auto-place into the REAL Transfer sack. Game thread, SEH-guarded.
 bool hookTransferAutoPlace(unsigned id);
 
+// True while an item is on the game's cursor: a CursorHandlerItemMove that SetId was seen on is
+// still one and carries an id. Game thread. The layout editor never opens while it is.
+bool hookCursorHolds();
+
 // ---- the cost meter (ut_costprobe.h) - the mod's own time, QPC only, no allocation, no
 // per-frame log. The Present side is summed per frame and closed at each Engine::PresentSurface;
 // the game side is viewTick per GameEngine::Update. The 5-second `frames:` line carries the window.

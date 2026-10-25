@@ -12,7 +12,10 @@
 // disposes of the original itself on a true), no reagent map, and adds the take and the save set.
 #pragma once
 
+#include <stdio.h>
 #include <string.h>
+
+#include "ut_relicroute.h"   // utRelicRoute's verdicts and words
 
 namespace ut {
 
@@ -51,7 +54,16 @@ enum UtDepositVerdict {
     // mp_collect says. Its own verdict (and text) as in GD's gateDisarmReason, so a user with
     // mp_collect=1 is not told to edit the ini. Appended: the order of the others is unchanged; it
     // is decided at kUtDepRefuseMultiplayer's place.
-    kUtDepRefuseMpUnknown
+    kUtDepRefuseMpUnknown,
+    // collect_pristine_only=1 (GD's key) and the captured identity carries a part beyond its record:
+    // a prefix, a suffix, a relic or charm, a completion bonus (utPartsPristine). Appended, decided
+    // after the capture (the parts are read from it).
+    kUtDepRefuseNotPristine,
+    // a relic or charm (relicKind) whose capture utRelicRoute refuses: a completed item with a
+    // bonus its record's table does not list, and a shard count the record does not allow (or a
+    // bonus that does not fit the count). Appended, decided after the capture.
+    kUtDepRefuseRelicBonus,
+    kUtDepRefuseRelicShards
 };
 
 struct UtDepositFacts {
@@ -71,7 +83,50 @@ struct UtDepositFacts {
                             // leaves it out means 0.
     bool mpCollect;      // the ini's mp_collect (GD's key). LAST, so an aggregate that leaves it
                          // out means 0, the strict setting.
+    // Appended after it, so an aggregate that leaves them out means "every item may go in":
+    bool pristineOnly;   // the ini's collect_pristine_only (GD's key)
+    bool notPristine;    // the capture names a part beyond its record (utPartsPristine false)
+    // Appended after them, so an aggregate that leaves them out means "a unique":
+    bool relicKind;      // the record is a relic or charm of the relic list: any number of rows
+    int relicRoute;      // utRelicRoute of the capture (UtRelicRoute; relicKind only)
 };
+
+// ---- collect_pristine_only ----------------------------------------------------------------------
+// GD's pristine test reads every string of the ItemReplicaInfo other than the base record (an
+// affix, a component, an augment, a transmuter) and the reroll counters. TQ's replica has named
+// strings (ut_rescue.h): after the base come the prefix, the suffix, the relic or charm and its
+// completion bonus, and the second socket's two. Any of them non-empty = not pristine; TQ has no
+// rerolls, and every item has a seed, so the numbers are not parts. `parts` / `names` = those
+// strings and their journal names, in replica order. False = not pristine, and `why` names the
+// first part found in GD's way (`prefix = "records/..."`).
+inline bool utPartsPristine(const char* const* parts, const char* const* names, int n, char* why,
+                            size_t whyCap) {
+    if (why && whyCap) why[0] = 0;
+    for (int i = 0; parts && i < n; ++i) {
+        if (!parts[i] || !parts[i][0]) continue;
+        if (why && whyCap)
+            _snprintf_s(why, whyCap, _TRUNCATE, "%s = \"%.90s\"", names && names[i] ? names[i] : "?",
+                        parts[i]);
+        return false;
+    }
+    return true;
+}
+
+// The same test PER KIND. `parts` are the six strings after the base in replica order (prefix,
+// suffix, relic, relicBonus, relic2, relicBonus2). A relic or charm item's own relic and
+// relicBonus strings (parts 2 and 3) are its identity - its completion bonus - not a part beyond
+// its record; the others must still be empty. A unique keeps the whole test.
+const int kUtPartRelic = 2, kUtPartRelicBonus = 3;
+inline bool utPartsPristineKind(const char* const* parts, const char* const* names, int n,
+                                bool relicKind, char* why, size_t whyCap) {
+    if (!relicKind) return utPartsPristine(parts, names, n, why, whyCap);
+    if (why && whyCap) why[0] = 0;
+    for (int i = 0; parts && i < n; ++i) {
+        if (i == kUtPartRelic || i == kUtPartRelicBonus) continue;
+        if (!utPartsPristine(parts + i, names ? names + i : nullptr, 1, why, whyCap)) return false;
+    }
+    return true;
+}
 
 // ---- THE multiplayer conjunct of every move -------------------------------
 // GD's rule (the Grim Dawn mod's mpBarred, ut_reagent.cpp): mp_collect=1 = the collection works in
@@ -117,9 +172,15 @@ inline int utDepositDecide(const UtDepositFacts& f) {
     if (!f.bindings) return kUtDepRefuseBindings;
     if (!f.isItem) return kUtDepRefuseNotItem;
     if (!f.inCatalogue) return kUtDepRefuseNotCatalogue;
-    if (f.rowsNow > 0u) return kUtDepRefuseHave;
+    if (f.rowsNow > 0u && !f.relicKind) return kUtDepRefuseHave;   // a relic: any number
     if (!utStackIsSingle(f.stack)) return kUtDepRefuseStack;
     if (!f.haveCap || !f.capMatches) return kUtDepRefuseCapture;
+    if (f.relicKind && !utRelicRouteAccepted(f.relicRoute)) {
+        if (f.relicRoute == kUtRelicRouteRefuseBonus) return kUtDepRefuseRelicBonus;
+        if (f.relicRoute == kUtRelicRouteRefuseShards) return kUtDepRefuseRelicShards;
+        return kUtDepRefuseCapture;   // not routed: the capture did not reach the routing
+    }
+    if (f.pristineOnly && f.notPristine) return kUtDepRefuseNotPristine;
     return kUtDepTable;
 }
 
@@ -141,6 +202,9 @@ inline const char* utDepositWhyText(int v) {
     case kUtDepRefuseHave: return "already in the collection";
     case kUtDepRefuseMpUnknown:
         return "the session mode is UNKNOWN (refuse when unsure, whatever mp_collect says)";
+    case kUtDepRefuseNotPristine: return "the item is not pristine";
+    case kUtDepRefuseRelicBonus: return utRelicRouteWhy(kUtRelicRouteRefuseBonus);
+    case kUtDepRefuseRelicShards: return utRelicRouteWhy(kUtRelicRouteRefuseShards);
     default: return "?";
     }
 }
@@ -151,6 +215,8 @@ inline int utDepositCapableVerdict(const UtDepositFacts& f) {
     UtDepositFacts g = f;
     g.haveCap = true;      // the capture runs at the drop itself; the slot asks per frame
     g.capMatches = true;
+    g.notPristine = false; // read from that capture, at the drop
+    if (g.relicKind) g.relicRoute = kUtRelicRouteRed;   // routed from that capture, at the drop
     return utDepositDecide(g);
 }
 inline bool utDepositCapable(const UtDepositFacts& f) {
@@ -257,6 +323,154 @@ inline bool utSaveSetLeaf(bool modKnown, const char* modName, bool questKnown, b
     for (const char* p = leaf; *p; ++p) out[k++] = *p;
     out[k] = 0;
     return true;
+}
+
+// The GAME of a save set (ut_folders.h): the mod's own leaf - what follows "tq-uniq-items-" in a
+// set utSaveSetLeaf named from GameInfo::GetModName ("mymod", "my_mod-1a2b3c4d", "mod_custom") -
+// which names the mod's folder mods\<leaf>\. False and "" for the main game's two sets
+// (tq-uniq-items, tq-uniq-items-custom: the root files) and for anything else.
+inline bool utSaveSetGame(const char* setLeaf, char* out, unsigned cap) {
+    if (!out || !cap) return false;
+    out[0] = 0;
+    static const char kPrefix[] = "tq-uniq-items-";
+    if (!setLeaf || strncmp(setLeaf, kPrefix, sizeof(kPrefix) - 1) != 0) return false;
+    const char* game = setLeaf + sizeof(kPrefix) - 1;
+    if (!*game || strcmp(game, "custom") == 0 || strlen(game) >= cap) return false;
+    for (const char* p = game; *p; ++p) {
+        const char c = *p;
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) return false;
+    }
+    strcpy_s(out, cap, game);
+    return true;
+}
+
+// ---- the stored roll, named (a monster infrequent) ---------------------------------------------
+// TQ PORT of the Grim Dawn mod's ut_miroll.h, the words only. GD capped an MI record at ONE roll
+// because its journal row keeps one identity per record; TQ's rule above (kUtDepRefuseHave) already
+// refuses a second copy of EVERY record and a TQ row keeps its full identity, so no cap is ported -
+// only the reason's words, which name the roll the collection holds, and the tooltip's "(another
+// roll)" test. A roll is the replica's prefix (+0x1C) and suffix (+0x34) record paths and its seed
+// (+0x7C) - the slots every deposit captures (ut_proto.h).
+struct UtRollKey {
+    char prefix[160];  // the prefix affix record, "" = none
+    char suffix[160];  // the suffix affix record, "" = none
+    unsigned int seed;
+    bool known;        // false = the roll could not be read
+};
+
+inline void utRollClear(UtRollKey* k) {
+    if (!k) return;
+    k->prefix[0] = 0;
+    k->suffix[0] = 0;
+    k->seed = 0;
+    k->known = false;
+}
+
+// The roll out of a captured identity's prefix and suffix strings and its seed.
+inline bool utRollSet(const char* prefix, const char* suffix, unsigned int seed, UtRollKey* out) {
+    if (!out) return false;
+    utRollClear(out);
+    strncpy_s(out->prefix, sizeof(out->prefix), prefix ? prefix : "", _TRUNCATE);
+    strncpy_s(out->suffix, sizeof(out->suffix), suffix ? suffix : "", _TRUNCATE);
+    out->seed = seed;
+    out->known = true;
+    return true;
+}
+
+// Two affix record paths name the same record: case-insensitive, '/' and '\\' alike (a row
+// written from one spelling, an item read in another).
+inline bool utRollPathSame(const char* a, const char* b) {
+    for (;; ++a, ++b) {
+        char x = *a, y = *b;
+        if (x == '\\') x = '/';
+        if (y == '\\') y = '/';
+        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+        if (x != y) return false;
+        if (!x) return true;
+    }
+}
+
+// Two rolls are the same roll when the prefix, the suffix and the seed all match. Unknown never
+// matches anything.
+inline bool utRollSame(const UtRollKey& a, const UtRollKey& b) {
+    if (!a.known || !b.known) return false;
+    return a.seed == b.seed && utRollPathSame(a.prefix, b.prefix) &&
+           utRollPathSame(a.suffix, b.suffix);
+}
+
+// "records/xpack/item/lootmagicalaffixes/prefix/default/prefix_ar_01.dbr" -> "prefix_ar_01". The
+// catalogue carries no affix names (affixes are not collection items), so the record's leaf is the
+// honest word.
+inline void utRollLeaf(const char* record, char* out, size_t cap) {
+    if (!out || !cap) return;
+    out[0] = 0;
+    if (!record || !*record) return;
+    const char* s = record;
+    for (const char* p = record; *p; ++p) {
+        if (*p == '/' || *p == '\\') s = p + 1;
+    }
+    strncpy_s(out, cap, s, _TRUNCATE);
+    const size_t n = strlen(out);
+    if (n > 4 && _stricmp(out + n - 4, ".dbr") == 0) out[n - 4] = 0;
+}
+
+// The roll in words, for the refusal reason and the log (GD's utRollDescribe):
+//   "Machae's Helm" level 32: prefix prefix_ar_01, suffix suffix_dmg_fire_05, seed 2115467035
+// `name` "" and `level` <= 0 are left out; an empty affix reads "no prefix" / "no suffix".
+inline void utRollDescribe(const UtRollKey& k, const char* name, int level, char* out,
+                           size_t cap) {
+    if (!out || !cap) return;
+    out[0] = 0;
+    char head[200];
+    head[0] = 0;
+    if (name && *name && level > 0) {
+        _snprintf_s(head, sizeof(head), _TRUNCATE, "\"%s\" level %d: ", name, level);
+    } else if (name && *name) {
+        _snprintf_s(head, sizeof(head), _TRUNCATE, "\"%s\": ", name);
+    } else if (level > 0) {
+        _snprintf_s(head, sizeof(head), _TRUNCATE, "level %d: ", level);
+    }
+    if (!k.known) {
+        _snprintf_s(out, cap, _TRUNCATE, "%sroll not readable", head);
+        return;
+    }
+    char p[160], s[160];
+    utRollLeaf(k.prefix, p, sizeof(p));
+    utRollLeaf(k.suffix, s, sizeof(s));
+    _snprintf_s(out, cap, _TRUNCATE, "%s%s%s, %s%s, seed %u", head, p[0] ? "prefix " : "no prefix",
+                p, s[0] ? "suffix " : "no suffix", s, k.seed);
+}
+
+// kUtDepRefuseHave for a monster infrequent: GD's reason naming the stored roll (`roll` is
+// utRollDescribe's text). GD's tail about max_per_record is left out: TQ has no such key.
+inline void utDepositWhyRoll(const char* roll, char* out, size_t cap) {
+    if (!out || !cap) return;
+    _snprintf_s(out, cap, _TRUNCATE,
+                "a monster infrequent keeps ONE roll per record and this box already holds it - "
+                "%s. Take that one out first to store this roll",
+                roll && *roll ? roll : "roll not readable");
+}
+
+// The two affix getters' bytes (Game.dll 0x1B8970 / 0x1B8990): `83 B9 <X+0x14> 10` (cmp the
+// string's capacity with 16), `8D 81 <X>` (lea eax,[ecx+X]), `72 02 8B 00 C3` - the c_str of the
+// std::string at this+X. Returns X, 0 = not that shape.
+inline unsigned utRollGetterOffset(const unsigned char* b) {
+    if (!b || b[0] != 0x83 || b[1] != 0xB9 || b[6] != 0x10 || b[7] != 0x8D || b[8] != 0x81 ||
+        b[13] != 0x72 || b[14] != 0x02 || b[15] != 0x8B || b[16] != 0x00 || b[17] != 0xC3)
+        return 0;
+    unsigned cmpAt = 0, x = 0;
+    memcpy(&cmpAt, b + 2, 4);
+    memcpy(&x, b + 9, 4);
+    return cmpAt == x + 0x14 ? x : 0;
+}
+// Item::GetItemReplicaInfo (Game.dll 0x1B9290): `8D 81 <R>` (lea eax,[ecx+R]) - the replica inside
+// the Item. Returns R, 0 = not that shape.
+inline unsigned utReplicaGetterOffset(const unsigned char* b) {
+    if (!b || b[0] != 0x8D || b[1] != 0x81) return 0;
+    unsigned r = 0;
+    memcpy(&r, b + 2, 4);
+    return r;
 }
 
 }  // namespace ut

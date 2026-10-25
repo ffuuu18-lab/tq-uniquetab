@@ -82,6 +82,7 @@ struct UtGridHover {
 struct UtGridBounds {
     float canvasW, canvasH;
     float winX, winY, winW, winH;   // the caravan window rect (records x UI scale), canvas px
+    int cols, rows;                 // the grid in force's cells; 0 = the 16 x 15 Transfer sack
 };
 
 struct UtGridState {
@@ -170,7 +171,8 @@ inline int utGridFeed(UtGridState* s, float gx, float gy, unsigned cw, unsigned 
                       const UtGridBounds& b) {
     if (s->verdict != 0) return kUtGridIgnored;
     if (cw < 8u || cw > 256u || ch < 8u || ch > 256u) return kUtGridFedNotUsable;
-    const float gw = (float)(kUtGridCols * (int)cw), gh = (float)(kUtGridRows * (int)ch);
+    const float gw = (float)((b.cols > 0 ? b.cols : kUtGridCols) * (int)cw),
+                gh = (float)((b.rows > 0 ? b.rows : kUtGridRows) * (int)ch);
     if (!(gx == gx) || !(gy == gy) ||   // NaN
         !utGridInside(gx, gy, gw, gh, 0.0f, 0.0f, b.canvasW, b.canvasH) ||
         !utGridInside(gx, gy, gw, gh, b.winX, b.winY, b.winW, b.winH))
@@ -285,7 +287,8 @@ inline int utGridStep(UtGridState* s, const UtGridHover& h, const UtGridBounds& 
         return kUtGridRefusedOrigin;
     }
     if (h.id == s->candId) return kUtGridSamePrototype;
-    const float gw = (float)(kUtGridCols * (int)h.cw), gh = (float)(kUtGridRows * (int)h.ch);
+    const float gw = (float)((b.cols > 0 ? b.cols : kUtGridCols) * (int)h.cw),
+                gh = (float)((b.rows > 0 ? b.rows : kUtGridRows) * (int)h.ch);
     if (!utGridInside(s->candX, s->candY, gw, gh, 0.0f, 0.0f, b.canvasW, b.canvasH)) {   // (c)
         s->verdict = -1;
         return kUtGridRefusedCanvas;

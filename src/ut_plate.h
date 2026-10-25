@@ -20,6 +20,8 @@ struct PlateGeometry {
     int canvasW, canvasH;     // the canvas the pad draws on
     float winX, winY, winW, winH;     // the caravan window, canvas px
     float pageX, pageY, pageW, pageH; // the Transfer page inside it (TransferWindow location)
+    float engineScale;        // Engine::GetUIScale itself, ui_scale_pct not applied: the scale
+                              // the engine places its own window and items at
 };
 
 // Fills `g` for this frame. False when the canvas or the scale cannot be read.

@@ -258,7 +258,9 @@ struct CellRect {
 int windowLeftover(const SlotGeometry& g, int shown, int rowOffset, int hostCols, int hostRows,
                    CellRect out[3]) noexcept;
 
-// One group of uniq-groups.txt as writes it: `G <i> <label> <cols> <rows> <cw> <ch> <n>`
+// One group of uniq-groups.txt as writes it: `G <i> <label> <cols> <rows> <cw> <ch> <n> <id> <tag>`
+// (GD's G line, src\gen\ut_groups.h; the older line without <id> <tag> is read too and takes
+// them from the built-in table)
 // then n lines `E <record> <w> <h>` (tab separated, CRLF or LF). the G line's geometry IS
 // the slot - cols x rows slots per page, each cw x ch pixels (32 px cells) - and it must equal the
 // slot the E lines give (their largest footprint); the parser refuses a group where it does not.
@@ -272,14 +274,34 @@ struct GroupList {
     int declared = 0;               // the G line's count
     int cols = 0, rows = 0;         // the G line's slots per page across / down
     int cellW = 0, cellH = 0;       // the G line's slot size in pixels
+    std::string id, tag;            // the G line's id (head ...) and tag (HEL ...)
     std::vector<GroupEntry> entries;
 };
 
 // Parses the whole text. False (and *error) on a malformed line, an E before any G, a footprint
 // outside 1..2 x 1..5, a group whose E count differs from its G line, or a G line whose geometry is
-// not its entries' slot: refuse, never guess.
+// not its entries' slot on the GAME's area: refuse, never guess. The area is `hostCols` x
+// `hostRows` cells - the game's uniq-geometry.txt P line (w / 32 x h / 32), the area the
+// generator writes the G lines on (16 x 15 in the base game, 20 x 20 in a game with a larger
+// caravan area).
 bool parseGroupsText(const std::string& text, std::vector<GroupList>* out,
-                     std::string* error = nullptr);
+                     std::string* error = nullptr, int hostCols = kHostCols,
+                     int hostRows = kHostRows);
+
+// One group of a game's set packed on the game's area, as the live tab packs it at load.
+struct PackedGroup {
+    SlotGeometry slot;
+    std::vector<PackPlacement> placed;
+    int pages = 0;
+};
+
+// The in-game reader of one game's uniq-groups.txt (ut_live.cpp liveInit; the catalogue suite
+// runs it over every generated set): parseGroupsText on the game's area (`hostCols` x
+// `hostRows`, its P line), then every group packed on that same area (packSlots). False and
+// *error - the text the live tab logs - at the first refusal; nothing is kept then.
+bool readGameGroups(const std::string& text, int hostCols, int hostRows,
+                    std::vector<GroupList>* lists, std::vector<PackedGroup>* packed,
+                    std::string* error = nullptr);
 
 }  // namespace gdut
 

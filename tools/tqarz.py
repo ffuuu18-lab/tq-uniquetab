@@ -186,7 +186,11 @@ class ArzDatabase:
                 self._index[key] = i
 
     @classmethod
-    def load_game(cls, game_dir: str, tags: Optional[List[str]] = None) -> "ArzDatabase":
+    def load_game(cls, game_dir: str, tags: Optional[List[str]] = None,
+                  game_arz: str = "") -> "ArzDatabase":
+        """The base game's archives in load order; game_arz (a custom game's
+        <root><name>/Database/<name>.arz) LAST, tag "game", as Engine::InitializeMod loads it over
+        the main database (arz_reader.h ArzDatabase::loadGame)."""
         arcs: List[ArzArchive] = []
         for tag, rel in ARZ_LOAD_ORDER:
             if tags is not None and tag not in tags:
@@ -196,6 +200,8 @@ class ArzDatabase:
                 arcs.append(ArzArchive(full, tag))
         if not arcs:
             raise FileNotFoundError(f"no .arz archives found under {game_dir}")
+        if game_arz:
+            arcs.append(ArzArchive(game_arz, "game"))
         return cls(arcs)
 
     def __len__(self) -> int:

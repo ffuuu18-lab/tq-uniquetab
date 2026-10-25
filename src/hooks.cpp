@@ -29,8 +29,9 @@
 // CHANGES THE FIRST RULE for the view only: while the collection view is ON (ut_view.cpp),
 // the Transfer drop / quick-move / prototype pick-up detours REFUSE without calling their
 // original, GetItemUnderPoint returns 0 on the mod sack for the right-click and held pick-up
-// paths, Sort refuses on the mod sack, and GetPlayerTransfer hands the mod sack to the page's own
-// accessor. Every one of those predicates is FALSE while the view is OFF, so with the view OFF
+// paths, Sort refuses on the mod sack, the Transfer page's SORT button is refused on every page
+// (its handler combines relics in the page's sack before it sorts, TQ.exe 0xC4270), and
+// GetPlayerTransfer hands the mod sack to the page's own accessor. Every one of those predicates is FALSE while the view is OFF, so with the view OFF
 // every detour is still the pass-through. No refusal ever calls a Primary* original.
 //
 // the page mouse handler's GetItemUnderPoint (the left-click site) is refused only for a
@@ -38,6 +39,8 @@
 // the tooltip works. A store event that passed through marks the owned set dirty.
 
 #include "hooks.h"
+#include "ut_mem.h"
+#include "ut_screenprobe.h"
 
 #include <windows.h>
 
@@ -50,14 +53,19 @@
 #include "ut_config.h"
 #include "ut_costprobe.h"     // the cost meter
 #include "ut_depositgate.h"   // utCapSlotAnswer
+#include "ut_gameswitch.h"    // the resets' order
+#include "ut_generate.h"      // the game switch
+#include "ut_live.h"
 #include "ut_log.h"
 #include "ut_owned.h"
 #include "ut_panel.h"
+#include "ut_proto.h"
 #include "ut_recon.h"
 #include "ut_search.h"   // the key gate
 #include "ut_store.h"
 #include "ut_tooltip.h"
 #include "ut_view.h"
+#include "ut_cover.h"
 #include "ut_viewgate.h"
 
 #pragma intrinsic(_ReturnAddress)
@@ -73,6 +81,11 @@ PfnEngine_Void o_PresentSurface = nullptr;
 PfnGameEngine_Update o_GameUpdate = nullptr;
 PfnEngine_Void o_LoadMainDatabase = nullptr;
 PfnEngine_LoadDatabase o_LoadDatabase = nullptr;
+PfnEngine_InitializeMod o_InitializeMod = nullptr;
+PfnEngine_Void o_CleanseDatabase = nullptr;
+volatile LONG g_switchLive = 0;   // both game-switch detours are in, and no name read has faulted
+bool g_gateWanted = false;        // the search key gate was asked for at start
+bool g_sawPlayer = false;         // game thread: a world is up (watchForTeardown's edge)
 PfnNpcCaravan_OnPlayerInteract o_OnPlayerInteract = nullptr;
 PfnGameEngine_Void o_CaravanGoodbye = nullptr;
 PfnGameEngine_SetCaravanMode o_SetCaravanMode = nullptr;
@@ -125,6 +138,8 @@ void costFirstSay() {
 volatile LONG64 g_updates = 0;
 volatile LONG g_caravanOpen = 0;       // OnPlayerInteract -> 1, CaravanGoodbye -> 0
 volatile LONG g_caravanOpens = 0;      // how many times it opened this session
+volatile LONG g_caravanGoodbyes = 0;   // CaravanGoodbye calls this session (one inside an open: in place)
+LONG g_inInteract = 0;                 // game thread: inside OnPlayerInteract's original
 volatile LONG g_mainDbSeen = 0;        // the LoadMainDatabase detour fired
 volatile LONG g_dbTried = 0;           // the late-load check has run (exactly one tick wins)
 volatile LONG g_hooksLive = 0;         // hooksInstall finished
@@ -252,6 +267,7 @@ void __fastcall hk_PresentSurface(TqEngine* self, void* /*edx*/) {
         presentBody(self);
         trySubclass(InterlockedCompareExchange64(&g_frames, 0, 0));
         panelGrayPrepare(InterlockedCompareExchange(&g_world, 0, 0) == 0);
+        coverPrepare(InterlockedCompareExchange(&g_world, 0, 0) == 0);
         const LONG64 t0 = probeNow();
         panelDraw();   // the pad + label, only while the Transfer tab is on screen
         // the frame's Present-side cost = the page draw PRE / POST and the tooltip
@@ -270,21 +286,29 @@ void __fastcall hk_PresentSurface(TqEngine* self, void* /*edx*/) {
 // coming up; the first that reports none after one is the world gone. Polled every 30 updates, so
 // this costs one exported call twice a second.
 void watchForTeardown(TqGameEngine* self, LONG64 n) {
-    static bool sawPlayer = false;
     if (!g_tq.GameGetMainPlayer || (n % 30) != 0) return;
     TqPlayer* player = g_tq.GameGetMainPlayer(self);
     const bool have = player != nullptr;
-    if (have && !sawPlayer) {
+    if (have && !g_sawPlayer) {
         const LONG w = InterlockedIncrement(&g_world);
         logI("world #%ld is up: main player %p, GameEngine %p", w, (void*)player, (void*)self);
-        sawPlayer = true;
+        g_sawPlayer = true;
+        gamesOnWorld();   // the start-up builds start no other game in a running world
         viewOnWorld(true);
-    } else if (!have && sawPlayer) {
-        sawPlayer = false;
+        screenProbeOnWorld();   // the screen input log: log only, a fresh budget per world
+        char point[48];
+        _snprintf_s(point, sizeof(point), _TRUNCATE, "world #%ld is up", w);
+        memSay(point, true);
+    } else if (!have && g_sawPlayer) {
+        g_sawPlayer = false;
         logI("world #%ld is gone: the first GameEngine::Update with no main player",
              InterlockedCompareExchange(&g_world, 0, 0));
         viewOnWorld(false);   // G4/G6: OFF, the prototypes dropped (the world took them)
         panelForgetFonts();
+        char point[48];
+        _snprintf_s(point, sizeof(point), _TRUNCATE, "world #%ld is gone",
+                    InterlockedCompareExchange(&g_world, 0, 0));
+        memSay(point, true);
     }
 }
 
@@ -381,15 +405,32 @@ void __fastcall hk_OnPlayerInteract(TqNpcCaravan* self, void* /*edx*/, unsigned 
     }
     // Set FIRST: the calls the original makes inside (the page build) belong to the open caravan.
     const LONG was = InterlockedExchange(&g_caravanOpen, 1);
+    const LONG byes = InterlockedCompareExchange(&g_caravanGoodbyes, 0, 0);
+    ++g_inInteract;
     if (o_OnPlayerInteract) o_OnPlayerInteract(self, id, a, b);
+    --g_inInteract;
     UT_LE_SAVE;
+    // a goodbye inside the original (a click on the caravan driver while the window is up) closed
+    // the caravan and the engine opened it again in place: a close, then an open (utCaravanInteract)
+    const int step = utCaravanInteract(was != 0, byes, InterlockedCompareExchange(&g_caravanGoodbyes, 0, 0));
+    if (step == kUtCaravanReopened) {
+        InterlockedExchange(&g_caravanOpen, 1);
+        __try {
+            viewOnReopen();   // the view's state: open again (the view stays OFF, as after any open)
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            viewFaultSafe("an exception in the caravan re-open (G4)");
+        }
+    }
     __try {
-        if (!was) {
+        if (step != kUtCaravanAlready) {
             InterlockedIncrement(&g_caravanOpens);
             g_openTick = GetTickCount();
             for (int i = 0; i < kCntCount; ++i) g_cntAtOpen[i] = g_cnt[i];
-            logI("caravan open: NpcCaravan::OnPlayerInteract(npc=%p, player id=%u) mode=%ld",
-                 (void*)self, id, readMode(gameEngine()));
+            logI("caravan open: NpcCaravan::OnPlayerInteract(npc=%p, player id=%u) mode=%ld%s",
+                 (void*)self, id, readMode(gameEngine()),
+                 step == kUtCaravanReopened
+                     ? " - again in place (its CaravanGoodbye ran inside: a close, then an open)"
+                     : "");
             reconOnCaravan();   // the unresolved pending rows against every container
         } else {
             logD("NpcCaravan::OnPlayerInteract(npc=%p, id=%u) while already open", (void*)self, id);
@@ -407,8 +448,21 @@ void __fastcall hk_CaravanGoodbye(TqGameEngine* self, void* /*edx*/) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         viewFaultSafe("an exception in the caravan-close OFF (G2)");
     }
+    InterlockedIncrement(&g_caravanGoodbyes);
     if (o_CaravanGoodbye) o_CaravanGoodbye(self);
     UT_LE_SAVE;
+    static volatile LONG s_closeOff = 0;   // a fault in the editor's close: never retried
+    bool closeFault = false;
+    if (!InterlockedCompareExchange(&s_closeOff, 0, 0)) {
+        __try {
+            panelCaravanClosed();   // the layout editor closes with the page (nothing written)
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            closeFault = true;
+        }
+    }
+    if (closeFault && InterlockedExchange(&s_closeOff, 1) == 0)
+        logE("layout editor: the close with the caravan FAULTED - the editor is no longer closed when "
+             "the caravan closes for this session");
     __try {
         // the engine wrote Player.chr just BEFORE this call (measured): settle the journal's
         // pending rows against it now (a read-only look at the save folder).
@@ -424,8 +478,12 @@ void __fastcall hk_CaravanGoodbye(TqGameEngine* self, void* /*edx*/) {
              "getters stash x%ld transfer x%ld relic x%ld (const x%ld/%ld/%ld)",
              ms, d[kCntSetMode], d[kCntStash], d[kCntTransfer], d[kCntRelic], d[kCntStashC],
              d[kCntTransferC], d[kCntRelicC]);
+        // inside OnPlayerInteract's original the engine opens the window again in place: the
+        // calls left in that original (the page build) belong to the caravan open again
+        if (g_inInteract > 0) InterlockedExchange(&g_caravanOpen, 1);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+    memSay("caravan close", true);   // outside the frame: its engine reads have their own
     UT_LE_RESTORE;
 }
 
@@ -738,7 +796,24 @@ bool __fastcall hk_RemoveItemFromTransfer(TqGameEngine* ge, void*, unsigned id) 
     UT_LE_RESTORE;
     return r;
 }
+// The cursor handlers SetId was called on (the engine keeps a few): an item is on the cursor while
+// one of them, still a CursorHandlerItemMove, carries an id (hookCursorHolds). Game thread.
+TqCursorItemMove* g_cursorSeen[8] = {};
+int g_cursorSeenN = 0;
+void cursorNote(TqCursorItemMove* h) {
+    if (!h) return;
+    for (int i = 0; i < g_cursorSeenN; ++i)
+        if (g_cursorSeen[i] == h) return;
+    if (g_cursorSeenN < 8) {
+        g_cursorSeen[g_cursorSeenN++] = h;
+        return;
+    }
+    memmove(g_cursorSeen, g_cursorSeen + 1, 7 * sizeof(g_cursorSeen[0]));
+    g_cursorSeen[7] = h;
+}
+
 void __fastcall hk_SetId(TqCursorItemMove* self, void* /*edx*/, unsigned id) {
+    cursorNote(self);
     const unsigned was = cursorItemId(self);
     // A prototype id never reaches a cursor: the original runs with 0 (the cursor stays empty).
     unsigned pass = id;
@@ -781,6 +856,7 @@ unsigned __fastcall hk_TransferAccessor(void* self, void* /*edx*/, unsigned arg)
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         viewFault("an exception after the Transfer page accessor");
     }
+    viewAccessorGrid(self);   // the grid in force: its own reads guarded, the SetDims call not
     UT_LE_RESTORE;
     return r;
 }
@@ -834,8 +910,74 @@ unsigned __fastcall hk_GetItemUnderPoint(const TqSack* s, void* /*edx*/, float x
         hover.slotWide = false;
     }
     if (refuse) return 0;   // "nothing under the cursor": no clone, no cursor, no removal
+    // The game's own Transfer page (the view OFF): the pad and the label stay where the player put
+    // them, drawn over the real cells they cover. Under them the page's hover, press, right-click
+    // and held pick-up read "nothing under the cursor": no tooltip, no highlight, no item taken.
+    // A fault in that read: one ERROR, the refusal off for the session, never read again.
+    {
+        static volatile LONG s_realPadOff = 0;
+        bool realOwns = false;
+        bool realFault = false;
+        if (!InterlockedCompareExchange(&s_realPadOff, 0, 0)) {
+            UT_LE_SAVE;   // the cursor read (user32) on every page-site call leaves the last error as it was
+            __try {
+                realOwns = viewRealPageSite(s, ret) && panelRealPadOwnsCursor();
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                realOwns = false;
+                realFault = true;
+            }
+            UT_LE_RESTORE;
+        }
+        if (realFault && InterlockedExchange(&s_realPadOff, 1) == 0) {
+            UT_LE_SAVE;
+            logE("buttons: the read of the real Transfer page's pad under the page's pick-up FAULTED - "
+                 "the cells under the pad are no longer refused for this session");
+            UT_LE_RESTORE;
+        }
+        if (realOwns) {
+            UT_LE_SAVE;
+            __try {
+                panelRealPadRefusalSaid();
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+            UT_LE_RESTORE;
+            return 0;
+        }
+    }
     unsigned id = o_GetItemUnderPoint(s, x, y);
     if (takeCheck) {
+        // A press the open layout editor owns (the grid it moves, a part lying over the page) is
+        // the editor's: the engine's read of the same press takes nothing from the collection, so
+        // no item lands on the cursor and the editor's press is not turned into "an item is on
+        // the cursor".
+        // A fault in that read: one ERROR, the refusal off for the session, never read again.
+        static volatile LONG s_editOwnOff = 0;
+        bool editorOwns = false;
+        bool editFault = false;
+        if (!InterlockedCompareExchange(&s_editOwnOff, 0, 0)) {
+            __try {
+                editorOwns = panelLayoutEditOwnsCursor();
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                editorOwns = false;
+                editFault = true;
+            }
+        }
+        if (editFault && InterlockedExchange(&s_editOwnOff, 1) == 0) {
+            UT_LE_SAVE;
+            logE("layout editor: the read of the editor's press under the page's pick-up FAULTED - the "
+                 "pick-up is no longer refused under the editor for this session");
+            UT_LE_RESTORE;
+        }
+        if (editorOwns) {
+            UT_LE_SAVE;
+            __try {
+                logD("layout editor: the page's pick-up under the editor's press refused (item %u "
+                     "stays on the page, %s)", id, takeRight ? "right-click" : "left-click");
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+            UT_LE_RESTORE;
+            return 0;
+        }
         // a verified pick-up press on the collection: the id passes only for a takeable
         // prototype (built from a journal row, rows > 0, the journal writable), else 0.
         __try {
@@ -970,6 +1112,37 @@ void __fastcall hk_PageDraw(void* page, void* /*edx*/, void* canvas, const TqVec
     probePresentAdd(probeNow() - t0);
 }
 
+// ---- the HUD item rollover's Draw (TQ.exe 0x18E6D0, counted signature) - PRE -----------
+// InGameUI's Render (TQ.exe 0x56980) draws the HUD (InGameUI+0xC94; its Draw 0x132D60, pass 0 =
+// 0x131600), then the item on the cursor (InGameUI+0xE4: the cursor and its CursorHandler's
+// Render). The HUD's pass 0 draws the caravan window (hud+0x4838C, at 0x131D63) and, 15 children
+// later, the item rollover (hud+0x48240, at 0x131F59). The head of the rollover's Draw is after the
+// windows and under the item tooltip and the item on the cursor: the pad and the label pinned to
+// the screen, and the open layout editor, are drawn there. The original runs exactly once, after.
+PfnExe_PageDraw o_RollDraw = nullptr;
+void __fastcall hk_RollDraw(void* self, void* /*edx*/, void* canvas, const TqVec2* origin, int pass,
+                            float alpha) {
+    // A fault at this site: one ERROR, the site off for the session (the screen parts are drawn
+    // from the Present detour again), never entered again.
+    static volatile LONG s_rollOff = 0;
+    UT_LE_SAVE;
+    const LONG64 t0 = probeNow();
+    bool faulted = false;
+    if (!InterlockedCompareExchange(&s_rollOff, 0, 0)) {
+        __try {
+            panelRolloverDrawPre(self, canvas, origin, pass, alpha);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            faulted = true;
+        }
+    }
+    if (faulted && InterlockedExchange(&s_rollOff, 1) == 0)
+        logE("panel: the screen parts' draw FAULTED (at the head of the HUD item rollover's Draw) - "
+             "they are drawn from the Present detour for this session");
+    probePresentAdd(probeNow() - t0);
+    UT_LE_RESTORE;
+    o_RollDraw(self, canvas, origin, pass, alpha);   // exactly once
+}
+
 // ---- an item widget's background (TQ.exe 0x10A9B0, counted signature) -----------------
 // For a PROTOTYPE's widget inside the Transfer page draw (panelRectRouteBegin / End): the slot rect
 // for the engine's tint and border, then the centred footprint for the icon it draws next. Every
@@ -1011,6 +1184,40 @@ bool __fastcall hk_Sort(TqSack* s, void* /*edx*/, unsigned arg) {
     }
     if (refuse) return false;
     return o_Sort(s, arg);
+}
+
+// ---- ItemRelic::GetUIBitmapText - no level text on the relic page's own pieces -------------
+// ItemRelic::GetUIBitmapText (a partial piece's level on its icon; ItemCharm inherits it): the
+// relic page's own pieces get no text - the page draws its own count on the slot; every other relic
+// and charm keeps the engine's. `out` is left as it came, as the engine leaves it for a completed one.
+typedef void(__fastcall* PfnRelicText)(void* self, void* edx, void* out);
+PfnRelicText o_RelicText = nullptr;
+void __fastcall hk_RelicText(void* self, void* edx, void* out) {
+    if (liveRelicPlaceCount() > 0) {   // the relic page is built: its pieces are the mod's prototypes
+        for (int i = 0, n = protoCount(); i < n; ++i)
+            if (protoItem(i) == self) return;
+    }
+    o_RelicText(self, edx, out);
+}
+
+// ---- the Transfer page's SORT button - refused while the view is ON ------------------------
+// TQ.exe 0xC4270 (exe.transferSortButton), the page's button handler (event, widget), `ret 8`.
+// For event 0 on its sort widget it runs PlayerInventoryCtrl::CombineRelicsInSack on the page's
+// sack, then sorts it; while the view is ON that sack is the mod sack, so the combine would merge
+// relic prototypes. That one event is refused (one INFO line per press, the original not called);
+// every other event and widget - the purchase button included - goes to the original.
+typedef unsigned(__thiscall* PfnExe_ButtonHandler)(void* self, int event, void* widget);
+PfnExe_ButtonHandler o_SortButton = nullptr;
+unsigned __fastcall hk_SortButton(void* self, void* /*edx*/, int event, void* widget) {
+    // a pointer compare and the view's flag: no engine memory is read here
+    const bool refuse = event == 0 && g_tq.transferSortWidget != 0 && widget &&
+                        widget == (void*)((char*)self + g_tq.transferSortWidget) && viewOn();
+    if (refuse) {
+        logI("view: the Transfer sort button is refused while the collection view is ON - "
+             "nothing combined, nothing moved");
+        return 0;
+    }
+    return o_SortButton(self, event, widget);
 }
 
 // ---- CursorHandlerItemMove vftable slot +0x30 (IsTransferCapable) --------------------------
@@ -1072,6 +1279,139 @@ const char* mhText(MH_STATUS s) {
     return t ? t : "?";
 }
 
+// ---------------------------------------------------------------------------------------------
+// Engine::InitializeMod / Engine::CleanseDatabase -- the game switch
+// ---------------------------------------------------------------------------------------------
+// InitializeMod(name, root) loads a custom game's database (the main one, then <root><name>'s
+// .arz over it) before its world - the name FIRST, the folder second (utGameCallOf); some games
+// are entered twice in a row, the second call is the game in force again (utGameAgain).
+// CleanseDatabase loads the main database back. Both run on the
+// game thread with no world loaded. BEFORE InitializeMod's original: the game's folder, its
+// settings, the memory guard and its catalogue (ut_generate.cpp); AFTER it: the switch and its
+// resets, once. Only the two std::string reads touch engine memory inside the guarded frame; a
+// fault there turns the switch off for the session (one ERROR), the original is always called.
+bool readGameNames(const TqStdString* first, const TqStdString* second, char* a, size_t ac, char* b,
+                   size_t bc) {
+    bool ok = false;
+    __try {
+        ok = safeStdString(first, a, ac) && safeStdString(second, b, bc);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    return ok;
+}
+
+// The resets of one switch (the game thread, no world): everything built from the previous game's
+// files goes - no prototype, owned count, index, gray texture or table survives a switch. The
+// steps and their order are ut_gameswitch.h's (utGameResets over kUtResetOrder).
+struct SwitchResetCtx {
+    const char* why;
+    int forgot;   // prototypes forgotten
+};
+
+void switchResetStep(int id, void* p) {
+    SwitchResetCtx* c = (SwitchResetCtx*)p;
+    switch (id) {
+        case kUtResetWorld:   // the world-gone edge had not fired yet: the same teardown, once
+            g_sawPlayer = false;
+            logI("world #%ld is gone: %s", InterlockedCompareExchange(&g_world, 0, 0), c->why);
+            viewOnWorld(false);
+            panelForgetFonts();
+            {
+                char point[48];
+                _snprintf_s(point, sizeof(point), _TRUNCATE, "world #%ld is gone",
+                            InterlockedCompareExchange(&g_world, 0, 0));
+                memSay(point, true);
+            }
+            break;
+        case kUtResetProtos: c->forgot = protoForgetAll(); break;   // none normally: the world took them
+        case kUtResetOwned: ownedWorldGone(); break;                // recounted at the next scan
+        case kUtResetTables:   // the group, KIND and union tables; the data latch follows the game
+            viewOnGameTable(liveReloadGame(nullptr), gameTabOff());
+            break;
+        case kUtResetIndex: searchGameChanged(); break;             // the index, rebuilt lazily
+        case kUtResetPanel: panelGameChanged(); break;   // the gray cache and folder, the buttons resolve
+        case kUtResetState: liveFollowGame(); break;     // the game's uniquetab.state
+        default: break;
+    }
+}
+
+void gameResets(const char* why) {
+    SwitchResetCtx c = {why, 0};
+    utGameResets(g_sawPlayer, &switchResetStep, &c);
+    logD("game: the switch's resets ran (%s; %d prototype(s) forgotten)", why, c.forgot);
+    {
+        char leaf[96] = "";
+        unsigned n = 0;
+        gameNow(leaf, sizeof(leaf), &n, nullptr);
+        char point[160];
+        _snprintf_s(point, sizeof(point), _TRUNCATE, "game switch #%u to the %s game", n,
+                    leaf[0] ? leaf : "main");
+        memSay(point, true);
+    }
+    if (g_searchInFile && !g_gateWanted)
+        logI("search: this game's uniquetab.ini says search=1, but the key gate is installed only "
+             "at start - the field takes keys from the next start");
+}
+
+bool gameBeforeSafe(const char* root, const char* name, UtGameEntry* e) {
+    try {
+        return gameBeforeEntry(nullptr, root, name, e);
+    } catch (...) {
+    }
+    try {   // the entry threw: the state follows utGameEntryFailed (one ERROR)
+        return gameEntryFailed(e);
+    } catch (...) {
+        return false;
+    }
+}
+
+void gameAfterSafe(const UtGameEntry& e, bool engineOk) {
+    try {
+        if (gameAfterEntry(e, engineOk)) gameResets("Engine::InitializeMod (a custom game is loading)");
+    } catch (...) {
+        logE("game: the switch to the %s game failed (out of memory?)", e.leaf);
+    }
+}
+
+bool __fastcall hk_InitializeMod(TqEngine* self, void* /*edx*/, const TqStdString* first,
+                                 const TqStdString* second) {
+    UtGameEntry e;
+    memset(&e, 0, sizeof(e));
+    bool want = false;
+    if (InterlockedCompareExchange(&g_switchLive, 0, 0)) {
+        char a[160], b[MAX_PATH];
+        if (readGameNames(first, second, a, sizeof(a), b, sizeof(b))) {
+            const UtGameCall call = utGameCallOf(a, b);
+            logI("game: Engine::InitializeMod(\"%s\", \"%s\") - the custom game %s from the folder %s",
+                 a, b, call.name, call.folder);
+            want = gameBeforeSafe(call.folder, call.name, &e);
+        } else {
+            InterlockedExchange(&g_switchLive, 0);
+            logE("game: the names Engine::InitializeMod received could not be read - the game "
+                 "switch is off for this session (every game keeps the files in force)");
+        }
+    }
+    const bool ok = o_InitializeMod ? o_InitializeMod(self, first, second) : false;
+    UT_LE_SAVE;
+    if (want) gameAfterSafe(e, ok);
+    UT_LE_RESTORE;
+    return ok;
+}
+
+void __fastcall hk_CleanseDatabase(TqEngine* self, void* /*edx*/) {
+    if (o_CleanseDatabase) o_CleanseDatabase(self);
+    UT_LE_SAVE;
+    if (InterlockedCompareExchange(&g_switchLive, 0, 0)) {
+        try {
+            if (gameEnterStartup()) gameResets("Engine::CleanseDatabase (the main database is loading)");
+        } catch (...) {
+            logE("game: the switch back to the main game failed (out of memory?)");
+        }
+    }
+    UT_LE_RESTORE;
+}
+
 bool createOne(const char* pretty, void* target, void* detour, void** original) {
     if (!target) {
         logE("  hook %-40s SKIPPED (target not resolved)", pretty);
@@ -1094,6 +1434,24 @@ bool createOne(const char* pretty, void* target, void* detour, void** original) 
 bool g_initialised = false;
 
 }  // namespace
+
+bool hookCursorHolds() {
+    for (int i = 0; i < g_cursorSeenN; ++i) {
+        TqCursorItemMove* h = g_cursorSeen[i];
+        bool live = true;
+        if (g_tq.CursorVftable) {   // a destroyed handler carries the base vftable
+            utGuardEnter();   // a freed handler's fault is expected here: no fault line
+            __try {
+                live = *(const void* const*)h == g_tq.CursorVftable;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                live = false;
+            }
+            utGuardLeave();
+        }
+        if (live && cursorItemId(h) != 0) return true;
+    }
+    return false;
+}
 
 void hookLateLoadTick(bool gameThread) {
     // THE LATE-LOAD CHECK (GD reagentLateLoadTick, without the overlay). A dinput8 loader maps
@@ -1192,6 +1550,9 @@ bool hooksInstall() {
         {"TQ.exe Transfer page draw",
          g_tq.sigPageDrawRva ? (void*)((unsigned char*)g_tq.exe + g_tq.sigPageDrawRva) : nullptr,
          (void*)&hk_PageDraw, (void**)&o_PageDraw},
+        {"TQ.exe HUD item rollover draw",
+         g_tq.sigRollDrawRva ? (void*)((unsigned char*)g_tq.exe + g_tq.sigRollDrawRva) : nullptr,
+         (void*)&hk_RollDraw, (void**)&o_RollDraw},
         // the view's four (a target of null - an unconfirmed signature - is SKIPPED, and
         // the view is then unavailable; the mod itself runs on).
         {"TQ.exe Transfer page accessor",
@@ -1224,7 +1585,7 @@ bool hooksInstall() {
          o_PageDraw ? "from the page draw (the hover as the fallback)"
                     : "from the first hover over the grid (no page-draw detour)");
 
-    // the collection tooltip line (GD ut_tooltip) - five detours, ALL-OR-NOTHING in their
+    // the collection tooltip line (GD ut_tooltip) - six detours, ALL-OR-NOTHING in their
     // own group, and COUNTED here: a missing one makes this line a WARN.
     int tipWanted = 0;
     ok += tooltipInstall(&tipWanted);
@@ -1236,12 +1597,70 @@ bool hooksInstall() {
                                   : nullptr,
                               (void*)&hk_ItemBackground, (void**)&o_ItemBackground);
     ok += bg ? 1 : 0;
+    // the Transfer sort block: without it the view still runs (the sort button then combines
+    // relics in the page's sack while ON - one WARN says so)
+    const bool sortBlock =
+        g_tq.transferSortWidget != 0 &&
+        createOne("TQ.exe Transfer page button handler (the sort block)",
+                  g_tq.sigTransferSortRva ? (void*)((unsigned char*)g_tq.exe + g_tq.sigTransferSortRva)
+                                          : nullptr,
+                  (void*)&hk_SortButton, (void**)&o_SortButton);
+    ok += sortBlock ? 1 : 0;
+    if (sortBlock)
+        logI("sort block: the Transfer page's sort button is refused while the view is ON "
+             "(TQ.exe+0x%X, the widget at this%+d)", g_tq.sigTransferSortRva, g_tq.transferSortWidget);
+    else
+        logW("sort block: NOT installed (exe.transferSortButton %s) - the Transfer sort button "
+             "combines relic pieces in the page's sack while the view is ON",
+             g_tq.sigTransferSortRva ? "could not be detoured" : "not confirmed");
     logI("rect route: %s", bg && o_PageDraw ? "the item widget background (TQ.exe PRE/POST-detour) "
                                               "inside the page draw - items centred, tint and border slot-wide"
                            : "OFF - items keep their footprint (the ring tints the slot)");
-    // the search field's key gate: search=0 installs nothing
+    // the relic page's pieces without the engine's number: not counted in the tally below
+    const bool relicText = g_tq.RelicBitmapText != nullptr &&
+                           createOne("ItemRelic::GetUIBitmapText", g_tq.RelicBitmapText,
+                                     (void*)&hk_RelicText, (void**)&o_RelicText);
+    if (relicText)
+        logI("relic page: its pieces carry no engine number (ItemRelic::GetUIBitmapText, Game.dll+0x%X) - "
+             "the slot's own count is drawn",
+             (unsigned)((const unsigned char*)g_tq.RelicBitmapText - (const unsigned char*)g_tq.gameDll));
+    else
+        logW("relic page: ItemRelic::GetUIBitmapText %s - the shard slot's piece keeps the engine's number",
+             g_tq.RelicBitmapText ? "could not be detoured" : "not confirmed");
+    // the game switch: ALL-OR-NOTHING - with either export missing neither detour goes in, and the
+    // start-up game's files serve every game (one WARN). Not counted in the tally below.
+    {
+        bool a = false, b = false;
+        if (g_tq.EngineInitializeMod && g_tq.EngineCleanseDatabase) {
+            a = createOne("Engine::InitializeMod", (void*)g_tq.EngineInitializeMod,
+                          (void*)&hk_InitializeMod, (void**)&o_InitializeMod);
+            b = a && createOne("Engine::CleanseDatabase", (void*)g_tq.EngineCleanseDatabase,
+                               (void*)&hk_CleanseDatabase, (void**)&o_CleanseDatabase);
+            if (a && !b) {   // the pair or nothing
+                MH_DisableHook((void*)g_tq.EngineInitializeMod);
+                MH_RemoveHook((void*)g_tq.EngineInitializeMod);
+                o_InitializeMod = nullptr;
+            }
+        }
+        InterlockedExchange(&g_switchLive, a && b ? 1 : 0);
+        if (a && b)
+            logI("game: the game switch is installed (Engine::InitializeMod, Engine::CleanseDatabase) "
+                 "- a custom game with its own save files gets its own catalogue in mods\\<game>");
+        else
+            logW("game: the game switch is NOT available (Engine::InitializeMod / "
+                 "Engine::CleanseDatabase %s) - every custom game shows the start-up game's "
+                 "collection",
+                 !g_tq.EngineInitializeMod || !g_tq.EngineCleanseDatabase ? "not found in Engine.dll"
+                                                                          : "could not be detoured");
+    }
+    // the search field's key gate, decided ONCE here: installed when the main file OR any game's
+    // mods\<game>\uniquetab.ini has search=1; a game with search=0 leaves it inert (it passes every
+    // key through while the search is off), as enabled=0 does, so enabled=1 brings the field back
     int gateWanted = 0;
-    if (g_cfg.search) {
+    char gateGames[256] = "";
+    g_gateWanted = configSearchGateAtStart(gateGames, sizeof(gateGames));
+    if (gateGames[0]) logI("search: search=1 in %s - the key gate is installed for them", gateGames);
+    if (g_gateWanted) {
         gateWanted = 1;
         const bool gate = createOne("Display::HandleKeyEvent (the search field)",
                                     (void*)g_tq.DisplayHandleKeyEvent, (void*)&hk_HandleKeyEvent,
@@ -1254,9 +1673,9 @@ bool hooksInstall() {
                             : "the key gate is NOT available - the field is drawn disabled and reads 'search off' (the "
                               "search_debug_query key still highlights)");
     } else {
-        logD("search: search=0 - no key gate");
+        logD("search: search=0 in every settings file - no key gate");
     }
-    const int wantedAll = wanted + tipWanted + 1 + gateWanted;
+    const int wantedAll = wanted + tipWanted + 2 + gateWanted;   // + the rect route, the sort block
     if (ok == wantedAll) {
         logI("detours installed: %d of %d", ok, wantedAll);
     } else {

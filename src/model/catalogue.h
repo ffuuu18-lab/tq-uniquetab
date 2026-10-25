@@ -84,6 +84,11 @@ enum : std::uint16_t {
     Equipment      = 1u << 5,
     DefaultVisible = 1u << 6,  // Equipment || Relic
     HasBitmap      = 1u << 7,
+    // The KIND mark: a monster infrequent - an equipment record whose own itemClassification is
+    // Rare (the engine's MI symbol), admitted with collect_mi=1 or kept for a journal that owns it.
+    // A file written before the mark has the bit clear everywhere (no MI was ever admitted), so
+    // the format version stays the same: the loader never checked the flag bits it does not know.
+    MonsterInfrequent = 1u << 8,
 };
 }  // namespace ItemFlag
 
@@ -104,6 +109,10 @@ struct ItemView {
 
     bool has(std::uint16_t f) const noexcept { return (flags & f) != 0; }
 };
+
+// The catalogue entry's KIND: a monster infrequent (one roll per record - the store's cap) or
+// not (a unique, an artifact).
+inline bool catIsMi(const ItemView& e) noexcept { return e.has(ItemFlag::MonsterInfrequent); }
 
 struct SetView {
     std::string_view    name;     // localised set name

@@ -74,7 +74,8 @@ cl /nologo /c /O2 /Oy- /MT /Zi /W4 /WX /EHsc /std:c++17 /GR- /DNDEBUG ^
    "%ROOT%src\ut_view.cpp" "%ROOT%src\ut_proto.cpp" "%ROOT%src\ut_live.cpp" ^
    "%ROOT%src\ut_plate.cpp" "%ROOT%src\ut_panel.cpp" "%ROOT%src\ut_owned.cpp" ^
    "%ROOT%src\ut_rescue.cpp" "%ROOT%src\ut_store.cpp" "%ROOT%src\ut_tooltip.cpp" ^
-   "%ROOT%src\ut_recon.cpp" "%ROOT%src\ut_search.cpp"
+   "%ROOT%src\ut_recon.cpp" "%ROOT%src\ut_search.cpp" "%ROOT%src\ut_mikind.cpp" ^
+   "%ROOT%src\ut_screenprobe.cpp" "%ROOT%src\ut_cover.cpp" "%ROOT%src\ut_mem.cpp"
 if errorlevel 1 goto :fail
 
 rem ---- 2b. the generator and the catalogue loader its read-back uses: linked ------------
@@ -83,8 +84,9 @@ cl /nologo /c /O2 /Oy- /MT /Zi /W4 /WX /EHsc /std:c++17 /GR- /DNDEBUG ^
    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
    /I"%ROOT%src" /Fo"%OBJ%\\" /Fd"%OBJ%\uniquetab_gen.pdb" ^
    "%ROOT%src\gen\inflate.cpp" "%ROOT%src\gen\arz_reader.cpp" "%ROOT%src\gen\arc_reader.cpp" ^
-   "%ROOT%src\gen\catalogue_gen.cpp" "%ROOT%src\gen\generate.cpp" ^
-   "%ROOT%src\model\catalogue.cpp"
+   "%ROOT%src\gen\catalogue_gen.cpp" "%ROOT%src\gen\relics_gen.cpp" "%ROOT%src\gen\generate.cpp" ^
+   "%ROOT%src\gen\ui_geometry.cpp" ^
+   "%ROOT%src\gen\gen_heap.cpp" "%ROOT%src\gen\lattice_gen.cpp" "%ROOT%src\model\catalogue.cpp"
 if errorlevel 1 goto :fail
 
 rem ---- 3. the model: LINKED (ut_live lays the groups out with gdut::packSlots) ----

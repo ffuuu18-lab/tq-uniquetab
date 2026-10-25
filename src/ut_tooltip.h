@@ -38,6 +38,16 @@ namespace ut {
 // call twice.
 bool tooltipInit(HMODULE selfModule);
 
+// GAME THREAD (ut_panel.cpp, when [tab] of the buttons file changes): the rollover lines' words
+// (UTF-8; nullptr or "" = the built-in "In your collection" / "Not in your collection" /
+// " (another roll)") and text styles (tooltip.class_yes / _no, 0..57; -1 = the default 0x16 /
+// 0x18). A changed word or style rebuilds its line; nothing else moves. Before tooltipInit the
+// words are only kept (init builds the lines with them).
+void tooltipTextRefresh(const char* yes, const char* no, const char* roll, int classYes, int classNo);
+const char* tooltipTextRoll();
+unsigned tooltipClassYes();
+unsigned tooltipClassNo();
+
 // Worker thread, from hooksInstall(). Installs the tooltip detours ALL-OR-NOTHING: every hook is
 // created first, and only if every create succeeded are they enabled; otherwise the created ones
 // are removed again and the feature is off for the session. Returns how many were installed and
@@ -47,6 +57,7 @@ int tooltipInstall(int* total);
 
 // One line for the log / the menu test. Never touches engine memory.
 const char* tooltipStatus();
+long tooltipInnerSuppressed();  // crafted-artifact latches suppressed inside an arcane formula's tooltip
 
 // ---- the swap, exposed so the offline harness drives the SAME code the game drives -------------
 // The borrowed vector handed to GameTextLineToString's trampoline: VS2012 std::vector's
@@ -64,6 +75,15 @@ struct UtTooltipSwap {
 bool tooltipSwapBuild(const void* vec, const unsigned char* extraLine, unsigned char** ownedOut,
                       UtTooltipSwap* out);
 void tooltipSwapFree(unsigned char* owned);
+
+// The same with `k` mod lines after the engine's N. `extraLines` is k consecutive 0x20-byte
+// records.
+bool tooltipSwapBuildN(const void* vec, const unsigned char* extraLines, unsigned k,
+                       unsigned char** ownedOut, UtTooltipSwap* out);
+
+// The ItemReplicaInfo's offset inside an Item (decoded from Item::GetItemReplicaInfo at start),
+// 0 = not decoded. Lock-free; the owned set reads a carried relic's bonus there.
+unsigned tooltipReplicaOffset();
 
 // Borrowed arrays alive right now. Zero at rest - the harness asserts exactly that.
 long tooltipSwapAllocBalance();
@@ -96,10 +116,12 @@ bool tooltipIsOff();
 // latch body returns at once: a capture neither clears a real rollover's pending latch, nor takes
 // the journal lock, nor leaves a latch of its own. Game thread.
 void tooltipSearchCapture(bool on);
-// True when `fn` is one of the four resolved GetUIDisplayText overrides (Item, ItemEquipment,
-// ItemArtifact, ItemRelic): the search calls an item's +0x14C slot only when it holds one of them.
+// True when `fn` is one of the five resolved GetUIDisplayText overrides (Item, ItemEquipment,
+// ItemArtifact, ItemRelic, ItemArtifactFormula): the search calls an item's +0x14C slot only when
+// it holds one of them.
 bool tooltipTextBuilderKnown(const void* fn);
-// Which of the four `fn` is: 0 Item, 1 ItemEquipment, 2 ItemArtifact, 3 ItemRelic; -1 none.
+// Which of the five `fn` is: 0 Item, 1 ItemEquipment, 2 ItemArtifact, 3 ItemRelic,
+// 4 ItemArtifactFormula; -1 none.
 int tooltipTextBuilderIndex(const void* fn);
 
 #ifdef UT_TOOLTIP_TEST_SEAM
@@ -111,9 +133,15 @@ void tooltipTestBaseText(void* item, const void* character, void* lines);      /
 void tooltipTestEquipText(void* item, const void* character, void* lines);     // hk_EquipGetUIDisplayText
 void tooltipTestArtifactText(void* item, const void* character, void* lines);  // hk_ArtifactGetUIDisplayText
 void tooltipTestRelicText(void* item, const void* character, void* lines);     // hk_RelicGetUIDisplayText
+void tooltipTestArmFormula(void* formulaText);   // the formula trampoline (and its resolved
+                                                 // address); the depth back to 0
+void tooltipTestFormulaText(void* item, const void* character, void* lines);   // hk_FormulaGetUIDisplayText
+int tooltipTestFormulaDepth();   // t_formulaDepth on this thread
 void tooltipTestToString(const void* lines, void* out);                        // hk_GameTextLineToString
 unsigned tooltipTestLatchCount();   // the pending latch's line count, 0 = none
 const unsigned char* tooltipTestLine(bool yes);
+const unsigned char* tooltipTestRollLine();   // the "(another roll)" marker line
+void tooltipTestRollReplica(unsigned rr);     // the replica's offset rollInit would decode
 #endif
 
 }  // namespace ut

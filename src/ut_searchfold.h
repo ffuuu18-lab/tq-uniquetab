@@ -17,6 +17,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <string.h>
 
 #include <string>
 #include <vector>
@@ -115,17 +116,38 @@ inline bool utSearchAsciiAlpha(unsigned c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
 }
 
+// The length of the colour escape that starts at s[i]: 4 for {^x}, 2 for ^x (x an ASCII letter),
+// 0 for none. The fold drops them; utSearchStripEscapes drops them and keeps every other byte.
+template <class C>
+inline size_t utSearchEscapeLen(const C* s, size_t i, size_t n) {
+    if (s[i] == '{' && i + 3 < n && s[i + 1] == '^' && s[i + 3] == '}') return 4;
+    if (s[i] == '^' && i + 1 < n && utSearchAsciiAlpha((unsigned)s[i + 1])) return 2;
+    return 0;
+}
+
+// `s` (a name as the catalogue spells it) with the colour escapes dropped and the rest unchanged,
+// case included: "{^l}Alala" -> "Alala".
+inline void utSearchStripEscapes(const char* s, char* out, size_t cap) {
+    if (!out || !cap) return;
+    const size_t n = s ? strlen(s) : 0;
+    size_t o = 0;
+    for (size_t i = 0; i < n && o + 1 < cap; ++i) {
+        if (const size_t e = utSearchEscapeLen(s, i, n)) {
+            i += e - 1;
+            continue;
+        }
+        out[o++] = s[i];
+    }
+    out[o] = 0;
+}
+
 // `n` UTF-16 units (the engine's wstring text), folded and appended to `out`. A surrogate pair is
 // decoded; a lone surrogate becomes U+FFFD.
 inline void utSearchFoldWide(const unsigned short* s, size_t n, std::string* out) {
     for (size_t i = 0; i < n; ++i) {
         const unsigned c = s[i];
-        if (c == '{' && i + 3 < n && s[i + 1] == '^' && s[i + 3] == '}') {
-            i += 3;   // {^x}
-            continue;
-        }
-        if (c == '^' && i + 1 < n && utSearchAsciiAlpha(s[i + 1])) {
-            i += 1;   // ^x
+        if (const size_t e = utSearchEscapeLen(s, i, n)) {
+            i += e - 1;   // {^x} or ^x
             continue;
         }
         if (c >= 0xD800 && c <= 0xDBFF && i + 1 < n && s[i + 1] >= 0xDC00 && s[i + 1] <= 0xDFFF) {

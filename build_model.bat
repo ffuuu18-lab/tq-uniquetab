@@ -30,30 +30,27 @@ pushd "%ROOT%"
 if not exist "build\model" mkdir "build\model"
 if not exist "tests" mkdir "tests"
 
-echo [1/3] repacking data\oracle\catalogue.bin (idempotency check)
+echo [1/4] repacking data\oracle\catalogue.bin (idempotency check)
 rem data\oracle\catalogue.json is the INTERMEDIATE that tools\build_catalogue.py writes and
 rem tools\pack_catalogue.py packs into the 480 KB data\oracle\catalogue.bin the harnesses compare
 rem against. Only the packed file is tracked - the 4 MB of JSON is regenerated from the game's own database, so
 rem shipping it as well would be 4 MB of derived data nobody reads. Where it is absent there is
 rem nothing to repack and the binary is used exactly as it is.
+rem The json is only ever packed when it is NEWER than the committed bin (--if-newer): a leftover
+rem json from an older run - or a bin a checkout or merge has just replaced - must never be packed
+rem over the committed file.
 if not exist "data\oracle\catalogue.json" goto :compile
-python tools\pack_catalogue.py --check > "build\model\pack_check.txt" 2>&1
+python tools\pack_catalogue.py --if-newer
 if errorlevel 1 (
-    echo       catalogue.bin is stale, repacking
-    python tools\pack_catalogue.py
-    if errorlevel 1 (
-        echo ERROR: pack_catalogue.py failed
-        popd
-        exit /b 1
-    )
-) else (
-    echo       catalogue.bin is up to date and byte-identical
+    echo ERROR: pack_catalogue.py failed
+    popd
+    exit /b 1
 )
 goto :compile
 
 :compile
 
-echo [2/3] compiling (cl /std:c++17 /W4 /WX /EHsc, x86)
+echo [2/4] compiling (cl /std:c++17 /W4 /WX /EHsc, x86)
 cl /nologo /std:c++17 /W4 /WX /EHsc /permissive- /Zc:__cplusplus /O2 /MT ^
    /Fo"build\model\\" /Fd"build\model\model_test.pdb" /Fe"build\model\model_test.exe" ^
    src\model\catalogue.cpp src\model\collection.cpp src\model\layout.cpp tests\model_test.cpp
@@ -63,10 +60,23 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [3/3] running build\model\model_test.exe data\oracle\catalogue.bin
+echo [3/4] running build\model\model_test.exe data\oracle\catalogue.bin
 build\model\model_test.exe data\oracle\catalogue.bin > "tests\model_test.out.txt" 2>&1
 set "RC=%ERRORLEVEL%"
 type "tests\model_test.out.txt"
+if not "%RC%"=="0" goto :done
+rem tests\uniq-groups-7fields.txt is the groups file a 1.0 install has: G lines without the id
+rem and the tag, which the reader takes from the built-in table by the label. Every check runs
+rem over it as well.
+echo [4/4] running build\model\model_test.exe over tests\uniq-groups-7fields.txt
+build\model\model_test.exe data\oracle\catalogue.bin tests\uniq-groups-7fields.txt > "build\model\model_test_7fields.txt" 2>&1
+set "RC=%ERRORLEVEL%"
+if "%RC%"=="0" (
+    echo       the 7-field groups file: MODEL TESTS PASSED
+) else (
+    type "build\model\model_test_7fields.txt"
+)
+:done
 popd
 if not "%RC%"=="0" (
     echo.

@@ -47,12 +47,19 @@
 #include "hooks.h"
 #include "tq_runtime.h"
 #include "ut_config.h"
+#include "ut_gameswitch.h"
+#include "ut_generate.h"
 #include "ut_live.h"
 #include "ut_log.h"
+#include "ut_mem.h"
 #include "ut_panel.h"
+#include "ut_paths.h"
 #include "ut_plate.h"
 #include "ut_proto.h"
+#include "ut_relicpage.h"   // the relic page's list: one text per (record, bonus)
+#include "ut_searchsave.h"
 #include "ut_tooltip.h"
+#include "ut_version.h"
 #include "ut_view.h"
 
 namespace ut {
@@ -87,9 +94,22 @@ struct Index {
     std::vector<int> base;               // first record of each group
     std::vector<int> done;               // records of each group processed
     std::vector<double> groupMs;
+    std::vector<unsigned char> flags;    // per record: kFlagLive, kFlagSetBonus
     int total = 0;
     int processed = 0;
     int next = 0;                        // the background's next record
+    int fromFile = 0;                    // records read from the saved text
+    bool begun = false;                  // the first indexing ran (beginWork)
+    bool lore = false;                   // search_lore when it began: the saved text's key
+    // the relic page: one text per green slot (the completed relic with that bonus), per relic
+    // state (liveRelicStateIndex); a red state has none. Not in the saved text: read every session.
+    std::vector<std::string> rtext;
+    std::vector<unsigned char> rstate;
+    std::vector<int> rrow, rbon;         // per state: its row and bonus
+    int rtotal = 0;                      // the green states
+    int rdone = 0;                       // of them processed
+    int rnext = 0;                       // the background's next state
+    double rms = 0.0;                    // the green states' capture time, summed
 };
 Index* g_ix = nullptr;
 
@@ -103,6 +123,13 @@ unsigned g_linesKept = 0, g_dropReq = 0, g_dropLore = 0, g_dropDir = 0, g_uninde
 double g_totalMs = 0.0, g_maxUs = 0.0;
 char g_maxRec[160] = "";
 size_t g_bytes = 0;
+
+// The saved text (ut_searchsave.h): read once per index (a game's), before its first indexing;
+// written once per game when the index is complete and a record that can be kept was read from its
+// item this session. A fault reading the database checksum turns it off for the session.
+enum : unsigned char { kFlagLive = 1, kFlagSetBonus = 2 };
+bool g_saveTried = false, g_saveDone = false;
+volatile LONG g_saveOff = 0;
 
 // the query: the field's text; the ini key search_debug_query fills the field when it changes
 char g_raw[sizeof(UtConfig::searchDebugQuery)] = "";   // the ini key's last value
@@ -181,9 +208,27 @@ bool ensureIndex() {
         }
         ix->text.resize((size_t)ix->total);
         ix->state.assign((size_t)ix->total, kPending);
+        ix->flags.assign((size_t)ix->total, 0);
+        const int rs = liveRelicStateCount();
+        ix->rtext.resize((size_t)rs);
+        ix->rstate.assign((size_t)rs, kUnindexable);
+        ix->rrow.assign((size_t)rs, -1);
+        ix->rbon.assign((size_t)rs, -1);
+        if (const UtRelicList* l = liveRelicList()) {
+            for (size_t r = 0; r < l->rows.size(); ++r) {
+                for (size_t i = 0; i < l->rows[r].bonuses.size(); ++i) {
+                    const int k = liveRelicStateIndex((int)r, 1 + (int)i);
+                    if (k < 0 || k >= rs) continue;
+                    ix->rstate[(size_t)k] = kPending;
+                    ix->rrow[(size_t)k] = (int)r;
+                    ix->rbon[(size_t)k] = (int)i;
+                    ++ix->rtotal;
+                }
+            }
+        }
         g_needle = new std::string();
         g_ix = ix;
-        InterlockedExchange(&g_labelTotal, ix->total);
+        InterlockedExchange(&g_labelTotal, ix->total + ix->rtotal);
         return true;
     } catch (...) {
         return false;
@@ -196,12 +241,20 @@ bool groupComplete(int g) {
     return g_ix && g >= 0 && g < (int)g_ix->done.size() && g_ix->done[(size_t)g] >= liveGroupEntries(g);
 }
 
+bool relicComplete() { return g_ix && g_ix->rdone >= g_ix->rtotal; }
+
 unsigned indexedMask() {
     unsigned m = 0;
     for (int g = 0; g < liveGroupCount() && g < 32; ++g) {
-        if (groupComplete(g)) m |= 1u << (unsigned)g;
+        const bool done = g == liveRelicGroup() ? relicComplete() : groupComplete(g);
+        if (done) m |= 1u << (unsigned)g;
     }
     return m;
+}
+
+// the label's "indexing k/n": the records and the relic page's bonus slots
+void labelDone() {
+    if (g_ix) InterlockedExchange(&g_labelDone, g_ix->processed + g_ix->rdone);
 }
 
 // ---- the engine calls, each in its own frame -------------------------------------------------
@@ -285,6 +338,17 @@ bool freeSeh(const UtSearchStage* st) {
     }
 }
 
+bool checksumSeh(unsigned* out) {
+    __try {
+        TqEngine* e = *g_tq.ppEngine;
+        *out = e ? g_tq.EngineGetDatabaseArchiveChecksum(e) : 0;   // ENGINE CALL: a getter
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *out = 0;
+        return false;
+    }
+}
+
 // ---- the fault latch --------------------------------------------------------------------------
 void applyToPage();
 void realPublish(bool on);
@@ -324,12 +388,13 @@ void appendRaw(std::string* out, const UtSearchStage& st, unsigned i) {
     }
 }
 
-const char* const kBuilderName[4] = {"Item", "ItemEquipment", "ItemArtifact", "ItemRelic"};
+const char* const kBuilderName[5] = {"Item", "ItemEquipment", "ItemArtifact", "ItemRelic",
+                                     "ItemArtifactFormula"};
 
 // The DEBUG capture dump: the first capture of each rollover builder (at most four lines), so the
 // ItemEquipment one, which carries the requirement and lore lines, is always among them.
 void dumpOnce(const char* record, int builder, const UtSearchStage& st) {
-    if (builder < 0 || builder > 3 || !logWants(UT_LOG_DEBUG)) return;
+    if (builder < 0 || builder > 4 || !logWants(UT_LOG_DEBUG)) return;
     if (g_dumpSaid & (1u << (unsigned)builder)) return;
     g_dumpSaid |= 1u << (unsigned)builder;
     std::string d;
@@ -512,6 +577,9 @@ int captureItem(TqItem* item, const void* player, const char* record, std::strin
     return kCapOk;
 }
 
+int captureReplica(const UtReplica& rep, const char* record, const void* player, std::string* out,
+                   UtSearchCounts* c, Capture* cap);
+
 int captureOne(const char* record, const void* player, std::string* out, UtSearchCounts* c,
                Capture* cap) {
     static UtReplica rep;   // ~2 KB
@@ -521,6 +589,25 @@ int captureOne(const char* record, const void* player, std::string* out, UtSearc
         cap->why = "its record path is not one a replica can carry";
         return kCapUnindexable;
     }
+    return captureReplica(rep, record, player, out, c, cap);
+}
+
+// A green slot of the relic page: the completed relic with that bonus - the item the empty slot
+// shows - so its text holds the bonus in the game's own words.
+int captureRelic(const char* record, unsigned shards, const char* bonus, const void* player,
+                 std::string* out, UtSearchCounts* c, Capture* cap) {
+    static UtReplica rep;   // ~2 KB
+    cap->why = "";
+    cap->where = "";
+    if (!utReplicaBuildRelic(&rep, record, shards, bonus)) {
+        cap->why = "its record path is not one a replica can carry";
+        return kCapUnindexable;
+    }
+    return captureReplica(rep, record, player, out, c, cap);
+}
+
+int captureReplica(const UtReplica& rep, const char* record, const void* player, std::string* out,
+                   UtSearchCounts* c, Capture* cap) {
     unsigned id = 0;
     const char* createFault = nullptr;
     TqItem* item = protoCreateLoose(rep, &id, &createFault);
@@ -820,29 +907,296 @@ bool matchOf(int idx) {
            utSearchHit(g_ix->text[(size_t)idx], *g_needle);
 }
 
+bool relicMatchOf(int k) {
+    return g_ix->rstate[(size_t)k] == kIndexed && g_needle &&
+           utSearchHit(g_ix->rtext[(size_t)k], *g_needle);
+}
+
 void logQueryLine() {
     if (!g_active || !logWants(UT_LOG_DEBUG)) return;
     int groups = 0;
     const int m = liveSearchFound(&groups);
     int of = 0;
     const int shown = liveSearchShownIn(liveShownGroup(), &of);
+    char page[256];   // the shown page's groups: "Helms + Torso" on a button of several
+    page[0] = 0;
+    int members[64];
+    const int mn = liveShownMembers(members, 64);
+    for (int i = 0; i < mn; ++i) {
+        const size_t at = strlen(page);
+        _snprintf_s(page + at, sizeof(page) - at, _TRUNCATE, "%s%s", i ? " + " : "",
+                    liveGroupLabel(members[i]));
+    }
+    if (mn < 1) _snprintf_s(page, sizeof(page), _TRUNCATE, "%s", liveGroupLabel(liveShownGroup()));
     logD("search: \"%s\" - %d match(es) in %d group(s) (mask 0x%04X), shown group %s: %d of %d "
          "(OWN %s)",
-         g_needle->c_str(), m, groups, liveSearchMarks(), liveGroupLabel(liveShownGroup()), shown,
-         of, liveOwnedOnlyActive() ? "on" : "off");
+         g_needle->c_str(), m, groups, liveSearchMarks(), page, shown, of,
+         liveOwnedOnlyActive() ? "on" : "off");
 }
 
 void applyToPage() { liveSearchApply(g_active && !off(), off() ? 0u : indexedMask()); }
 
+void saveIndex();
+
 void sayIndexBuilt() {
     if (g_infoSaid || !g_ix || g_ix->processed < g_ix->total) return;
     g_infoSaid = true;
-    logI("search: index built - %d records (%u unindexable), %u lines kept, %u dropped (0x11 x%u, "
+    char fromFile[64] = "";
+    if (g_ix->fromFile > 0)
+        _snprintf_s(fromFile, sizeof(fromFile), _TRUNCATE, ", %d read from the saved text", g_ix->fromFile);
+    logI("search: index built - %d records (%u unindexable%s), %u lines kept, %u dropped (0x11 x%u, "
          "0x0E x%u, 0x1C x%u), %u KB, %.0f ms total (mean %.0f us, max %.0f us at %s)",
-         g_ix->total, g_unindexable, g_linesKept, g_dropReq + g_dropLore + g_dropDir, g_dropReq,
-         g_dropLore, g_dropDir, (unsigned)((g_bytes + 1023) / 1024), g_totalMs,
+         g_ix->total, g_unindexable, fromFile, g_linesKept, g_dropReq + g_dropLore + g_dropDir,
+         g_dropReq, g_dropLore, g_dropDir, (unsigned)((g_bytes + 1023) / 1024), g_totalMs,
          g_ix->total ? g_totalMs * 1000.0 / (double)g_ix->total : 0.0, g_maxUs,
          g_maxRec[0] ? g_maxRec : "-");
+    memIndexSay("search: index built");
+    saveIndex();
+}
+
+// ---- the saved text (ut_searchsave.h) ---------------------------------------------------------
+// The game's file: the start-up game's beside its uniq-groups.txt, a custom game's in mods\<leaf>\.
+bool gamePath(const char* file, char* out, size_t cap) {
+    char leaf[96] = "";
+    gameNow(leaf, sizeof(leaf), nullptr, nullptr);
+    char rel[MAX_PATH];
+    out[0] = 0;
+    if (!utGameRel(leaf, file, rel, sizeof(rel))) return false;
+    utModPathA(nullptr, rel, out, cap);
+    return out[0] != 0;
+}
+
+bool readFile(const char* path, std::string* out) {
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "rb") != 0 || !f) return false;
+    char buf[16384];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out->append(buf, n);
+    fclose(f);
+    return !out->empty();
+}
+
+// The key in force. False: `why` says why there is none ("" when an ERROR said it).
+bool keyNow(UtSearchKey* k, const char** why) {
+    *why = "";
+    char path[MAX_PATH];
+    std::string stamp;
+    if (!gamePath("catalogue.stamp", path, sizeof(path)) || !readFile(path, &stamp)) {
+        *why = "the game's catalogue.stamp could not be read";
+        return false;
+    }
+    k->stamp = utSearchFnv(stamp.data(), stamp.size());
+    k->lang = g_cfg.textLanguage;
+    k->lore = g_cfg.searchLore != 0;
+    k->version = UT_VERSION;
+    if (!g_tq.EngineGetDatabaseArchiveChecksum || !g_tq.ppEngine) {
+        *why = "Engine::GetDatabaseArchiveChecksum is not bound";
+        return false;
+    }
+    unsigned sum = 0;
+    utGuardEnter();
+    const bool ok = checksumSeh(&sum);
+    utGuardLeave();
+    if (!ok) {
+        if (!InterlockedExchange(&g_saveOff, 1))
+            logE("search: the saved index text is OFF - the database checksum read faulted; the index "
+                 "is read from the items for this session");
+        return false;
+    }
+    if (!sum) {
+        *why = "the database checksum is 0 (no database is loaded)";
+        return false;
+    }
+    k->db = sum;
+    return true;
+}
+
+// The complete index into the game's file, once per game, when a record that can be kept was read
+// from its item this session. A record with a set-bonus line is held back (kUtSearchClsSetBonus):
+// those lines follow the pieces of its set the main player wears.
+void saveIndex() {
+    if (g_saveDone || !g_ix || InterlockedCompareExchange(&g_saveOff, 0, 0)) return;
+    g_saveDone = true;
+    int fresh = 0, held = 0;
+    for (unsigned char f : g_ix->flags) {
+        if (f & kFlagSetBonus) ++held;
+        else if (f & kFlagLive) ++fresh;
+    }
+    if (!fresh) return;   // nothing new to keep
+    if (g_ix->lore != (g_cfg.searchLore != 0)) {   // the text was folded under the other value
+        logI("search: the index text is not saved - search_lore changed while the index was built");
+        return;
+    }
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+    char path[MAX_PATH] = "";
+    if (!gamePath(kUtSearchSaveFile, path, sizeof(path))) return;
+    UtSearchKey key;
+    const char* why = "";
+    if (!keyNow(&key, &why)) {
+        if (why[0]) logI("search: the index text is not saved - %s", why);
+        return;
+    }
+    char tmp[MAX_PATH + 8];
+    _snprintf_s(tmp, sizeof(tmp), _TRUNCATE, "%s.tmp", path);
+    FILE* f = nullptr;
+    if (fopen_s(&f, tmp, "wb") != 0 || !f) {
+        logW("search: the index text is not saved - %s cannot be written", tmp);
+        return;
+    }
+    bool ok = true;
+    size_t bytes = 0;
+    int rows = 0;
+    try {
+        std::string out = utSearchSaveHead(key);
+        for (int g = 0; g < (int)g_ix->base.size(); ++g) {
+            const int n = liveGroupEntries(g);
+            for (int k = 0; k < n; ++k) {
+                const size_t idx = (size_t)(g_ix->base[(size_t)g] + k);
+                if ((g_ix->flags[idx] & kFlagSetBonus) || g_ix->state[idx] == kPending) continue;
+                if (!utSearchSaveRow(&out, liveGroupRecord(g, k), g_ix->state[idx] == kIndexed,
+                                     g_ix->text[idx]))
+                    continue;
+                ++rows;
+                if (out.size() >= 65536) {
+                    ok = ok && fwrite(out.data(), 1, out.size(), f) == out.size();
+                    bytes += out.size();
+                    out.clear();
+                }
+            }
+        }
+        ok = ok && fwrite(out.data(), 1, out.size(), f) == out.size();
+        bytes += out.size();
+    } catch (...) {
+        ok = false;
+    }
+    ok = fclose(f) == 0 && ok;
+    if (!ok || !MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const DWORD err = GetLastError();
+        DeleteFileA(tmp);
+        logW("search: the index text is not saved to %s (err=%lu) - the next session reads the items "
+             "again", path, err);
+        return;
+    }
+    logI("search: the index text is saved for this game - %d record(s), %d held back (their set-bonus "
+         "lines follow the pieces the main player wears), %u KB in %.0f ms -> %s",
+         rows, held, (unsigned)((bytes + 1023) / 1024), msSince(t0), path);
+}
+
+// Every record the game's saved text holds is indexed from it, so no item is created for it; a
+// file of another key is not used (one INFO line says why) and is written again once the index is
+// complete. One saved record is read from its item first: a text the key does not name (the
+// game's own language, its text archives) differs there, and the file is then not used. False =
+// the search went OFF (that read faulted).
+bool loadSaved(const void* player, bool inBuild) {
+    if (g_saveTried || InterlockedCompareExchange(&g_saveOff, 0, 0)) return true;
+    g_saveTried = true;
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+    char path[MAX_PATH] = "";
+    if (!gamePath(kUtSearchSaveFile, path, sizeof(path))) return true;
+    UtSearchKey key;
+    const char* why = "";
+    if (!keyNow(&key, &why)) {
+        if (why[0]) logI("search: the saved index text is not read - %s; the index is read from the items", why);
+        return true;
+    }
+    try {
+        std::string bytes;
+        if (!readFile(path, &bytes)) {
+            logI("search: no saved index text for this game yet (%s) - the index is read from the items "
+                 "and saved once it is complete", path);
+            return true;
+        }
+        std::vector<UtSearchSaved> rows;
+        std::string bad;
+        if (!utSearchLoadText(bytes, key, &rows, &bad)) {
+            logI("search: the saved index text %s is not used - %s; the index is read from the items and "
+                 "saved again once it is complete", path, bad.c_str());
+            return true;
+        }
+        const char* checkRec = nullptr;   // the first pending record with a saved text
+        const UtSearchSaved* checkRow = nullptr;
+        for (int g = 0; g < (int)g_ix->base.size() && !checkRow; ++g) {
+            const int n = liveGroupEntries(g);
+            for (int k = 0; k < n && !checkRow; ++k) {
+                const char* rec = liveGroupRecord(g, k);
+                if (!rec || g_ix->state[(size_t)(g_ix->base[(size_t)g] + k)] != kPending) continue;
+                const UtSearchSaved* r = utSearchFind(rows, rec);
+                if (r && r->indexed) {
+                    checkRec = rec;
+                    checkRow = r;
+                }
+            }
+        }
+        if (checkRow) {
+            std::string live;
+            UtSearchCounts c = {};
+            Capture cap = {"", ""};
+            const int rc = captureOne(checkRec, player, &live, &c, &cap);
+            if (rc == kCapFault) {
+                goOff(cap.where, inBuild);
+                return false;
+            }
+            if (rc != kCapOk || live != checkRow->text) {
+                logI("search: the saved index text %s is not used - %s read from its item gives %s (%u "
+                     "bytes, saved %u); the index is read from the items and saved again once it is "
+                     "complete", path, checkRec, rc == kCapOk ? "another text" : "no text",
+                     (unsigned)live.size(), (unsigned)checkRow->text.size());
+                return true;
+            }
+        }
+        const size_t fileBytes = bytes.size();
+        std::string().swap(bytes);   // the rows hold the text now
+        std::vector<int> takenBy(rows.size(), -1);   // a record listed twice copies its first slot's text
+        int got = 0;
+        for (int g = 0; g < (int)g_ix->base.size(); ++g) {
+            const int n = liveGroupEntries(g);
+            for (int k = 0; k < n; ++k) {
+                const int idx = g_ix->base[(size_t)g] + k;
+                if (g_ix->state[(size_t)idx] != kPending) continue;
+                UtSearchSaved* r = utSearchFind(rows, liveGroupRecord(g, k));
+                if (!r) continue;
+                if (r->indexed) {
+                    utSearchTakeText(rows, takenBy, r, g_ix->text, idx);
+                    g_ix->state[(size_t)idx] = kIndexed;
+                    g_bytes += g_ix->text[(size_t)idx].size() + 1;
+                } else {
+                    g_ix->state[(size_t)idx] = kUnindexable;
+                    ++g_unindexable;
+                }
+                liveSearchSetMatch(g, k, matchOf(idx));
+                ++g_ix->processed;
+                ++g_ix->done[(size_t)g];
+                ++got;
+            }
+        }
+        g_ix->fromFile = got;
+        labelDone();
+        logI("search: the saved index text read - %d of %d record(s) from %s (%u KB, %.0f ms); no item is "
+             "created for them%s%s", got, g_ix->total, path, (unsigned)((fileBytes + 1023) / 1024),
+             msSince(t0), checkRow ? " (one was read from its item and matched its saved text)" : "",
+             got < g_ix->total ? " - the rest are read from their items" : "");
+    } catch (...) {
+        logW("search: the saved index text could not be read (out of memory) - the rest of the index is "
+             "read from the items");
+    }
+    applyToPage();
+    if (g_ix->processed >= g_ix->total) {
+        sayIndexBuilt();
+        logQueryLine();
+    }
+    return true;
+}
+
+// The first indexing of an index (a game's): the memory lines' base, then the saved text. False =
+// the search went OFF.
+bool beginWork(const void* player, bool inBuild) {
+    if (!g_ix || g_ix->begun) return true;
+    g_ix->begun = true;
+    g_ix->lore = g_cfg.searchLore != 0;
+    memIndexStart();
+    return loadSaved(player, inBuild);
 }
 
 // Indexes record k of group g. False = the search went OFF. `inBuild`: the page build asked.
@@ -884,15 +1238,65 @@ bool indexRecord(int g, int k, const void* player, const char* how, bool inBuild
             logD("search: %s is unindexable - %s", record ? record : "?", cap.why);
         }
     }
+    g_ix->flags[(size_t)idx] = (unsigned char)(kFlagLive | (rc == kCapOk && c.setBonus ? kFlagSetBonus : 0));
     liveSearchSetMatch(g, k, matchOf(idx));
     ++g_ix->processed;
-    InterlockedExchange(&g_labelDone, g_ix->processed);
+    labelDone();
     if (++g_ix->done[(size_t)g] >= liveGroupEntries(g)) {
         logD("search: group %s indexed - %d in %.1f ms (%s)", liveGroupLabel(g),
              liveGroupEntries(g), g_ix->groupMs[(size_t)g], how);
         applyToPage();   // its mark may light now
         sayIndexBuilt();
         if (g_ix->processed >= g_ix->total) logQueryLine();
+    }
+    return true;
+}
+
+// One green slot of the relic page (relic state k).
+bool indexRelic(int k, const void* player, const char* how, bool inBuild) {
+    const UtRelicList* l = liveRelicList();
+    if (!l || k < 0 || k >= (int)g_ix->rstate.size() || g_ix->rstate[(size_t)k] != kPending) return true;
+    const int r = g_ix->rrow[(size_t)k], i = g_ix->rbon[(size_t)k];
+    if (r < 0 || r >= (int)l->rows.size() || i < 0 || i >= (int)l->rows[(size_t)r].bonuses.size())
+        return true;
+    const UtRelicRow& row = l->rows[(size_t)r];
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+    std::string text;
+    UtSearchCounts c = {};
+    Capture cap = {"", ""};
+    const int rc = captureRelic(row.record.c_str(), row.shards, row.bonuses[(size_t)i].c_str(), player,
+                                &text, &c, &cap);
+    if (rc == kCapFault) {
+        goOff(cap.where, inBuild);
+        return false;
+    }
+    const double ms = msSince(t0);
+    g_totalMs += ms;
+    g_ix->rms += ms;
+    if (rc == kCapOk) {
+        g_ix->rtext[(size_t)k].swap(text);
+        g_ix->rstate[(size_t)k] = kIndexed;
+        g_linesKept += c.kept;
+        g_dropReq += c.dropReq;
+        g_dropLore += c.dropLore;
+        g_dropDir += c.dropDir;
+        g_bytes += g_ix->rtext[(size_t)k].size() + 1;
+    } else {
+        g_ix->rstate[(size_t)k] = kUnindexable;
+        ++g_unindexable;
+        if (g_unindexableSaid < 8) {
+            ++g_unindexableSaid;
+            logD("search: %s is unindexable - %s", row.record.c_str(), cap.why);
+        }
+    }
+    liveSearchSetRelicMatch(k, relicMatchOf(k));
+    ++g_ix->rdone;
+    labelDone();
+    if (g_ix->rdone >= g_ix->rtotal) {
+        logD("search: group %s indexed - %d in %.1f ms (%s)", liveGroupLabel(liveRelicGroup()),
+             g_ix->rtotal, g_ix->rms, how);
+        applyToPage();   // its mark may light now
     }
     return true;
 }
@@ -966,6 +1370,7 @@ void fieldTick(bool worldUp) {
     if (!InterlockedCompareExchange(&g_focus, 0, 0)) return;
     const char* why = nullptr;
     if (off()) why = "the search is off (a fault)";
+    else if (!g_cfg.enabled) why = "enabled=0 in uniquetab.ini";
     else if (!g_cfg.search) why = "search=0 in uniquetab.ini";
     else if (!worldUp) why = "the world was unloaded";
     else if (!hookCaravanOpen()) why = "the caravan was closed";
@@ -1024,7 +1429,29 @@ bool syncGroup(int group, const char* how, bool inBuild) {
         return false;
     }
     if (!player) return true;   // the menu, a world change: the background finishes it later
-    return indexGroup(group, player, how);
+    if (!beginWork(player, inBuild)) return false;
+    if (groupComplete(group)) return true;   // the saved text held it
+    if (!indexGroup(group, player, how)) return false;
+    char point[160];
+    _snprintf_s(point, sizeof(point), _TRUNCATE, "search: group %s synced (%s)", liveGroupLabel(group), how);
+    memIndexSay(point);
+    return true;
+}
+
+// The relic page indexed now, whole (its page is shown with a query standing).
+bool syncRelic(const char* how, bool inBuild) {
+    if (relicComplete()) return true;
+    bool playerFault = false;
+    const void* player = mainPlayer(&playerFault);
+    if (playerFault) {
+        goOff("the GameGetMainPlayer call", inBuild);
+        return false;
+    }
+    if (!player) return true;   // the menu, a world change: the background finishes it later
+    if (!beginWork(player, inBuild)) return false;
+    for (int k = 0; k < (int)g_ix->rstate.size(); ++k)
+        if (g_ix->rstate[(size_t)k] == kPending && !indexRelic(k, player, how, inBuild)) return false;
+    return true;
 }
 
 }  // namespace
@@ -1035,6 +1462,7 @@ void searchTick(bool worldUp) {
     if (!liveActive() || off()) return;
     if (!g_cfg.search && !g_active) return;   // search=0: inert (a standing query is let go below)
     if (!ensureIndex()) return;
+    if (g_ix->begun && !g_infoSaid) memPendingSample();   // the pending peak while the index runs
     // the ini key fills the field when its value changes (configReload reads it once a second)
     if (!g_rawInit || strcmp(g_raw, g_cfg.searchDebugQuery) != 0) {
         const bool first = !g_rawInit;
@@ -1066,6 +1494,8 @@ void searchTick(bool worldUp) {
                 for (int k = 0; k < liveGroupEntries(g); ++k)
                     liveSearchSetMatch(g, k, active && matchOf(g_ix->base[(size_t)g] + k));
             }
+            for (int k = 0; k < (int)g_ix->rstate.size(); ++k)   // the relic page's green slots
+                liveSearchSetRelicMatch(k, active && relicMatchOf(k));
             applyToPage();   // the highlight and the marks follow; nothing is laid out again
             if (!active) {
                 logD("search: no query - nothing is highlighted");
@@ -1086,7 +1516,12 @@ void searchTick(bool worldUp) {
         startSync = true;
     }
     if (startSync && g_started && worldUp) {
+        if (liveWantedGroup() == liveRelicGroup() && !syncRelic(syncHow, false)) return;
         if (!syncGroup(liveWantedGroup(), syncHow, false)) return;
+        int members[64];   // the other groups of the wanted page (one page per button)
+        const int mn = liveMembersOf(liveWantedGroup(), members, 64);
+        for (int i = 0; i < mn; ++i)
+            if (members[i] != liveWantedGroup() && !syncGroup(members[i], syncHow, false)) return;
         if (g_queryLinePending && groupComplete(liveWantedGroup())) {
             g_queryLinePending = false;
             applyToPage();
@@ -1094,7 +1529,8 @@ void searchTick(bool worldUp) {
         }
     }
     // the background: every other group, 1.5 ms per Update at most (not while the real page reads)
-    if (realBusy || !g_started || !g_cfg.search || !worldUp || g_ix->processed >= g_ix->total)
+    if (realBusy || !g_started || !g_cfg.search || !worldUp ||
+        (g_ix->processed >= g_ix->total && relicComplete()))
         return;
     if (!haveBindings()) {
         goOff("a missing engine binding (CreateItem, DestroyObjectEx or operator delete)");
@@ -1107,6 +1543,8 @@ void searchTick(bool worldUp) {
         return;
     }
     if (!player) return;   // the menu, a world change: paused, the cache is kept
+    if (!beginWork(player, false)) return;
+    if (g_ix->processed >= g_ix->total && relicComplete()) return;   // the saved text held the rest
     LARGE_INTEGER t0;
     QueryPerformanceCounter(&t0);
     while (g_ix->next < g_ix->total) {
@@ -1117,6 +1555,13 @@ void searchTick(bool worldUp) {
         if (g_ix->state[(size_t)(g_ix->base[(size_t)g] + k)] != kPending) continue;
         if (!indexRecord(g, k, player, "background", false)) return;
         if (msSince(t0) >= kBackgroundBudgetMs) break;
+    }
+    // then the relic page's green slots, in the same budget
+    while (g_ix->processed >= g_ix->total && g_ix->rnext < (int)g_ix->rstate.size() &&
+           msSince(t0) < kBackgroundBudgetMs) {
+        const int k = g_ix->rnext++;
+        if (g_ix->rstate[(size_t)k] != kPending) continue;
+        if (!indexRelic(k, player, "background", false)) return;
     }
 }
 
@@ -1129,9 +1574,16 @@ void searchBeforePage(int group) {
             return;
     }
     if (!g_active) return;   // search_prebuild alone: the background builds it
+    if (group >= 0 && group == liveRelicGroup() &&
+        !syncRelic(g_ix->rdone == 0 ? "sync at the first query" : "sync at a switch", true))
+        return;
     if (!syncGroup(group, g_ix->processed == 0 ? "sync at the first query" : "sync at a switch",
                    true))
         return;
+    int members[64];   // the other groups of the page (one page per button): highlighted at once too
+    const int mn = liveMembersOf(liveUnionRep(group), members, 64);
+    for (int i = 0; i < mn; ++i)
+        if (members[i] != group && !syncGroup(members[i], "sync at a switch", true)) return;
     if (g_queryLinePending && groupComplete(group)) {
         g_queryLinePending = false;
         applyToPage();
@@ -1160,7 +1612,8 @@ bool searchFieldFocus() {
 void searchFieldOffClick() {
     if (g_offClickSaid) return;
     g_offClickSaid = true;
-    const char* why = !g_cfg.search   ? "search=0 in uniquetab.ini"
+    const char* why = !g_cfg.enabled  ? "enabled=0 in uniquetab.ini"
+                      : !g_cfg.search ? "search=0 in uniquetab.ini"
                       : off()         ? "the search went off after a fault (the ERROR line above)"
                       : !hookKeyGateLive()
                           ? "the key gate is not installed (search was 0 when the game started, or "
@@ -1321,6 +1774,8 @@ void searchRealLabel(char* out, size_t cap, char* brief, size_t briefCap) {
                       (int)InterlockedCompareExchange(&g_realFound, 0, 0), out, cap, brief, briefCap);
 }
 
+size_t searchIndexBytes() { return g_ix ? g_bytes : 0; }
+
 bool searchHighlight(int i, const char* record) {
     return g_active && !off() && liveSearchHighlight(i, record);
 }
@@ -1340,6 +1795,27 @@ void searchLabel(char* out, size_t cap, char* brief, size_t briefCap) {
         _snprintf_s(out, cap, _TRUNCATE, "found %d", n);
         if (brief && briefCap) _snprintf_s(brief, briefCap, _TRUNCATE, "=%d", n);
     }
+}
+
+// The game in force switched (the game thread, no world loaded): the index described the previous
+// game's groups - dropped here, rebuilt lazily from the new table as at start.
+void searchGameChanged() {
+    Index* ix = g_ix;
+    g_ix = nullptr;
+    delete ix;
+    g_active = false;
+    g_infoSaid = false;
+    g_unindexableSaid = 0;
+    g_linesKept = g_dropReq = g_dropLore = g_dropDir = g_unindexable = 0;
+    g_totalMs = g_maxUs = 0.0;
+    g_maxRec[0] = 0;
+    g_bytes = 0;
+    g_saveTried = g_saveDone = false;   // the next game's saved text
+    // the next game's index waits for a focus, a query or search_prebuild, unless a query stands
+    g_started = utSearchStartedAfterSwitch(g_started, g_cfg.search != 0 && g_needle && !g_needle->empty());
+    g_fieldSeen = -1;   // a standing query is applied again over the new index
+    InterlockedExchange(&g_labelDone, 0);
+    InterlockedExchange(&g_labelTotal, 0);
 }
 
 }  // namespace ut

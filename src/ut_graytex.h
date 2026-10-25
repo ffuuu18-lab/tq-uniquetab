@@ -140,6 +140,8 @@ inline int utGrayTex(uint8_t* d, size_t n) {
 // The gray file of a catalogue record: "ug" + the 64-bit FNV-1a of the record path (lower case,
 // '\' as '/') in 16 lower-case hex digits + ".tex" - 22 characters, one file per record, the same
 // name in the generator (the catalogue's record) and at run time (the prototype's record).
+// The name carries no game: a record a custom game overrides with another icon has the base
+// copy's name, so each game keeps its gray files in its own folder's gray\ (mods\<leaf>\gray).
 inline uint64_t utGrayHash(const char* record) {
     uint64_t h = 14695981039346656037ull;
     for (const char* p = record ? record : ""; *p; ++p) {

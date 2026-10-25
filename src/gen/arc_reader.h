@@ -72,24 +72,57 @@ private:
 // "XPack2".."XPack4", and Eternal Embers ships its item art as Item.arc - singular, which is what
 // its bitmap paths say; an "Items" path whose Items.arc is absent falls back to Item.arc, as
 // tools/tqarc.py does. Archives are opened on first use and only their index is kept.
+//
+// A custom game (generate.h GameSpec): the engine puts the game's Resources folder in front of
+// the base game's, so its archives are searched FIRST, entry by entry - the same names under its
+// own folder (<res>\[XPack<n>\]<Arc>.arc), then, for an expansion path, <res>\XPack<n>.arc, whose
+// entries keep the archive's name ("items/..."). The first that holds the entry wins; a path none
+// of them holds is the base game's, as above.
+//
+// A custom game's archive that does not load (a zeroed header, a half-written download) is
+// skipped, never fatal: it is remembered as absent, named once in skipped(), and the lookup goes
+// on to the next candidate and the base game's archive. A base game's archive that does not load
+// still fails the generation (the installation itself is broken).
 class ResourceArcs {
 public:
-    void setRoot(const std::string& gameDir) { m_root = gameDir + "\\Resources"; m_arcs.clear(); }
+    // gameResources: a custom game's Resources folder, "" for the start-up game.
+    void setRoot(const std::string& gameDir, const std::string& gameResources = std::string()) {
+        m_root = gameDir + "\\Resources";
+        m_gameRoot = gameResources;
+        m_arcs.clear();
+        m_skipped.clear();
+    }
     // The entry bytes for a resource path; `limit` as ArcArchive::read. False when the path maps
     // to no archive, the archive or the entry is absent, or the body does not decode; *error is
-    // set only for an archive that exists and does not load (the generation then fails).
+    // set only for a base game's archive that exists and does not load (the generation then fails).
     bool read(const std::string& resPath, std::vector<std::uint8_t>& out, std::size_t limit,
               std::string* error) const;
     // "<rel path of the archive>" a resource path resolves to, "" when none does.
     std::string sourceOf(const std::string& resPath) const;
     std::size_t opened() const;          // archives actually loaded so far
+    // The custom game's archives skipped so far, "<path>: <reason>" each, in the order they were
+    // met; noteSkipped adds one met elsewhere (the game's Text.arc, loadTextTags).
+    const std::vector<std::string>& skipped() const { return m_skipped; }
+    void noteSkipped(const std::string& why) { m_skipped.push_back(why); }
 
 private:
     const ArcArchive* archiveFor(const std::string& resPath, std::string* inner,
                                  std::string* error) const;
-    std::string m_root;
+    // <dir>\<rel>, opened once under the key ck; null when absent. A base game's archive that does
+    // not load: null, *bad set, *error the reason. A custom game's (ck "game:..."): null, kept as
+    // absent and named in m_skipped.
+    const ArcArchive* openArc(const std::string& dir, const std::string& rel, const std::string& ck,
+                              std::string* error, bool* bad) const;
+    std::string m_root, m_gameRoot;
     mutable std::map<std::string, std::unique_ptr<ArcArchive>> m_arcs;   // null = absent
+    mutable std::vector<std::string> m_skipped;
 };
+
+// "<path>: <reason>" for an archive that did not load: the reader's message already starts with
+// the path when it names it (ArcArchive::load).
+inline std::string skippedArchiveText(const std::string& path, const std::string& why) {
+    return why.compare(0, path.size(), path) == 0 ? why : path + ": " + why;
+}
 
 // `tag=Text` lines of one tag file, appended to tags (later lines win). TQ: a file that opens
 // with the UTF-16LE BOM FF FE (53 of the 57 in Text_EN.arc) is decoded from UTF-16LE, an
@@ -99,8 +132,16 @@ void parseTagFile(const std::vector<std::uint8_t>& data,
                   std::unordered_map<std::string, std::string>& tags);
 
 // Every .txt of <game>\Text\Text_<lang>.arc merged in archive order, a later file winning (TQ
-// has one text archive for the base game and every expansion).
+// has one text archive for the base game and every expansion). A language other than EN has
+// Text_EN.arc merged first and Text_<lang>.arc over it, so a tag the translation lacks keeps its
+// English text. gameResources: a custom game's Resources folder ("" = none); its Text.arc is
+// merged the same way AFTER the base text, so a tag the game defines replaces the base one (the
+// engine loads the game's strings last). A game's Text.arc that cannot be read is skipped whole
+// ("<path>: <reason>" appended to *skipped) and the base text stands; a base text archive that
+// cannot be read fails (*error).
 bool loadTextTags(const std::string& gameDir, const std::string& lang,
-                  std::unordered_map<std::string, std::string>& tags, std::string* error);
+                  std::unordered_map<std::string, std::string>& tags, std::string* error,
+                  const std::string& gameResources = std::string(),
+                  std::vector<std::string>* skipped = nullptr);
 
 } // namespace gen

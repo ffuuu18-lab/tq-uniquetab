@@ -56,7 +56,11 @@ struct TqStdString {
 static_assert(sizeof(TqStdString) == 0x18, "VS2012 x86 std::string is 0x18 bytes");
 
 // ---- function pointer types -----------------------------------------------------------------
-typedef void(__thiscall* PfnEngine_Void)(TqEngine*);  // PresentSurface, LoadMainDatabase
+typedef void(__thiscall* PfnEngine_Void)(TqEngine*);  // PresentSurface, LoadMainDatabase, CleanseDatabase
+// the front input device (the screen input log reads its vtable)
+typedef void*(__thiscall* PfnEngine_GetInputDevice)(TqEngine*);
+TQ_EXPECT_CC(TQ_INPUT_ENGINE_GETINPUTDEVICE, TQCC_THISCALL);
+TQ_EXPECT_CC(TQ_INPUT_ENGINE_PROCESSUSERINPUT, TQCC_THISCALL);
 typedef bool(__thiscall* PfnEngine_LoadDatabase)(TqEngine*, const TqStdString* path);
 typedef unsigned(__thiscall* PfnEngine_GetChecksum)(TqEngine*);
 typedef bool(__thiscall* PfnEngine_Bool)(TqEngine*);  // HasLoadedCustomDatabase, IsNetwork*
@@ -72,6 +76,7 @@ TQ_EXPECT_CC(TQ_ENGINE_HASLOADEDCUSTOMDATABASE, TQCC_THISCALL);
 TQ_EXPECT_CC(TQ_ENGINE_ISNETWORKCLIENT, TQCC_THISCALL);
 TQ_EXPECT_CC(TQ_ENGINE_ISNETWORKSERVER, TQCC_THISCALL);
 TQ_EXPECT_CC(TQ_ENGINE_INITIALIZEMOD, TQCC_THISCALL);
+TQ_EXPECT_CC(TQ_ENGINE_CLEANSEDATABASE, TQCC_THISCALL);
 TQ_EXPECT_CC(TQ_ENGINE_GETGAMEINFO, TQCC_THISCALL);
 TQ_EXPECT_CC(TQ_ENGINE_GETGRAPHICSENGINE, TQCC_THISCALL);
 TQ_EXPECT_CC(TQ_ENGINE_GETUISCALE, TQCC_THISCALL);
@@ -119,6 +124,15 @@ typedef const unsigned short*(__thiscall* PfnButtonEvent_GetText)(const void* bu
 // (name, true, false); an unknown name faults inside (it writes the flag into a null font).
 typedef const void*(__thiscall* PfnGfx_LoadFont)(TqGraphicsEngine*, const TqStdString*, Bool32, Bool32);
 TQ_EXPECT_CC(TQ_GFX_LOADFONT, TQCC_THISCALL);
+// GetFallbackFonts() const: the engine's fallback fonts, a std::vector<const GraphicsFont*> by
+// reference (VS2012 x86: three pointers - first, last, end). Read once per process for the log.
+struct TqFontVector {
+    const void* const* first;
+    const void* const* last;
+    const void* const* end;
+};
+typedef const TqFontVector*(__thiscall* PfnGfx_GetFallbackFonts)(const TqGraphicsEngine*);
+TQ_EXPECT_CC(TQ_GFX_GETFALLBACKFONTS, TQCC_THISCALL);
 TQ_EXPECT_CC(TQ_GFX_GETCANVAS, TQCC_THISCALL);
 TQ_EXPECT_CC(TQ_GFX_ISDOWNSIZING, TQCC_THISCALL);
 TQ_EXPECT_CC(TQ_GFX_LOADTEXTURE, TQCC_THISCALL);
@@ -268,9 +282,15 @@ TQ_EXPECT_CC(TQ_SACK_CTOR, TQCC_THISCALL);
 // GAME::Item. GetItemClassification / GetItemType return a scalar enum (EAX, no sret).
 typedef TqItem*(__cdecl* PfnItem_CreateItem)(const void* replicaInfo);
 typedef void(__thiscall* PfnItem_GetItemReplicaInfo)(const TqItem*, void* replicaInfo);
+// Item::GetPrefixName / Item::GetSuffixName (non-const __thiscall, `QAEPBDXZ`): the c_str of the
+// item's own replica prefix / suffix string (`cmp [ecx+X+0x14],0x10; lea eax,[ecx+X]; jb; mov
+// eax,[eax]; ret`, X = 0x2E4 / 0x2FC beside GetItemReplicaInfo's `lea eax,[ecx+0x2C8]`).
+typedef const char*(__thiscall* PfnItem_GetAffixName)(TqItem*);
 typedef int(__thiscall* PfnItem_GetInt)(const TqItem*);  // classification / type
 typedef unsigned(__thiscall* PfnItem_GetNumberInStack)(const TqItem*);
 TQ_EXPECT_CC(TQ_ITEM_VFTABLE, TQCC_DATA);
+TQ_EXPECT_CC(TQ_RELIC_VFTABLE, TQCC_DATA);
+TQ_EXPECT_CC(TQ_CHARM_VFTABLE, TQCC_DATA);
 TQ_EXPECT_CC(TQ_ITEM_CREATEITEM, TQCC_CDECL);
 TQ_EXPECT_CC(TQ_ITEM_GETITEMREPLICAINFO, TQCC_THISCALL);
 TQ_EXPECT_CC(TQ_ITEM_GETITEMCLASSIFICATION, TQCC_THISCALL);
@@ -339,7 +359,8 @@ struct TqRuntime {
     PfnEngine_LoadDatabase EngineLoadDatabase = nullptr;    // hook
     PfnEngine_GetChecksum EngineGetDatabaseArchiveChecksum = nullptr;
     PfnEngine_Bool EngineHasLoadedCustomDatabase = nullptr;
-    PfnEngine_InitializeMod EngineInitializeMod = nullptr;
+    PfnEngine_InitializeMod EngineInitializeMod = nullptr;   // hook (the game switch)
+    PfnEngine_Void EngineCleanseDatabase = nullptr;          // hook (back to the start-up game)
     PfnEngine_GetGameInfo EngineGetGameInfo = nullptr;
     PfnEngine_Bool EngineIsNetworkClient = nullptr;
     PfnEngine_Bool EngineIsNetworkServer = nullptr;
@@ -364,8 +385,15 @@ struct TqRuntime {
     PfnCanvas_RenderTextW CanvasRenderTextW = nullptr;
     PfnDisplay_HandleKeyEvent DisplayHandleKeyEvent = nullptr;
     PfnButtonEvent_GetText ButtonEventGetText = nullptr;
+    PfnEngine_GetInputDevice EngineGetInputDevice = nullptr;   // the screen input log
+    PfnEngine_Void EngineProcessUserInput = nullptr;           // the screen input log (hook)
+    const void* MouseEventCtor = nullptr;      // compared with a call target, never called
+    const void* MouseEventAssign = nullptr;    // its bytes are read, never called
+    const void* MouseEventConvert = nullptr;   // its bytes are read, never called
+    const void* InputDeviceCreate = nullptr;   // its bytes are read, never called
     PfnRenderDevice_GetActiveAPI RenderDeviceGetActiveAPI = nullptr;
     PfnGfx_LoadFont GfxLoadFont = nullptr;
+    PfnGfx_GetFallbackFonts GfxGetFallbackFonts = nullptr;
 
     PfnObjectManager_Get ObjectManagerGet = nullptr;
     PfnObjectManager_DestroyObjectEx ObjectManagerDestroyObjectEx = nullptr;
@@ -442,8 +470,13 @@ struct TqRuntime {
     PfnPlayer_PlayInventoryFullSound PlayerPlayInventoryFullSound = nullptr;
 
     const void* ItemVftable = nullptr;
+    const void* RelicVftable = nullptr;   // ??_7ItemRelic
+    const void* CharmVftable = nullptr;   // ??_7ItemCharm
+    void* RelicBitmapText = nullptr;      // ItemRelic::GetUIBitmapText, confirmed by its slot (null = not)
     PfnItem_CreateItem ItemCreateItem = nullptr;
     PfnItem_GetItemReplicaInfo ItemGetItemReplicaInfo = nullptr;
+    PfnItem_GetAffixName ItemGetPrefixName = nullptr;   // ADVISORY: the "(another roll)" line
+    PfnItem_GetAffixName ItemGetSuffixName = nullptr;
     PfnItem_GetInt ItemGetItemClassification = nullptr;
     PfnItem_GetInt ItemGetItemType = nullptr;
     PfnItem_GetNumberInStack ItemGetNumberInStack = nullptr;
@@ -480,6 +513,11 @@ struct TqRuntime {
     const void* retQuickMove = nullptr;
     unsigned sigPageDrawRva = 0;   // exe.transferPageDraw (the slot plates), 0 = none
     unsigned sigItemBackgroundRva = 0;   // exe.itemBackground (the rect route), 0 = none
+    unsigned sigRollDrawRva = 0;   // exe.rolloverDraw (the screen parts' draw site), 0 = none
+    // exe.transferSortButton (the Transfer page's button handler), 0 = none; the SORT button is
+    // the widget at this + transferSortWidget (decoded `8D 81 d32` at +0x20: -0xB08), 0 = unknown.
+    unsigned sigTransferSortRva = 0;
+    int transferSortWidget = 0;
     unsigned pageUiOff = 0;      // sub-window -> UIStashInventory (lea edi,[ebx+d32]) = 0x88
     unsigned pageSackOff = 0;    // UIStashInventory -> cached sack (mov [edi+d8],ecx) = 0x60
     // (row cursor.disposal): decoded from PrimaryTransferActivate's own disposal bytes

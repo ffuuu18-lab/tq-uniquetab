@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "ut_bindings.h"
+#include "ut_inputrec.h"
 #include "ut_log.h"
 
 namespace ut {
@@ -342,6 +343,27 @@ void decodeDisposal() {
 // the IAT slot once (`8B 3D <slot>` at 0x107A61) and calls it twice through EDI: the primary call
 // (`FF D7` at 0x107A6A, then `84 C0 0F 84`: its result decides) and the stacked-extras loop
 // (0x107AED, result ignored). While the view is ON only the primary's return address is accepted.
+// the Transfer sort button: `8D 81 d32` (lea eax,[ecx+d32]) at +0x20 of the matched handler is
+// the widget the handler compares with its event's widget before it combines and sorts.
+void decodeSortButton() {
+    int off = 0;
+    bool ok = false;
+    if (g_tq.sigTransferSortRva) {
+        unsigned char b[6];
+        if (safeRead((const unsigned char*)g_tq.exe + g_tq.sigTransferSortRva + 0x20, b, 6) &&
+            b[0] == 0x8D && b[1] == 0x81) {
+            memcpy(&off, b + 2, 4);
+            ok = off < 0 && off > -0x4000;
+        }
+    }
+    char why[160];
+    _snprintf_s(why, sizeof(why), _TRUNCATE,
+                "the handler compares its widget with lea eax,[ecx%+d] before it combines and sorts",
+                off);
+    bindingsNote("exe.transferSortButton.widget", (unsigned)off, ok, why);
+    if (ok) g_tq.transferSortWidget = off;
+}
+
 void decodeQuickMove() {
     char why[256];
     const unsigned char *lo = nullptr, *hi = nullptr;
@@ -571,6 +593,8 @@ bool resolveExports() {
                "Engine::HasLoadedCustomDatabase");
     TQ_RESOLVE(EngineInitializeMod, PfnEngine_InitializeMod, TQ_ENGINE_INITIALIZEMOD,
                "Engine::InitializeMod");
+    TQ_RESOLVE(EngineCleanseDatabase, PfnEngine_Void, TQ_ENGINE_CLEANSEDATABASE,
+               "Engine::CleanseDatabase");
     TQ_RESOLVE(EngineGetGameInfo, PfnEngine_GetGameInfo, TQ_ENGINE_GETGAMEINFO,
                "Engine::GetGameInfo");
     TQ_RESOLVE(EngineIsNetworkClient, PfnEngine_Bool, TQ_ENGINE_ISNETWORKCLIENT,
@@ -616,9 +640,21 @@ bool resolveExports() {
                "Display::HandleKeyEvent");
     TQ_RESOLVE(ButtonEventGetText, PfnButtonEvent_GetText, TQ_INPUT_BUTTONEVENT_GETTEXT,
                "ButtonEvent::GetText");
+    // the screen input log (log only)
+    TQ_RESOLVE(EngineGetInputDevice, PfnEngine_GetInputDevice, TQ_INPUT_ENGINE_GETINPUTDEVICE,
+               "Engine::GetInputDevice");
+    TQ_RESOLVE(EngineProcessUserInput, PfnEngine_Void, TQ_INPUT_ENGINE_PROCESSUSERINPUT,
+               "Engine::ProcessUserInput");
+    TQ_RESOLVE(MouseEventCtor, const void*, TQ_INPUT_MOUSEEVENT_CTOR, "MouseEvent::MouseEvent");
+    TQ_RESOLVE(MouseEventAssign, const void*, TQ_INPUT_MOUSEEVENT_ASSIGN, "MouseEvent::operator=");
+    TQ_RESOLVE(MouseEventConvert, const void*, TQ_INPUT_MOUSEEVENT_CONVERTTOBUTTONEVENT,
+               "MouseEvent::ConvertToButtonEvent");
+    TQ_RESOLVE(InputDeviceCreate, const void*, TQ_INPUT_INPUTDEVICE_CREATE, "InputDevice::Create");
     TQ_RESOLVE(RenderDeviceGetActiveAPI, PfnRenderDevice_GetActiveAPI, TQ_GFX_RD_GETACTIVEAPI,
                "RenderDevice::GetActiveAPI");
     TQ_RESOLVE(GfxLoadFont, PfnGfx_LoadFont, TQ_GFX_LOADFONT, "GraphicsEngine::LoadFont");
+    TQ_RESOLVE(GfxGetFallbackFonts, PfnGfx_GetFallbackFonts, TQ_GFX_GETFALLBACKFONTS,
+               "GraphicsEngine::GetFallbackFonts");
 
     // Engine.dll -- GAME::Object accessors (Item derives from Object) and the object manager.
     TQ_RESOLVE(ObjectManagerGet, PfnObjectManager_Get, TQ_OBJ_OM_GET, "ObjectManager::Get");
@@ -676,6 +712,9 @@ bool resolveExports() {
 
     // Game.dll -- CursorHandlerItemMove, the drop gate.
     TQ_RESOLVE(CursorVftable, const void*, TQ_CURSOR_VFTABLE, "CursorHandlerItemMove vftable");
+    // Game.dll -- the relic and charm classes (the partial piece's number on its icon)
+    TQ_RESOLVE(RelicVftable, const void*, TQ_RELIC_VFTABLE, "ItemRelic vftable");
+    TQ_RESOLVE(CharmVftable, const void*, TQ_CHARM_VFTABLE, "ItemCharm vftable");
     TQ_RESOLVE(CursorGetId, PfnCursor_GetId, TQ_CURSOR_GETID, "CursorHandlerItemMove::GetId");
     TQ_RESOLVE(CursorSetId, PfnCursor_SetId, TQ_CURSOR_SETID, "CursorHandlerItemMove::SetId");
     TQ_RESOLVE(CursorPrimaryStashActivate, PfnCursor_Primary, TQ_CURSOR_PRIMARYSTASHACTIVATE,
@@ -772,6 +811,8 @@ bool resolveExports() {
     TQ_RESOLVE(ItemCreateItem, PfnItem_CreateItem, TQ_ITEM_CREATEITEM, "Item::CreateItem");
     TQ_RESOLVE(ItemGetItemReplicaInfo, PfnItem_GetItemReplicaInfo, TQ_ITEM_GETITEMREPLICAINFO,
                "Item::GetItemReplicaInfo");
+    TQ_RESOLVE(ItemGetPrefixName, PfnItem_GetAffixName, TQ_ITEM_GETPREFIXNAME, "Item::GetPrefixName");
+    TQ_RESOLVE(ItemGetSuffixName, PfnItem_GetAffixName, TQ_ITEM_GETSUFFIXNAME, "Item::GetSuffixName");
     TQ_RESOLVE(ItemGetItemClassification, PfnItem_GetInt, TQ_ITEM_GETITEMCLASSIFICATION,
                "Item::GetItemClassification");
     TQ_RESOLVE(ItemGetItemType, PfnItem_GetInt, TQ_ITEM_GETITEMTYPE, "Item::GetItemType");
@@ -835,12 +876,43 @@ void decodeBindings() {
     bindingsNote("cursor.itemId", cid, cidOk, why);
     if (cidOk) g_tq.cursorIdOff = cid;
 
+    // ---- the input device field: Engine::GetInputDevice and the pump read the same one --------
+    {
+        unsigned char gid[8], pui[0x50];
+        const bool have = g_tq.EngineGetInputDevice && g_tq.EngineProcessUserInput &&
+                          safeRead((const void*)g_tq.EngineGetInputDevice, gid, sizeof(gid)) &&
+                          safeRead((const void*)g_tq.EngineProcessUserInput, pui, sizeof(pui));
+        const unsigned dev = have ? utInputDeviceField(gid, sizeof(gid)) : 0;
+        const unsigned twin = have ? utPumpDeviceField(pui, sizeof(pui)) : 0;
+        const bool devOk = dev != 0 && dev == twin && utFieldPlausible(dev, 0x10000);
+        _snprintf_s(why, sizeof(why), _TRUNCATE,
+                    "GetInputDevice reads +0x%X, ProcessUserInput reads +0x%X at +0x43", dev, twin);
+        bindingsNote("input.deviceField", dev, devOk, why);
+    }
+
     // ---- the Item vftable slots, found BY ADDRESS ---------------------------------------------
     noteSlot("item.replicaSlot", g_tq.ItemVftable, (const void*)g_tq.ItemGetItemReplicaInfo);
     noteSlot("item.classificationSlot", g_tq.ItemVftable,
              (const void*)g_tq.ItemGetItemClassification);
     noteSlot("item.typeSlot", g_tq.ItemVftable, (const void*)g_tq.ItemGetItemType);
     noteSlot("item.stackSlot", g_tq.ItemVftable, (const void*)g_tq.ItemGetNumberInStack);
+
+    // ---- ItemRelic::GetUIBitmapText: slot +0x144 of both vftables, its head (the level test) ----
+    {
+        unsigned fr = 0, fc = 0;
+        unsigned char head[sizeof(kUtRelicTextHead)] = {0};
+        const bool have = g_tq.RelicVftable && g_tq.CharmVftable &&
+                          safeRead((const unsigned char*)g_tq.RelicVftable + kUtRelicTextSlot, &fr, 4) &&
+                          safeRead((const unsigned char*)g_tq.CharmVftable + kUtRelicTextSlot, &fc, 4) &&
+                          inModuleText(g_tq.gameDll, (const void*)(uintptr_t)fr) &&
+                          safeRead((const void*)(uintptr_t)fr, head, sizeof(head));
+        const bool confirmed = have && fr == fc && utRelicTextHead(head);
+        g_tq.RelicBitmapText = confirmed ? (void*)(uintptr_t)fr : nullptr;
+        logD("bindings: ItemRelic::GetUIBitmapText = ??_7ItemRelic+0x%X -> %p (%s)", kUtRelicTextSlot,
+             (void*)(uintptr_t)fr,
+             confirmed ? "ItemCharm's slot holds it too, its level test +0x544 / +0x54C read"
+                       : "NOT confirmed - the relic page's pieces keep the engine's number");
+    }
 
     // ---- the CursorHandlerItemMove capability slots +0x18..+0x34 -> one shared stub ------------
     {
@@ -876,6 +948,9 @@ void decodeBindings() {
     decodeDisposal();
     scanSignature(kUtSigPageDraw, &g_tq.sigPageDrawRva);   // the slot plates
     scanSignature(kUtSigItemBackground, &g_tq.sigItemBackgroundRva);   // the rect route
+    scanSignature(kUtSigRollDraw, &g_tq.sigRollDrawRva);   // the screen parts' draw site
+    scanSignature(kUtSigTransferSort, &g_tq.sigTransferSortRva);   // the sort block
+    decodeSortButton();
     decodeQuickMove();
 
     logI("decoded: GameEngine +0x%X stash / +0x%X transfer / +0x%X relic vault, caravan mode "

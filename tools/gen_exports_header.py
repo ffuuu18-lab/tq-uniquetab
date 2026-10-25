@@ -96,6 +96,7 @@ SELECTION = [
         ("GETDATABASEARCHIVECHECKSUM", "?GetDatabaseArchiveChecksum@Engine@GAME@@QAEIXZ", REQ),
         ("HASLOADEDCUSTOMDATABASE", "?HasLoadedCustomDatabase@Engine@GAME@@QAE_NXZ", OPT),
         ("INITIALIZEMOD", "?InitializeMod@Engine@GAME@@QAE_NABV" + STR + "0@Z", OPT),
+        ("CLEANSEDATABASE", "?CleanseDatabase@Engine@GAME@@QAEXXZ", OPT),
         ("GETGAMEINFO", "?GetGameInfo@Engine@GAME@@QAEPAVGameInfo@2@XZ", OPT),
         # TQ has no GameInfo::IsNetworkClient/Server: the two live on Engine.
         ("ISNETWORKCLIENT", "?IsNetworkClient@Engine@GAME@@QAE_NXZ", OPT),
@@ -118,6 +119,17 @@ SELECTION = [
     ("Input - the search field's key gate", "Engine.dll", "TQ_INPUT", [
         ("DISPLAY_HANDLEKEYEVENT", "?HandleKeyEvent@Display@GAME@@QAEXABVButtonEvent@InputDevice@2@@Z", OPT),
         ("BUTTONEVENT_GETTEXT", "?GetText@ButtonEvent@InputDevice@GAME@@QBEPBGXZ", OPT),
+    ]),
+    # the screen input log (log only): the pump, the front input device, and the exported
+    # MouseEvent members whose bytes prove the record's size and the type's offset.
+    ("Input - the screen input log", "Engine.dll", "TQ_INPUT", [
+        ("ENGINE_GETINPUTDEVICE", "?GetInputDevice@Engine@GAME@@QAEPAVInputDevice@2@XZ", OPT),
+        ("ENGINE_PROCESSUSERINPUT", "?ProcessUserInput@Engine@GAME@@QAEXXZ", OPT),
+        ("MOUSEEVENT_CTOR", "??0MouseEvent@InputDevice@GAME@@QAE@XZ", OPT),
+        ("MOUSEEVENT_ASSIGN", "??4MouseEvent@InputDevice@GAME@@QAEAAU012@ABU012@@Z", OPT),
+        ("MOUSEEVENT_CONVERTTOBUTTONEVENT",
+         "?ConvertToButtonEvent@MouseEvent@InputDevice@GAME@@QBEXAAVButtonEvent@23@@Z", OPT),
+        ("INPUTDEVICE_CREATE", "?Create@InputDevice@GAME@@SAPAV12@XZ", OPT),
     ]),
     ("GameInfo", "Engine.dll", "TQ_GAMEINFO", [
         ("GETISMULTIPLAYER", "?GetIsMultiPlayer@GameInfo@GAME@@QBE_NXZ", OPT),
@@ -154,6 +166,10 @@ SELECTION = [
         # the pad's caption font by NAME. LoadFont(name, bool override, bool flag) - the `1`
         # in the mangling back-references _N; the engine's own callers pass (name, true, false).
         ("LOADFONT", "?LoadFont@GraphicsEngine@GAME@@QAEPBVGraphicsFont@2@ABV" + STR + "_N1@Z", OPT),
+        # the engine's own fallback fonts (a const std::vector<const GraphicsFont*>&): logged
+        # once per process - what draws a letter none of the game's fonts has.
+        ("GETFALLBACKFONTS", "?GetFallbackFonts@GraphicsEngine@GAME@@QBEABV?$vector@PBVGraphicsFont@GAME@@"
+         "V?$allocator@PBVGraphicsFont@GAME@@@std@@@std@@XZ", OPT),
     ]),
     ("Object lookup and records", "Engine.dll", "TQ_OBJ", [
         ("OM_GET", "?Get@?$Singleton@VObjectManager@GAME@@@GAME@@SAPAVObjectManager@2@XZ", OPT),
@@ -289,6 +305,10 @@ SELECTION = [
         ("GETACTUALITEMCLASSIFICATION",
          "?GetActualItemClassification@Item@GAME@@QBE?AW4ItemClassification@2@XZ", OPT),
         ("GETNUMBERINSTACK", "?GetNumberInStack@Item@GAME@@UBEIXZ", OPT),
+        # the "(another roll)" rollover line: the c_str of the item's own replica prefix /
+        # suffix string (non-const __thiscall members returning const char*)
+        ("GETPREFIXNAME", "?GetPrefixName@Item@GAME@@QAEPBDXZ", OPT),
+        ("GETSUFFIXNAME", "?GetSuffixName@Item@GAME@@QAEPBDXZ", OPT),
     ]),
     # the "In your collection" rollover line (GD ut_tooltip). Four of the five are detoured
     # ALL-OR-NOTHING (every weapon / armour / jewellery vftable's +0x14C slot is ItemEquipment's,
@@ -303,6 +323,10 @@ SELECTION = [
          "?GetUIDisplayText@ItemArtifact@GAME@@UBEXPBVCharacter@2@AAV" + TIPVEC + "@Z", OPT),
         ("ITEMRELIC_GETUIDISPLAYTEXT",
          "?GetUIDisplayText@ItemRelic@GAME@@UBEXPBVCharacter@2@AAV" + TIPVEC + "@Z", OPT),
+        # an arcane formula's own rollover: detoured with the four above (its own line, never
+        # the crafted artifact's)
+        ("ITEMARTIFACTFORMULA_GETUIDISPLAYTEXT",
+         "?GetUIDisplayText@ItemArtifactFormula@GAME@@UBEXPBVCharacter@2@AAV" + TIPVEC + "@Z", OPT),
         ("GAMETEXTLINETOSTRING", "?GameTextLineToString@GAME@@YAXABV" + TIPVEC + "AAV?$list@UGameTextString"
          "@GAME@@V?$allocator@UGameTextString@GAME@@@std@@@3@@Z", OPT),
         ("GAMETEXTLINE_CTOR", "??0GameTextLine@GAME@@QAE@W4GameTextClass@1@ABV?$basic_string@GU?$char_"
@@ -319,7 +343,7 @@ SELECTION = [
 # Exports that create, move, delete or persist items: listed, but the comment says WRITE.
 FORBIDDEN = re.compile(
     r"^\?(AddItem|AdditemTo|RemoveItem|DestroyObject|CreateItem|SetId|SetCaravanMode|CaravanGoodbye"
-    r"|LoadDatabase|LoadMainDatabase|InitializeMod)")
+    r"|LoadDatabase|LoadMainDatabase|InitializeMod|CleanseDatabase)")
 
 CC_NAMES = {"TQCC_DATA": "data", "TQCC_THISCALL": "__thiscall", "TQCC_CDECL": "__cdecl",
             "TQCC_STDCALL": "__stdcall", "TQCC_FASTCALL": "__fastcall"}

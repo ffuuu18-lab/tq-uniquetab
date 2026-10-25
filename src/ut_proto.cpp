@@ -22,6 +22,7 @@
 #include "ut_viewgate.h"
 #include "ut_store.h"
 #include "ut_view.h"
+#include "ut_relicroute.h"   // utRelicProtoVar1
 
 namespace ut {
 namespace {
@@ -287,7 +288,22 @@ bool buildOne(TqSack* s, const UtProtoPlace& p, Live* out) {
     static UtReplicaCapture row;
     unsigned long long seq = 0;
     char key[256];
-    if (utJournalKey(p.record, key, sizeof(key)) && journalRows(key) > 0 &&
+    if (p.slot > 0) {
+        // a relic place: the row its slot hands out (the red slot shows it as the 1-shard piece
+        // a take gives), else the synthetic item - red (record, 1, no bonus), green (record, N,
+        // the table's bonus) - shown gray
+        bool built = false;
+        if (p.seq && journalRowBySeq(p.seq, &row, nullptr)) {
+            if (p.slot == 1) row.var1 = utRelicProtoVar1(row.var1);   // a split: the 1-shard piece
+            built = utReplicaFromIdentity(&rep, row);
+            if (!built)
+                logW("view: the stored identity of %s (row %llu) could not be built - shown as the "
+                     "empty slot, not takeable", p.record, p.seq);
+        }
+        seq = built ? p.seq : 0;
+        if (!built && !utReplicaBuildRelic(&rep, p.record, p.var1, p.bonus ? p.bonus : ""))
+            return false;
+    } else if (utJournalKey(p.record, key, sizeof(key)) && journalRows(key) > 0 &&
         journalNewest(key, &row, &seq) &&
         utReplicaFromIdentity(&rep, row)) {
         // built from the row
@@ -315,6 +331,7 @@ bool buildOne(TqSack* s, const UtProtoPlace& p, Live* out) {
     out->record = p.record;
     utShiftCopyPlace(*out, p);
     out->seq = seq;
+    out->slot = p.slot;
     return true;
 }
 
@@ -343,6 +360,47 @@ struct ShiftOps {
 };
 }  // namespace
 
+namespace {
+int g_gridCols = 16, g_gridRows = 15;   // the grid in force (protoSetGrid), game thread
+
+// The collection sack sized to the grid in force: SetDims(live cell x cols, live cell x rows) when
+// its cell count differs (the page refresh sets 16 x 15 every frame, TQ.exe 0xC2F50). Game thread;
+// the engine calls are not guarded. True when the sack holds cols x rows after it; the cell in
+// *cw / *ch.
+bool gridDims(TqSack* s, bool quiet, unsigned* cw, unsigned* ch) {
+    if (!s || !g_tq.SackSetDims || !g_tq.SackGetGridWidth || !g_tq.SackGetGridHeight ||
+        !g_tq.SackGetCellWidth || !g_tq.SackGetCellHeight)
+        return false;
+    const unsigned w = g_tq.SackGetCellWidth(s), h = g_tq.SackGetCellHeight(s);
+    if (w < 8 || w > 256 || h < 8 || h > 256) return false;
+    if (cw) *cw = w;
+    if (ch) *ch = h;
+    const unsigned gw = g_tq.SackGetGridWidth(s), gh = g_tq.SackGetGridHeight(s);
+    if ((int)gw == g_gridCols && (int)gh == g_gridRows) return true;
+    g_tq.SackSetDims(s, (int)(w * (unsigned)g_gridCols), (int)(h * (unsigned)g_gridRows), 0);
+    const unsigned nw = g_tq.SackGetGridWidth(s), nh = g_tq.SackGetGridHeight(s);
+    const bool ok = (int)nw == g_gridCols && (int)nh == g_gridRows;
+    if (!ok)
+        logW("view: SetDims(%u, %u) gave the mod sack %ux%u cells, not %d x %d", w * g_gridCols,
+             h * g_gridRows, nw, nh, g_gridCols, g_gridRows);
+    else if (!quiet)
+        logI("view: the mod sack is now %ux%u cells of %ux%u px (SetDims %u x %u px; it was %ux%u)",
+             nw, nh, w, h, w * g_gridCols, h * g_gridRows, gw, gh);
+    return ok;
+}
+}  // namespace
+
+void protoSetGrid(int cols, int rows) {
+    if (cols < 1 || rows < 1 || cols * rows > kUtProtoMax) return;
+    g_gridCols = cols;
+    g_gridRows = rows;
+}
+
+bool protoGridReapply(TqSack* s, unsigned* cw, unsigned* ch) {
+    if (!s || s != g_sack) return false;
+    return gridDims(s, true, cw, ch);
+}
+
 int protoBuild(const UtProtoPlace* places, int n, int* failed) {
     ++g_liveGen;
     int bad = 0;
@@ -351,6 +409,7 @@ int protoBuild(const UtProtoPlace* places, int n, int* failed) {
         if (failed) *failed = n;
         return 0;
     }
+    gridDims(s, false, nullptr, nullptr);   // the grid in force's cells before anything is placed
     if (g_liveCount == 0) {   // an empty sack is placed on its LIVE cell (the UI scale's)
         unsigned lw = 0, lh = 0;
         if (liveCell(s, &lw, &lh) && (lw != g_cellW || lh != g_cellH)) {
@@ -397,7 +456,8 @@ int protoShift(const UtProtoPlace* places, int n, UtShiftCounts* out) {
     g_shiftSwept = true;        // until the window is built, the teardown's sweep ran
     if (g_sackStale || !g_sack) return kUtShiftNotApplied;
     static unsigned long long seq[kUtProtoMax];
-    for (int i = 0; i < n; ++i) seq[i] = placeSeq(places[i].record);
+    for (int i = 0; i < n; ++i)
+        seq[i] = places[i].slot > 0 ? places[i].seq : placeSeq(places[i].record);
     static Live scratch[kUtProtoMax];
     ShiftOps ops = {g_sack, places};
     UtShiftCounts c;
@@ -535,6 +595,21 @@ bool protoLookup(unsigned id, const char** record, unsigned long long* seq) {
         return true;
     }
     return false;
+}
+
+bool protoSlotOf(unsigned id, int* slot) {
+    for (int i = 0; i < g_liveCount; ++i) {
+        if (g_live[i].id != id) continue;
+        if (slot) *slot = g_live[i].slot;
+        return true;
+    }
+    return false;
+}
+
+bool protoSlotKindAt(int i, int* slot) {
+    if (i < 0 || i >= g_liveCount) return false;
+    if (slot) *slot = g_live[i].slot;
+    return true;
 }
 
 bool protoAtSeq(int i, unsigned long long* seq) {
@@ -894,5 +969,8 @@ bool protoPlacedCellStale() {
     if (!liveCell(g_sack, &lw, &lh)) return false;   // unreadable: no evidence of a change
     return lw != g_cellW || lh != g_cellH;
 }
+
+// isItemObject for the tooltip's roll read (pure reads, any thread).
+bool protoIsItem(const void* obj) { return isItemObject(obj); }
 
 }  // namespace ut

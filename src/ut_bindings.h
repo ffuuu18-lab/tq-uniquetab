@@ -133,7 +133,9 @@ extern const UtBindPattern kUtSigHeldPickup;
 extern const UtBindPattern kUtSigLeftClick;
 extern const UtBindPattern kUtSigLeftHandler;   // the mouse handler entry (the hover frame)
 extern const UtBindPattern kUtSigPageDraw;      // the Transfer page draw (the slot plates)
-extern const UtBindPattern kUtSigItemBackground;   // an item widget's background (the rect route)
+extern const UtBindPattern kUtSigRollDraw;      // the HUD item rollover's Draw (the screen parts)
+extern const UtBindPattern kUtSigItemBackground;
+extern const UtBindPattern kUtSigTransferSort;   // the Transfer page's button handler (its SORT button)   // an item widget's background (the rect route)
 // the item widget's fields the rect route reads and writes (TQ.exe 0x10A9B0 / 0x10ADE0 /
 // 0x16E3B3; test_bindings decodes each from TQ.exe): the rect x, y, w, h (floats), the item's
 // object id (the item loop's `FF 70 30`), the draw scale (float).
@@ -229,6 +231,18 @@ inline bool utSackTrioPlausible(unsigned stash, unsigned transfer, unsigned reli
     if (!(stash < transfer && transfer < relic)) return false;
     if (transfer - stash != relic - transfer) return false;
     return utFieldPlausible(mode, 0x10000) && mode < stash;
+}
+
+// ItemRelic::GetUIBitmapText (Game.dll, AE 2.10 rva 0x1C3B80): slot +0x144 of ??_7ItemRelic and of
+// ??_7ItemCharm (inherited). Its head compares the piece's level (+0x544) with the completed one
+// (+0x54C) and writes the level text only below it; the relic page's own pieces skip it.
+const unsigned kUtRelicTextSlot = 0x144;
+const unsigned char kUtRelicTextHead[15] = {0x53, 0x8B, 0xD9, 0x8B, 0x83, 0x44, 0x05, 0x00,
+                                            0x00, 0x3B, 0x83, 0x4C, 0x05, 0x00, 0x00};
+inline bool utRelicTextHead(const unsigned char* p) {
+    for (unsigned i = 0; i < (unsigned)sizeof(kUtRelicTextHead); ++i)
+        if (p[i] != kUtRelicTextHead[i]) return false;
+    return true;
 }
 
 // A vftable is a run of function pointers. The byte offset of the ONE slot among the first `n`

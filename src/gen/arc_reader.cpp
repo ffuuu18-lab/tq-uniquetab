@@ -268,30 +268,58 @@ const ArcArchive* ResourceArcs::archiveFor(const std::string& resPath, std::stri
         restAt = s1 + 1;
     }
     if (inner) *inner = key.substr(restAt);
-    const std::string dir = m_root + (folder.empty() ? std::string() : "\\" + folder);
     std::vector<std::string> cands{arcName + ".arc"};
     if (ArcArchive::normKey(arcName) == "items") cands.push_back("Item.arc");
+    bool bad = false;
+    if (!m_gameRoot.empty()) {   // a custom game's archives first, entry by entry
+        std::vector<std::pair<std::string, std::string>> mine;   // (archive, entry)
+        for (const std::string& c : cands)
+            mine.emplace_back(folder.empty() ? c : folder + "\\" + c, key.substr(restAt));
+        if (!folder.empty()) mine.emplace_back(folder + ".arc", key.substr(s1 + 1));
+        for (const auto& m : mine) {
+            const ArcArchive* a =
+                openArc(m_gameRoot, m.first, "game:" + ArcArchive::normKey(m.first), error, &bad);
+            if (bad) return nullptr;
+            if (a && a->entry(m.second)) {
+                if (inner) *inner = m.second;
+                return a;
+            }
+        }
+    }
     for (const std::string& c : cands) {
         const std::string rel = folder.empty() ? c : folder + "\\" + c;
-        const std::string ck = ArcArchive::normKey(rel);
-        auto it = m_arcs.find(ck);
-        if (it == m_arcs.end()) {
-            std::unique_ptr<ArcArchive> a;
-            const std::string full = dir + "\\" + c;
-            if (fileThere(full)) {
-                a.reset(new ArcArchive);
-                a->setTag(ck);
-                std::string err;
-                if (!a->load(full, &err)) {
-                    if (error) *error = err;
-                    return nullptr;
-                }
-            }
-            it = m_arcs.emplace(ck, std::move(a)).first;
-        }
-        if (it->second) return it->second.get();
+        const ArcArchive* a = openArc(m_root, rel, ArcArchive::normKey(rel), error, &bad);
+        if (bad) return nullptr;
+        if (a) return a;
     }
     return nullptr;
+}
+
+const ArcArchive* ResourceArcs::openArc(const std::string& dir, const std::string& rel,
+                                        const std::string& ck, std::string* error,
+                                        bool* bad) const {
+    auto it = m_arcs.find(ck);
+    if (it == m_arcs.end()) {
+        std::unique_ptr<ArcArchive> a;
+        const std::string full = dir + "\\" + rel;
+        if (fileThere(full)) {
+            a.reset(new ArcArchive);
+            a->setTag(ck);
+            std::string err;
+            if (!a->load(full, &err)) {
+                a.reset();
+                if (ck.compare(0, 5, "game:") != 0) {   // the base game's: the generation fails
+                    if (error) *error = err;
+                    *bad = true;
+                    return nullptr;
+                }
+                // a custom game's: skipped, kept as absent so it is named once and never re-read
+                m_skipped.push_back(skippedArchiveText(full, err));
+            }
+        }
+        it = m_arcs.emplace(ck, std::move(a)).first;
+    }
+    return it->second.get();
 }
 
 bool ResourceArcs::read(const std::string& resPath, std::vector<std::uint8_t>& out,
@@ -387,11 +415,14 @@ void parseTagFile(const std::vector<std::uint8_t>& data,
     }
 }
 
-bool loadTextTags(const std::string& gameDir, const std::string& lang,
+namespace {
+
+// Every .txt of one text archive into tags, in archive order (a later file wins).
+bool mergeTextArc(const std::string& path, const char* tag,
                   std::unordered_map<std::string, std::string>& tags, std::string* error) {
     ArcArchive a;
-    a.setTag("text");
-    if (!a.load(gameDir + "\\Text\\Text_" + lang + ".arc", error)) return false;
+    a.setTag(tag);
+    if (!a.load(path, error)) return false;
     std::vector<std::uint8_t> data;
     for (const ArcEntry& e : a.entries()) {
         if (e.key.size() < 4 || e.key.compare(e.key.size() - 4, 4, ".txt") != 0) continue;
@@ -401,6 +432,31 @@ bool loadTextTags(const std::string& gameDir, const std::string& lang,
         }
         if (!data.empty()) parseTagFile(data, tags);
     }
+    return true;
+}
+
+} // namespace
+
+bool loadTextTags(const std::string& gameDir, const std::string& lang,
+                  std::unordered_map<std::string, std::string>& tags, std::string* error,
+                  const std::string& gameResources, std::vector<std::string>* skipped) {
+    const std::string base = gameDir + "\\Text\\Text_";
+    // a translation over the English text: a tag it lacks keeps its English name
+    const bool english = lang.size() == 2 && (lang[0] == 'E' || lang[0] == 'e') &&
+                         (lang[1] == 'N' || lang[1] == 'n');
+    if (!english && !mergeTextArc(base + "EN.arc", "text", tags, error)) return false;
+    if (!mergeTextArc(base + lang + ".arc", "text", tags, error)) return false;
+    // a custom game's strings over the base game's: a tag it defines replaces the base one. Read
+    // whole into its own table first, so an archive that fails part way changes nothing.
+    const std::string mine = gameResources + "\\Text.arc";
+    if (gameResources.empty() || !fileThere(mine)) return true;
+    std::unordered_map<std::string, std::string> game;
+    std::string why;
+    if (!mergeTextArc(mine, "gametext", game, &why)) {
+        if (skipped) skipped->push_back(skippedArchiveText(mine, why));
+        return true;
+    }
+    for (auto& kv : game) tags[kv.first].swap(kv.second);
     return true;
 }
 

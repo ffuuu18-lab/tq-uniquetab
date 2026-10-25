@@ -41,6 +41,12 @@ void viewForceOff(const char* reason, bool worldGone = false);
 // A WARN/ERROR in the view code, or an exception it caught: force OFF and latch for the process.
 void viewFault(const char* where);
 void viewFaultSafe(const char* where);     // viewFault under its own SEH guard
+// the two latches: viewFault is an ENGINE fault (latched for the process); viewDataFault is a
+// fault in THIS game's generated set (the tab off in this game; the next game switch clears it)
+void viewDataFault(const char* where, bool said);
+// the game switch's table step (liveReloadGame's result): the data latch is cleared, and set
+// again when the new game's table did not load (`tabOff`: the game's tab is off by its own rule)
+void viewOnGameTable(bool loaded, bool tabOff);
 
 // Input (the game's window procedure) and the pad: queued, applied on the next game tick.
 void viewRequestToggle();
@@ -53,12 +59,27 @@ void viewTick();
 void viewOnModeChanged(int mode);     // SetCaravanMode(arg) PRE - every frame; cheap when equal
 void viewOnOpen();                    // NpcCaravan::OnPlayerInteract PRE
 void viewOnGoodbye();                 // GameEngine::CaravanGoodbye PRE (G2: before the saves)
+void viewOnReopen();                  // OnPlayerInteract POST when a goodbye ran inside it (in place)
 void viewOnWorld(bool up);            // the main player appeared / went away
 unsigned viewWorldGeneration();      // bumped at every world up / down
 
 // ---- the substitution (G1) --------------------------------------------------------------------
 void viewAccessorEnter(void* subWindow);   // Transfer page accessor PRE
 void viewAccessorLeave(void* subWindow);   // ... POST (the live member check)
+// The grid in force, from ut_panel's layout (game thread): `user` = the player's grid_ rectangle
+// is in force (its line is set, the view ON or OFF); dx, dy = its drawn top-left against the
+// derived grid's, px; cols x rows = its cells. The collection sack is built on its cells and, at
+// each page refresh while the view is ON, moved and sized to it; OFF nothing is moved.
+void viewSetGrid(bool user, float dx, float dy, int cols, int rows);
+// The page refresh's POST, outside the hook's guarded frames (the SetDims call is the engine's):
+// while the view is ON with the player's grid, the collection sack re-dimmed to its cells and the
+// inventory widget's place and size written; otherwise the engine's own place put back. One INFO
+// line per change with its inputs.
+void viewAccessorGrid(void* subWindow);
+// The shift written now, px (0,0 while the engine's own place is in force).
+void viewGridShift(float* dx, float* dy);
+// The engine's own place put back (every OFF; idempotent).
+void viewGridRestore(const char* why);
 TqSack* viewGetterResult(TqSack* real);    // GetPlayerTransfer: the mod sack or `real`
 
 // ---- the save assert (G3) ---------------------------------------------------------------------
@@ -90,6 +111,10 @@ bool viewRefuseUnderPoint(const TqSack* s, const void* returnAddress, const void
                           bool* takeRight = nullptr);
 void viewNoteHover(const UtHoverFrame& hover, float x, float y, unsigned id);   // after the original
 bool viewRefuseSort(const TqSack* s);      // InventorySack::Sort on the mod sack
+// GetItemUnderPoint on the REAL Transfer sack while the view is OFF, at one of the page's own
+// sites (the mouse handler's hover and press, the right-click, the held pick-up): pointer
+// compares and the view flag only.
+bool viewRealPageSite(const TqSack* s, const void* returnAddress);
 bool viewIsModSack(const void* s);
 
 // ---- the moves (G7 journal first). Each is a pure pass-through while the view is OFF. ----
@@ -159,6 +184,9 @@ unsigned viewSlotIdAt(const TqSack* s, float x, float y);
 void* viewPageWindow();
 // the page origin, the grid and the cell size from the Transfer page draw's arguments
 // (kUtDrawOk, or why not - ut_padlayout.h utDrawOrigin). Reads only.
+// the caravan geometry derived for the game against the one the Transfer page draw shows: one
+// line at the first Transfer page draw of each world. Reads only.
+void viewGeometryCheck(void* page, int pass);
 int viewDrawOrigin(void* page, const void* origin, int pass, float* pageX, float* pageY,
                    float* gridX, float* gridY, unsigned* cellW, unsigned* cellH);
 

@@ -28,7 +28,7 @@
 
 namespace ut {
 
-enum { kUtProtoMax = 16 * 15 };   // one prototype per cell at most
+enum { kUtProtoMax = 512 };   // one prototype per cell at most (ut_layout.h kUtGridBoxMax)
 
 struct UtProtoPlace {
     const char* record;   // catalogue path (lives in the group table)
@@ -36,6 +36,13 @@ struct UtProtoPlace {
     int w, h;             // footprint in cells
     int slotCol, slotRow; // the slot's top-left cell; the owned marks and the "cursor on
     int slotW, slotH;     //   a prototype" test cover the whole slot (the group's largest footprint)
+    // the relic page (ut_relicpage.h): 0 = a unique's place; else 1 + the relic slot (1 = the red
+    // slot, 2 + i = bonus i), the journal row the prototype is built from (0 = the synthetic item),
+    // and the synthetic item's shard count and bonus (as the table spells it).
+    int slot;
+    unsigned long long seq;
+    unsigned var1;
+    const char* bonus;
 };
 
 // One live prototype (ut_proto's list).
@@ -47,6 +54,7 @@ struct UtProtoLive {
     int w, h;
     int slotCol, slotRow, slotW, slotH;
     unsigned long long seq;               // the journal row it was built from, 0 = bare
+    int slot;                             // UtProtoPlace::slot (0 = a unique's place)
 };
 
 struct UtShiftCounts {
@@ -124,7 +132,8 @@ int utProtoShift(UtProtoLive* live, int* count, const UtProtoPlace* places,
             // the same catalogue entry (the group table's pointer), the same journal row, the same
             // footprint: what a fresh build would create is this very object
             if (owner[j] >= 0 || live[j].record != places[i].record || live[j].seq != seq[i] ||
-                live[j].w != places[i].w || live[j].h != places[i].h)
+                live[j].slot != places[i].slot || live[j].w != places[i].w ||
+                live[j].h != places[i].h)
                 continue;
             match[i] = j;
             owner[j] = i;

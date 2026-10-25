@@ -358,7 +358,22 @@ const Row kRows[] = {
      "166 bytes, the whole item-widget background draw (rect [+0x10] / [+0x18], scale [+0x78], "
      "`FF 90 84 00 00 00`, `ret 0x18`), the one relocated operand wildcarded",
      "exactly one match", UT_BIND_ADVISORY},
+    // NOT required for the view - without it the pad and the label pinned to the screen, and
+    // the open layout editor, are drawn from the Present detour instead (over the tooltips).
+    {"exe.rolloverDraw", UT_BIND_SIGNATURE, UT_BIND_EARLY,
+     "59 bytes from the HUD item rollover's Draw entry (its vtable slot +0x0C), the `je` rel32 "
+     "wildcarded",
+     "exactly one match", UT_BIND_ADVISORY},
+    // NOT required for the view - without it the Transfer sort button is not refused while ON
+    // (one WARN at start).
+    {"exe.transferSortButton", UT_BIND_SIGNATURE, UT_BIND_EARLY,
+     "100 bytes, the whole Transfer page button handler (its vtable slot +0x144), the two E8 "
+     "rel32, the engine global and two IAT slots wildcarded",
+     "exactly one match", UT_BIND_ADVISORY},
     // -- DECODED out of the matched signature bytes (view-required) -----------------------
+    {"exe.transferSortButton.widget", UT_BIND_DECODED, UT_BIND_EARLY,
+     "the handler's `8D 81 <d32>` (+0x20): the sort widget's place in the handler's object",
+     "a negative displacement above -0x4000", UT_BIND_ADVISORY},
     {"page.cachedSack", UT_BIND_DECODED, UT_BIND_EARLY,
      "the accessor's `8D BB <d32>` (+0x21) and `89 4F <d8>` (+0x2F): sub-window -> cached sack",
      "both plausible, and its FF 15 (+0x0D) goes through GetPlayerTransfer's IAT slot",
@@ -409,6 +424,21 @@ const Row kRows[] = {
      UT_BIND_ADVISORY},
     {"msvc.vector", UT_BIND_STRUCTURAL, UT_BIND_EARLY, "VS2012 x86 std::vector: {first, last, end}",
      "first <= last <= end, 4-aligned span; freed through MSVCR110 operator delete",
+     UT_BIND_ADVISORY},
+    // -- the screen input log (log only): a miss turns the log off alone -------------------
+    {"input.deviceField", UT_BIND_DECODED, UT_BIND_EARLY,
+     "Engine::GetInputDevice bytes (8B 81 <d32> C3)",
+     "the displacement is 0x164 and ProcessUserInput reads the same field (8B 8F <d32> at +0x43)",
+     UT_BIND_ADVISORY},
+    {"input.mouseEventSlot", UT_BIND_DECODED, UT_BIND_LATE,
+     "the live device's vtable slot +0x1C: 83 EC 28 56 8B F1 8B 4E 04 85 C9 75 22, the forward 8B 01 56 FF 50 1C at +0xAB",
+     "the rel32 call at +0x4A lands on the exported MouseEvent constructor; slot +0x18 is "
+     "56 8B F1 8B 4E 04 85 C9 75 04 33 C0 5E C3; the target is inside Engine.dll .text",
+     UT_BIND_ADVISORY},
+    {"input.mouseEventRecord", UT_BIND_STRUCTURAL, UT_BIND_EARLY,
+     "MouseEvent 0x28 bytes: type +0x08, x +0x0C, y +0x10, held +0x18",
+     "the exported MouseEvent::operator= copies five qwords ending at +0x20 (66 0F D6 41 20 8B C1 C2 04 00); "
+     "ConvertToButtonEvent reads the type at +0x08 (8B 41 08 83 C0 FD at +0x20)",
      UT_BIND_ADVISORY},
 };
 
@@ -557,7 +587,8 @@ void classCount(char* out, size_t cap, int n, int adv, const char* what) {
     }
 }
 
-void formatSummary(bool failed, int lateOutstanding) {
+// The early report writes a WARN per failed advisory row; the late report writes an INFO.
+void formatSummary(bool failed, int lateOutstanding, bool late = false) {
     int per[UT_BIND_CLASS_COUNT], adv[UT_BIND_CLASS_COUNT], advFailed = 0;
     countClasses(per, adv, &advFailed);
     char dec[48], str[48], lit[48], tail[64];
@@ -567,8 +598,8 @@ void formatSummary(bool failed, int lateOutstanding) {
     if (failed) {
         _snprintf_s(tail, sizeof(tail), _TRUNCATE, "%s", "NOT confirmed");
     } else if (advFailed > 0) {
-        _snprintf_s(tail, sizeof(tail), _TRUNCATE, "confirmed except %d advisory (WARN above)",
-                    advFailed);
+        _snprintf_s(tail, sizeof(tail), _TRUNCATE, "confirmed except %d advisory (%s above)",
+                    advFailed, late ? "said" : "WARN");
     } else {
         _snprintf_s(tail, sizeof(tail), _TRUNCATE, "%s", "all confirmed");
     }
@@ -578,6 +609,31 @@ void formatSummary(bool failed, int lateOutstanding) {
                 lateOutstanding ? ", late bindings pending (game thread)" : "");
 }
 
+// TQ.exe 0xC4270, the Transfer page's button handler (event, widget) - its vtable 0x21D1C0 +0x144,
+// the vtable that holds the page accessor (+0x20) and the page draw (+0x0C). Event 0 on the widget
+// at this-0xB08 (`8D 81 d32` at +0x20) is the SORT button: PlayerInventoryCtrl::CombineRelicsInSack
+// on the page's sack (this-0xC78 = the UIStashInventory, its sack at +0x60), then its sort. The
+// whole function; the two calls, the engine global and both IAT slots are wildcards.
+const unsigned char kSigTransferSortBytes[] = {
+    0x83, 0x7C, 0x24, 0x04, 0x00, 0x75, 0x5A, 0x8B, 0x54, 0x24, 0x08, 0x8D, 0x41,
+    0x74, 0x3B, 0xD0, 0x75, 0x0E, 0x81, 0xC1, 0x00, 0xF3, 0xFF, 0xFF, 0xE8, 0x53,
+    0x00, 0x00, 0x00, 0xC2, 0x08, 0x00, 0x8D, 0x81, 0xF8, 0xF4, 0xFF, 0xFF, 0x3B,
+    0xD0, 0x75, 0x37, 0x83, 0xB9, 0xE8, 0xF3, 0xFF, 0xFF, 0x00, 0x56, 0x8D, 0xB1,
+    0x88, 0xF3, 0xFF, 0xFF, 0x74, 0x1F, 0x8B, 0x0D, 0x24, 0xDF, 0x5E, 0x00, 0x8B,
+    0x09, 0xFF, 0x15, 0xF0, 0xE0, 0x5E, 0x00, 0x85, 0xC0, 0x74, 0x0D, 0x50, 0xFF,
+    0x76, 0x60, 0xFF, 0x15, 0xB8, 0xDD, 0x5E, 0x00, 0x83, 0xC4, 0x08, 0x8B, 0xCE,
+    0xE8, 0xD0, 0x9C, 0x0A, 0x00, 0x5E, 0xC2, 0x08, 0x00,
+};
+const unsigned char kSigTransferSortMask[] = {
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
+    0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1,
+    1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1,
+    1, 0, 0, 0, 0, 1, 1, 1, 1,
+};
 }  // namespace
 
 const UtBindPattern kUtSigTransferPage = {"exe.transferPageAccessor", kSigTransferPageBytes,
@@ -599,6 +655,29 @@ const UtBindPattern kUtSigItemBackground = {"exe.itemBackground", kSigItemBackgr
                                             0x10A9B0};
 static_assert(sizeof(kSigItemBackgroundBytes) == 166 && sizeof(kSigItemBackgroundMask) == 166,
               "the whole function, 0x10A9B0 .. its ret 0x18");
+// TQ.exe 0x18E6D0, the HUD item rollover's Draw (vtable 0x2223E0 slot +0x0C, `ret 0x10`, the one
+// object of its class: the HUD's member +0x48240, whose constructor loads UI/UI_RolloverBox_*.tex):
+// `55 8B EC 83 E4 F8 83 EC 4C` ... `8B 40 7C FF D0 84 C0 0F 84` (its own visibility test) ...
+// `8B 8B 98 00 00 00 81 C1 CC 00 00 00`. 59 bytes from the entry; the `je` rel32 is wildcarded.
+// The mod's PRE-detour draws the screen parts there: after the caravan window, under the tooltips
+// and the item on the cursor.
+namespace {
+const unsigned char kSigRollDrawBytes[] = {
+    0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x83, 0xEC, 0x4C, 0x53, 0x8B, 0xD9, 0x56,
+    0x8B, 0x03, 0x57, 0x8B, 0x40, 0x7C, 0xFF, 0xD0, 0x84, 0xC0, 0x0F, 0x84, 0x00,
+    0x00, 0x00, 0x00, 0x8B, 0x45, 0x0C, 0xF3, 0x0F, 0x10, 0x4B, 0x20, 0xF3, 0x0F,
+    0x58, 0x48, 0x04, 0xF3, 0x0F, 0x10, 0x43, 0x1C, 0xF3, 0x0F, 0x58, 0x00, 0x8B,
+    0x8B, 0x98, 0x00, 0x00, 0x00, 0x81, 0xC1,
+};
+const unsigned char kSigRollDrawMask[] = {
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1,
+};
+}  // namespace
+const UtBindPattern kUtSigRollDraw = {"exe.rolloverDraw", kSigRollDrawBytes, kSigRollDrawMask,
+                                      sizeof(kSigRollDrawBytes), 1, 0x18E6D0};
+static_assert(sizeof(kSigRollDrawBytes) == 59 && sizeof(kSigRollDrawMask) == 59, "59 bytes");
 const UtBindPattern kUtSigLeftHandler = {"exe.leftClickHandler", kSigLeftHandlerBytes,
                                          kSigLeftHandlerMask, sizeof(kSigLeftHandlerBytes), 1,
                                          0xBFED0};
@@ -611,6 +690,11 @@ static_assert(sizeof(kSigRightClickBytes) == 197 && sizeof(kSigRightClickMask) =
 static_assert(sizeof(kSigHeldPickupBytes) == 111 && sizeof(kSigHeldPickupMask) == 111,
               "the held pick-up pattern ends at the return address (match + 111)");
 static_assert(sizeof(kSigTransferPageBytes) == sizeof(kSigTransferPageMask), "mask length");
+const UtBindPattern kUtSigTransferSort = {"exe.transferSortButton", kSigTransferSortBytes,
+                                          kSigTransferSortMask, sizeof(kSigTransferSortBytes), 1,
+                                          0xC4270};
+static_assert(sizeof(kSigTransferSortBytes) == 100 && sizeof(kSigTransferSortMask) == 100,
+              "the whole handler, 0xC4270 .. its last ret 8");
 static_assert(sizeof(kSigStreamOutBytes) == sizeof(kSigStreamOutMask), "mask length");
 
 void bindingsNote(const char* name, unsigned long long value, bool ok, const char* why) {
@@ -698,6 +782,16 @@ void bindingsLateReport() {
     for (int i = 0; i < kRowCount; ++i) {
         if (kRows[i].phase != UT_BIND_LATE) continue;
         if (!g_state[i].reported) return;  // still waiting for the rest
+        if (!g_state[i].ok && kRows[i].gate == UT_BIND_ADVISORY) {
+            // Nothing else reads an advisory row: only its own feature is off, said once.
+            if (!g_state[i].warned) {
+                g_state[i].warned = true;
+                logI("bindings: the advisory late binding \"%s\" could not be confirmed - "
+                     "expected %s. Only its own feature is off; the mod stays ON.",
+                     kRows[i].name, g_state[i].why[0] ? g_state[i].why : kRows[i].confirm);
+            }
+            continue;
+        }
         if (!g_state[i].ok) {
             if (InterlockedExchange(&g_lateSaid, 1)) return;
             logE("bindings: the late binding \"%s\" failed - expected %s. Its route is OFF for this "
@@ -708,7 +802,7 @@ void bindingsLateReport() {
         }
     }
     if (InterlockedExchange(&g_lateSaid, 1)) return;
-    formatSummary(false, 0);
+    formatSummary(false, 0, true);
     logI("%s", g_summary);
 }
 

@@ -8,6 +8,7 @@
 #include "hooks.h"
 #include "tq_runtime.h"
 #include "ut_config.h"
+#include "ut_live.h"   // liveCaravanWindow
 
 namespace ut {
 
@@ -35,17 +36,23 @@ bool plateGeometry(PlateGeometry* g) {
     utGuardLeave();
     if (w <= 0 || h <= 0) return false;
     if (!(s > 0.3f && s < 4.0f)) s = 1.0f;
+    g->engineScale = s;
+    // ui_scale_pct (GD's first rung): a percentage the player typed overrides the measured scale
+    // for everything the mod places on the page; 0 = the game's own.
+    s = utUiScaleOf(g_cfg.uiScalePct, s);
     g->scale = s;
     g->canvasW = w;
     g->canvasH = h;
-    g->winW = (float)g_cfg.caravanW * s;
-    g->winH = (float)g_cfg.caravanH * s;
+    int ww = 0, wh = 0, px = 0, py = 0;   // the game's caravan window and its Transfer page
+    liveCaravanWindow(&ww, &wh, &px, &py);
+    g->winW = (float)ww * s;
+    g->winH = (float)wh * s;
     g->winX = (float)g_cfg.caravanX * s;                               // aligned Left
     g->winY = ((float)h - g->winH) * 0.5f + (float)g_cfg.caravanY * s;  // aligned Centre
-    g->pageX = g->winX;
-    g->pageY = g->winY + (float)g_cfg.pageY * s;
-    g->pageW = g->winW;
-    g->pageH = g->winH - (float)g_cfg.pageY * s;
+    g->pageX = g->winX + (float)px * s;
+    g->pageY = g->winY + (float)py * s;
+    g->pageW = g->winW - (float)px * s;
+    g->pageH = g->winH - (float)py * s;
     return true;
 }
 

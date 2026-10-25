@@ -20,19 +20,29 @@
 // counted hover, came from two different prototypes with the same origin, lies inside the canvas,
 // and is inside the records' window rect or was vouched for by the cursor on two hovers.
 
+#include "ut_gameswitch.h"
+#undef small   // <windows.h> (the address-space measure) defines it
 #include <stdio.h>
 #include <string.h>
 
 #include <limits>
 
 #include "../src/ut_gridcheck.h"
+#include "../src/ut_caravangeo.h"   // uniq-geometry.txt (pure)
 #include "../src/ut_padlayout.h"
+#include "../src/ut_layout.h"     // the pad and the label as rectangles
 #include "../src/ut_slotart.h"
 #include "../src/ut_graytex.h"   // the gray icons (pure)
 #include "../src/ut_depositgate.h"
 #include "../src/ut_viewgate.h"
+#include "../src/ut_relicpage.h"   // the relic take's call, the re-list, the not-shown count
+#include "../src/ut_retire.h"     // the two-deep retire list
+#include "../src/ut_mem.h"        // the memory lines (pure half)
 #include "../src/ut_rowmath.h"     // the per-tick clamp (GD's utClampRow)
+#include "../src/ut_unionrow.h"    // the saved row on a page that has just become a union
 #include "../src/ut_costprobe.h"   // the cost meter
+#include "../src/ut_resname.h"     // the engine's 63-character name parts
+#include "test_fonts.h"               // the game's fonts (Resources\Fonts.arc, read only)
 
 namespace {
 
@@ -220,7 +230,7 @@ bool step(Sim* s, int a, const Opts& o, char* why, size_t cap) {
         return false;
     }
     if (s->vs.on && !(s->vs.open && s->vs.mode == 1 && s->vs.world && !s->vs.mpUnknown &&
-                      !s->vs.faulted && s->vs.bindingsOk)) {
+                      !s->vs.faulted && !s->vs.gameOff && s->vs.bindingsOk)) {
         _snprintf_s(why, cap, _TRUNCATE, "I2: ON outside its conditions");
         return false;
     }
@@ -284,6 +294,175 @@ bool run(const int* acts, int n, const Opts& o, Sim* out, char* why, size_t cap)
 
 }  // namespace
 
+// The caption sweep with the real measure (ut_textmeasure.h over the game's Fonts.arc): over cell
+// widths, heights and UI scales, the pad's size fitted to its widest caption as the draw fits it,
+// then every caption fitted to its cell - the built-in short names, wide and long captions of a
+// buttons file, Cyrillic, Greek, Han and Hangul ones - in the caption font albertus, in a
+// font.caption = fonts/dejavuserif.fnt and in a button's own font = (arial, override_asia). No
+// caption is drawn wider than w - 2 or taller than h - 2; a Transfer toggle caption of the file's
+// own is cut to its room the same way. The label line with Cyrillic, Han and Hangul group names
+// fits its box in the label role's font; a font the engine refused to load is measured as having
+// no table.
+static void sweepRealMeasure() {
+    static ut::UtTmFontSet set;
+    const bool read = tfReadSet(&set);
+    ok(read, "fonts: the nine fonts of Resources\\Fonts.arc read for the caption sweep", tfFontsArc().c_str());
+    if (!read) return;
+    ut::utTmInstall(&set);
+    static const char* const caps[] = {
+        "Helm", "Torso", "Arms", "Legs", "Amul", "Ring", "Shld", "Axe", "Mace", "Staff", "Sword", "Throw",
+        "Spear", "Bow", "Artf", "WWWWW", "Mmmmm", "Two-handed swords",
+        "\xD0\xA8\xD0\xBB\xD0\xB5\xD0\xBC", "\xD0\x96\xD0\x96\xD0\x96\xD0\x96\xD0\x96",
+        "\xD0\x9E\xD1\x80\xD1\x83\xD0\xB6\xD0\xB8\xD0\xB5 \xD0\xB4\xD0\xBB\xD1\x8F \xD0\xB4\xD0\xB2\xD1\x83\xD1\x85 \xD1\x80\xD1\x83\xD0\xBA",
+        "\xCE\x91\xCF\x83\xCF\x80\xCE\xAF\xCE\xB4\xCE\xB1", "\xE6\x97\xA5\xE6\x9C\xAC",
+        "\xED\x88\xAC\xEA\xB5\xAC", "\xE5\x85\x9C\xE3\x81\xA8\xE9\x8E\xA7\xE3\x81\xA8\xE7\x9B\xBE"};
+    const int nc = (int)(sizeof(caps) / sizeof(caps[0]));
+    long long cells = 0, drawn = 0, unlabelled = 0, clipped = 0, toggles = 0;
+    char first[240] = "";
+    const float scales[] = {0.75f, 1.0f, 1.5f, 2.0f};
+    // {the caption role's font, a button's own font (-1 = none)}
+    static const int kPass[4][2] = {{ut::kUtTmAlbertusLight, -1},
+                                    {ut::kUtTmDejaVuSerif, -1},
+                                    {ut::kUtTmAlbertusLight, ut::kUtTmArial},
+                                    {ut::kUtTmAlbertusLight, ut::kUtTmAsia}};
+    for (const auto& pass : kPass) {
+        ut::utTmSetRoleFont(ut::kUtTmCaption, pass[0]);
+        const int bf = pass[1];
+        for (float s : scales)
+            for (int w = 12; w <= 90; w += 3)
+                for (int h = 8; h <= 30; h += 2) {
+                    const float wp = (float)w * s, hp = (float)h * s;
+                    char widest[64] = "OWN";
+                    float ww = ut::utPadTextWidth(widest, 14, bf);
+                    for (int k = 0; k < nc; ++k) {
+                        char head[64];
+                        ut::utTmCutToWidth(caps[k], (float)ut::kUtPadCaptionFitChars, 0, head, sizeof(head),
+                                           [](const char* t) { return (float)ut::utTmCodePoints(t); });
+                        const float v = ut::utPadTextWidth(head, 14, bf);
+                        if (v > ww) {
+                            ww = v;
+                            memcpy(widest, head, sizeof(widest));
+                        }
+                    }
+                    const int fs = ut::utPadCaptionSizeOf(wp, hp, widest, s, bf);
+                    for (int k = 0; k < nc; ++k) {
+                        ++cells;
+                        char buf[64];
+                        const char* out = nullptr;
+                        const int cs = ut::utPadCellCaption(caps[k], wp, hp, s, fs, buf, sizeof(buf), &out, bf);
+                        if (cs < 6) {
+                            ++unlabelled;
+                            continue;
+                        }
+                        ++drawn;
+                        const float tw = ut::utPadTextWidth(out, cs, bf);
+                        if (tw > wp - 2.0f || (float)cs > hp - 2.0f) {
+                            if (!clipped++)
+                                _snprintf_s(first, sizeof(first), _TRUNCATE, "\"%s\" at %d in %.1f x %.1f (font %d): %.1f px",
+                                            out, cs, wp, hp, bf, tw);
+                        }
+                    }
+                    if (fs >= 6) {
+                        char fit[64];
+                        for (const char* t : {"Transfer to stash", "\xD0\x9F\xD0\xB5\xD1\x80\xD0\xB5\xD0\xBD\xD0\xB5\xD1\x81\xD1\x82\xD0\xB8"}) {
+                            const char* c = ut::utPadFitCaption(t, wp * 2.0f, hp, s, fs, fit, sizeof(fit));
+                            const float room = wp * 2.0f - ut::utPadLampTextOffset(hp, s) - 2.0f;
+                            ++toggles;
+                            if (ut::utTmCodePoints(c) > 1 && ut::utPadTextWidth(c, fs) > room && !clipped++)
+                                _snprintf_s(first, sizeof(first), _TRUNCATE, "toggle \"%s\" at %d: room %.1f", c, fs, room);
+                        }
+                    }
+                }
+    }
+    ut::utTmSetRoleFont(ut::kUtTmCaption, ut::kUtTmDejaVuSerif);
+    const float helm = ut::utPadTextWidth("Helm", 10);
+    ut::utTmSetRoleFont(ut::kUtTmCaption, ut::kUtTmAlbertusLight);
+    const float helmOwn = ut::utPadTextWidth("Helm", 10, ut::kUtTmDejaVuSerif);   // a button's font =
+    // the label line with group names in other alphabets: a line drawn above size 6 fits its box
+    static const char* const groups[] = {"Helmets", "\xD0\xA8\xD0\xBB\xD0\xB5\xD0\xBC\xD1\x8B", "\xE5\x85\x9C",
+                                         "\xED\x88\xAC\xEA\xB5\xAC"};
+    long long labels = 0, labelClips = 0;
+    char labelFirst[240] = "";
+    for (const char* g : groups)
+        for (int bw = 80; bw <= 600; bw += 20)
+            for (int lf = 8; lf <= 20; lf += 2) {
+                ut::UtPadLabelWords words;
+                words.group = g;
+                words.span = "3-7";
+                words.rows = 12;
+                words.known = true;
+                words.owned = 5;
+                words.total = 40;
+                char line[512];
+                const int ls = ut::utPadLabelLine(words, (float)bw, lf, line, sizeof(line));
+                ++labels;
+                const float lpx = ut::utTmWidth(ut::kUtTmLabel, line, ls);
+                if (ls > 6 && lpx > (float)bw && !labelClips++)
+                    _snprintf_s(labelFirst, sizeof(labelFirst), _TRUNCATE, "\"%s\" at %d in %d: %.1f px", line, ls,
+                                bw, lpx);
+            }
+    const float hanLabel = ut::utTmWidth(ut::kUtTmLabel, "\xE5\x85\x9C", 14);
+    const float hanAsia = ut::utTmFontWidth(set.font[ut::kUtTmAsia], "\xE5\x85\x9C", 14);
+    const int hanBefore = ut::utTmDrawFont(ut::kUtTmCaption, "\xE5\x85\x9C");
+    ut::utTmRefuse(ut::kUtTmAsia);   // the engine refused override_asia.fnt in this world
+    const int hanRefused = ut::utTmDrawFont(ut::kUtTmCaption, "\xE5\x85\x9C");
+    ut::utTmRefusedClear();
+    {   // EDIT's caption (edit_button=1) in row 2's cell, measured in albertus light: the pad's own
+        // size is fitted over the group captions (OWN at least, as the draw fits it), EDIT is fitted
+        // on its own cell like a group caption - at the pad's size when it fits, smaller, else cut
+        ut::utTmSetRoleFont(ut::kUtTmCaption, ut::kUtTmAlbertusLight);
+        static const char* const names[] = {"Helm", "Torso", "Arms", "Legs", "Amul", "Ring", "Shld", "Axe",
+                                            "Mace", "Staff", "Sword", "Throw", "Spear", "Bow", "Artf"};
+        char widest[16] = "OWN";
+        float ww = ut::utPadTextWidth(widest, 14);
+        for (const char* n : names)
+            if (ut::utPadTextWidth(n, 14) > ww) {
+                ww = ut::utPadTextWidth(n, 14);
+                strcpy_s(widest, sizeof(widest), n);
+            }
+        char line[700];
+        int at = 0;
+        bool never = true, whole = true;
+        const float sc[3] = {0.8f, 1.0f, 1.25f};
+        const int cellW[3] = {34, 32, 16};
+        for (float s : sc)
+            for (int cw : cellW) {
+                const float wp = ut::utPadRound((float)cw * s) - ut::utPadRound(1.0f * s);   // one cell less a gap
+                const float hp = ut::utPadRound(14.0f * s);
+                const int fs = ut::utPadCaptionSizeOf(wp, hp, widest, s);
+                char buf[64];
+                const char* out = nullptr;
+                const int cs = ut::utPadCellCaption("EDIT", wp, hp, s, fs, buf, sizeof(buf), &out);
+                const float ew = cs >= 6 ? ut::utPadTextWidth(out, cs) : 0.0f;
+                if (cs >= 6 && (ew > wp - 2.0f || (float)cs > hp - 2.0f)) never = false;
+                if (cw >= 32 && (cs < 6 || strcmp(out, "EDIT") != 0)) whole = false;
+                at += _snprintf_s(line + at, sizeof(line) - at, _TRUNCATE, "%s%.2f/%d px: \"%s\" %.1f px at %d (pad %d, %s %.1f) in %.0f",
+                                  at ? "; " : "", s, cw, cs >= 6 ? out : "", ew, cs, fs, widest,
+                                  ut::utPadTextWidth(widest, fs), wp);
+            }
+        ok(never, "fonts: EDIT's caption never clips its row-2 cell (34, 32 and the 16 record px floor, UI scale 0.8 / 1.0 / 1.25)", line);
+        ok(whole, "fonts: EDIT is drawn whole in the derived pad's cells (32 / 34 record px)", widest);
+    }
+    ut::utTmInstall(nullptr);
+    char d[400];
+    _snprintf_s(d, sizeof(d), _TRUNCATE, "%lld cells, %lld drawn, %lld unlabelled, %lld toggle cuts, %lld clipped%s%s",
+                cells, drawn, unlabelled, toggles, clipped, first[0] ? " - first: " : "", first);
+    ok(clipped == 0 && drawn > cells / 2 && toggles > 0, "captions (the real measure): no caption clips its cell", d);
+    _snprintf_s(d, sizeof(d), _TRUNCATE, "Helm at 10 in dejavuserif = %.0f px, as a button's font = %.0f px", helm,
+                helmOwn);
+    ok(helm == 25.0f && helmOwn == helm, "captions: font.caption = fonts/dejavuserif.fnt is measured in that font", d);
+    _snprintf_s(d, sizeof(d), _TRUNCATE, "%lld label lines, %lld clipped%s%s; Han in the label role %.0f px, in "
+                "override_asia %.0f px", labels, labelClips, labelFirst[0] ? " - first: " : "", labelFirst, hanLabel,
+                hanAsia);
+    ok(labelClips == 0 && hanLabel > 0.0f && hanLabel == hanAsia,
+       "label line (the real measure): Cyrillic, Han and Hangul group names fit, measured in the font that draws them",
+       d);
+    _snprintf_s(d, sizeof(d), _TRUNCATE, "Han drawn in font %d; with override_asia refused, in font %d", hanBefore,
+                hanRefused);
+    ok(hanBefore == ut::kUtTmAsia && hanRefused != ut::kUtTmAsia,
+       "fonts: a font the engine refused to load is measured as one without a table", d);
+}
+
 int main() {
     char d[512];
 
@@ -330,6 +509,40 @@ int main() {
                refusals[4] == ut::kUtViewWhyRefusedClosed &&
                refusals[5] == ut::kUtViewWhyRefusedNotTransfer && allowed == ut::kUtViewWhyOk,
            "G8 every refusal names itself, in order", ut::utViewWhyText(refusals[5]));
+    }
+    {
+        // the two latches. DATA (gameOff): a fault in this game's generated set turns the view
+        // OFF and refuses it until the next game switch - a world change is no switch. ENGINE
+        // (faulted): stays for the process through any number of switches, and is named first.
+        ut::UtViewState s;
+        s.bindingsOk = s.world = s.open = true;
+        s.mode = 1;
+        ut::utViewApply(&s, ut::kUtViewEvToggle, 0);
+        const ut::UtViewStep df = ut::utViewApply(&s, ut::kUtViewEvDataFault, 0);
+        const bool offData = df.turnedOff && !s.on && df.why == ut::kUtViewWhyDataFault && !s.faulted;
+        const ut::UtViewStep again = ut::utViewApply(&s, ut::kUtViewEvToggle, 0);
+        const bool refusedData = !again.turnedOn && !s.on && again.why == ut::kUtViewWhyRefusedGameData;
+        ut::utViewApply(&s, ut::kUtViewEvWorldDown, 0);
+        ut::utViewApply(&s, ut::kUtViewEvWorldUp, 0);
+        const bool worldKeeps = s.gameOff && ut::utViewRefusal(s) == ut::kUtViewWhyRefusedGameData;
+        ut::utViewApply(&s, ut::kUtViewEvWorldDown, 0);
+        const ut::UtViewStep sw = ut::utViewApply(&s, ut::kUtViewEvGameSwitch, 0);
+        ut::utViewApply(&s, ut::kUtViewEvWorldUp, 0);
+        const bool clean = !sw.turnedOff && !s.gameOff && ut::utViewRefusal(s) == ut::kUtViewWhyOk;
+        const bool onAgain = ut::utViewApply(&s, ut::kUtViewEvToggle, 0).turnedOn && s.on;
+        ut::utViewApply(&s, ut::kUtViewEvDataFault, 0);
+        ut::utViewApply(&s, ut::kUtViewEvFault, 0);
+        const bool engineFirst = ut::utViewRefusal(s) == ut::kUtViewWhyRefusedFaulted;
+        for (int k = 0; k < 3; ++k) ut::utViewApply(&s, ut::kUtViewEvGameSwitch, 0);
+        const bool engineStays = s.faulted && !s.gameOff &&
+                                 ut::utViewRefusal(s) == ut::kUtViewWhyRefusedFaulted &&
+                                 !ut::utViewApply(&s, ut::kUtViewEvToggle, 0).turnedOn;
+        _snprintf_s(d, sizeof(d), _TRUNCATE, "data off %d, refused %d, world keeps %d, switch clean %d, "
+                    "on again %d, engine first %d, engine stays %d", offData, refusedData, worldKeeps,
+                    clean, onAgain, engineFirst, engineStays);
+        ok(offData && refusedData && worldKeeps && clean && onAgain && engineFirst && engineStays,
+           "a data fault stays in its game, the next switch starts clean; an engine fault stays for "
+           "the process", d);
     }
     {
         // every event that must force OFF does, from a clean ON state
@@ -824,6 +1037,7 @@ int main() {
             if (!ut::utRectInside(o.ground, canvas, 0.0f)) return _snprintf_s(why, cap, _TRUNCATE, "ground leaves the canvas"), false;
             if (ut::utRectsMeet(o.ground, g)) return _snprintf_s(why, cap, _TRUNCATE, "ground meets the grid"), false;
             for (int i = 0; i < ut::kUtPadMax; ++i) {
+                if ((i == ut::kUtPadPage || i >= ut::kUtPadGroup0 + 15) && !(o.btn[i].w > 0.0f)) continue;   // NEXT: only while paged
                 if (!(o.btn[i].w > 0.0f && o.btn[i].h > 0.0f)) return _snprintf_s(why, cap, _TRUNCATE, "button %d empty", i), false;
                 if (!ut::utRectInside(o.btn[i], o.ground, 0.0f)) return _snprintf_s(why, cap, _TRUNCATE, "button %d leaves the ground", i), false;
                 if (ut::utRectsMeet(o.btn[i], o.label)) return _snprintf_s(why, cap, _TRUNCATE, "button %d meets the label", i), false;
@@ -930,7 +1144,7 @@ int main() {
                 const ut::UtRectF gr = {93.0f, 177.0f, 512.0f, 480.0f};   // scale 1: 32 px cells
                 ut::UtRectF rr = {0.0f, 0.0f, 0.0f, 0.0f}, r2 = rr, r3 = rr;
                 const bool in1 = ut::utSearchRealRect(gr, 64.0f, 32.0f, 64.0f, 96.0f, &rr);
-                const ut::UtRectF slot = ut::utSlotDrawnRect(gr, 2, 1, 2, 3);
+                const ut::UtRectF slot = ut::utSlotDrawnRect(gr, 16, 15, 2, 1, 2, 3);
                 const bool corner = ut::utSearchRealRect(gr, 448.0f, 384.0f, 64.0f, 96.0f, &r2);   // the last cells
                 const ut::UtRectF g44 = {100.0f, 150.0f, 704.0f, 660.0f};   // 1.375: 44 px cells
                 const bool frac = ut::utSearchRealRect(g44, 43.99f, 0.2f, 88.0f, 132.0f, &r3);
@@ -1011,6 +1225,60 @@ int main() {
                 w.brief = "";
                 lf = ut::utPadLabelLine(w, 90.0f, 9, ln, sizeof(ln));
                 ok(!strcmp(ln, "Torso  120/241"), "label: no query in a 90 px box - (iii) is the last form", ln);
+                {   // " - +N not on these pages" (GD's utNotShownSuffix): it ends the full, the compact and
+                    // the search word's short form, and is the first part dropped after the search word
+                    char sfx[48], z0[8], z1[8];
+                    ut::utNotShownSuffix(6, sfx, sizeof(sfx));
+                    ut::utNotShownSuffix(0, z0, sizeof(z0));
+                    ut::utNotShownSuffix(-1, z1, sizeof(z1));
+                    ok(!strcmp(sfx, " - +6 not on these pages") && !z0[0] && !z1[0],
+                       "suffix: \" - +6 not on these pages\"; empty for none (0) and not counted (-1)", sfx);
+                    ut::UtPadLabelWords s = w;
+                    s.notShown = 6;
+                    char big[192];
+                    int nf = ut::utPadLabelLine(s, 1000.0f, lab, big, sizeof(big));
+                    ok(nf == 13 && !strcmp(big, "Torso  rows 1-15 / 35  owned 120 / 241  all 312 / 1588 - +6 not on these pages"),
+                       "suffix: a wide box, no query - the full form ends with it", big);
+                    // each form at exactly its own width: every wider form before it must not fit
+                    const char* plain[] = {
+                        "Torso 1-15/35  120/241  all 312/1588 - +6 not on these pages",   // compact
+                        "Torso 1-15/35  120/241  all 312/1588",                           // (s) the suffix dropped
+                        "Torso  120/241  all 312/1588",                                   // (ii) the rows dropped
+                        "Torso  120/241"};                                                // (iii)
+                    const char* plainWhy[] = {"suffix, no query: the compact form keeps it",
+                                              "suffix, no query: dropped FIRST, before the rows",
+                                              "suffix, no query: (ii) the rows dropped after it",
+                                              "suffix, no query: (iii) the last form, no suffix"};
+                    for (int k = 0; k < 4; ++k) {
+                        nf = ut::utPadLabelLine(s, ut::utPadTextWidth(plain[k], 13), 13, big, sizeof(big));
+                        ok(nf == 13 && !strcmp(big, plain[k]), plainWhy[k], big);
+                    }
+                    s.found = "found 9";
+                    s.brief = "=9";
+                    const char* query[] = {
+                        "Torso  rows 1-15 / 35  owned 120 / 241  all 312 / 1588  found 9 - +6 not on these pages",
+                        "Torso 1-15/35  120/241  all 312/1588  found 9 - +6 not on these pages",
+                        "Torso 1-15/35  120/241  all 312/1588  =9 - +6 not on these pages",
+                        "Torso 1-15/35  120/241  all 312/1588  =9",
+                        "Torso  120/241  all 312/1588  =9",
+                        "Torso  120/241  =9",
+                        "Torso  =9"};
+                    const char* queryWhy[] = {"suffix, a query: the full form, the suffix after the search word",
+                                              "suffix, a query: the compact form keeps it",
+                                              "suffix, a query: (i) the search word's short form keeps it",
+                                              "suffix, a query: (s) dropped next - the first part dropped after the search word",
+                                              "suffix, a query: (ii) the rows dropped after it",
+                                              "suffix, a query: (iii) the whole collection dropped",
+                                              "suffix, a query: (iv) the owned count dropped"};
+                    for (int k = 0; k < 7; ++k) {
+                        nf = ut::utPadLabelLine(s, ut::utPadTextWidth(query[k], 13), 13, big, sizeof(big));
+                        ok(nf == 13 && !strcmp(big, query[k]), queryWhy[k], big);
+                    }
+                    s.notShown = 0;
+                    nf = ut::utPadLabelLine(s, 1000.0f, 13, big, sizeof(big));
+                    ok(!strcmp(big, "Torso  rows 1-15 / 35  owned 120 / 241  all 312 / 1588  found 9"),
+                       "suffix: none held outside the pages - the line is the one without it", big);
+                }
                 w.known = false;
                 w.allKnown = false;
                 lf = ut::utPadLabelLine(w, o.label.w, lab, ln, sizeof(ln));
@@ -1262,8 +1530,8 @@ int main() {
             }
             const int fs = ut::utPadCaptionSize(32.0f, 14.0f, widest);
             _snprintf_s(d, sizeof(d), _TRUNCATE, "widest %d chars, size %d (%.1f px wide)", widest, fs,
-                        ut::kUtPadEmPerChar * (float)fs * (float)widest);
-            ok(allShort && widest == 5 && fs >= 9 && ut::kUtPadEmPerChar * (float)fs * (float)widest <= 30.0f &&
+                        ut::utTmCharsWidth(ut::kUtTmCaption, widest, fs));
+            ok(allShort && widest == 5 && fs >= 9 && ut::utTmCharsWidth(ut::kUtTmCaption, widest, fs) <= 30.0f &&
                    !strcmp(ut::utPadShortName("Artifacts"), "Artf") &&
                    !strcmp(ut::utPadShortName("Unknown"), "Unknown"),
                "captions: short names fit a 32 x 14 cell", d);
@@ -2026,6 +2294,343 @@ int main() {
            "refused (the hover stays the route) when downsizing / unknown / pass 1 / NaN / "
            "absurd / scale 0", nullptr);
     }
+    // ---------------------------------------------------------------
+    {   // the caravan geometry (ut_caravangeo.h): uniq-geometry.txt parsed, derived vs measured
+        using namespace ut;
+        const char base[] = "P\t27\t126\t512\t480\t565\t521\tXPack\\UI\\Caravan\\InventoryTransferCover01.tex\r\n"
+                            "W\t565\t637\t0\t126\t0\t0\r\n";
+        UtCaravanGeo g;
+        const bool pb = utCaravanGeoParse(base, sizeof(base) - 1, &g);
+        const UtCaravanGeo b = utCaravanGeoBase();
+        g_checks += 1;
+        ok(pb && g.x0 == 27 && g.y0 == 126 && g.w == 512 && g.h == 480 && g.cols == 16 && g.rows == 15 &&
+               g.plateW == 565 && g.plateH == 521 && g.windowW == 565 && g.windowH == 637 && g.pageX == 0 &&
+               g.pageY == 126 && !strcmp(g.plate, b.plate) && b.valid && b.cols == 16 && b.rows == 15 &&
+               b.x0 == 27 && b.y0 == 126 && b.windowW == 565 && b.windowH == 637 && g.bgKnown == 1 &&
+               g.bgX == 0 && g.bgY == 0 && b.bgKnown == 1 && b.bgX == 0 && b.bgY == 0,
+           "uniq-geometry.txt of the base game: 27,126 512x480 = 16 x 15, the cover, the 565 x 637 window, "
+           "the page at 0,126, the background at 0,0 (= utCaravanGeoBase)", nullptr);
+        {   // the caravan background's place (the W line's last two fields) and its guard
+            const char sv[] = "P\t11\t57\t640\t640\t0\t0\t\r\nW\t660\t699\t0\t81\t0\t11\r\n";
+            const char old[] = "P\t11\t57\t640\t640\t0\t0\t\r\nW\t660\t699\t0\t81\r\n";
+            const char half[] = "P\t11\t57\t640\t640\t0\t0\t\r\nW\t660\t699\t0\t81\t0\r\n";
+            const char junkBg[] = "P\t11\t57\t640\t640\t0\t0\t\r\nW\t660\t699\t0\t81\t0\tnan\r\n";
+            const char farTxt[] = "P\t11\t57\t640\t640\t0\t0\t\r\nW\t660\t699\t0\t81\t0\t100\r\n";
+            UtCaravanGeo s, o, h, j, f;
+            const bool ps = utCaravanGeoParse(sv, sizeof(sv) - 1, &s);
+            const bool po = utCaravanGeoParse(old, sizeof(old) - 1, &o);
+            const bool ph = utCaravanGeoParse(half, sizeof(half) - 1, &h);
+            const bool pj = utCaravanGeoParse(junkBg, sizeof(junkBg) - 1, &j);
+            const bool pf = utCaravanGeoParse(farTxt, sizeof(farTxt) - 1, &f);
+            g_checks += 1;
+            ok(ps && s.bgKnown == 1 && s.bgX == 0 && s.bgY == 11 && s.cols == 20 && s.rows == 20 && po &&
+                   o.bgKnown == 0 && o.windowW == 660 && o.pageY == 81 && ph && h.bgKnown == 0 && pj &&
+                   j.bgKnown == 0 && pf && f.bgKnown == 1 && f.bgY == 100,
+               "the W line's background place: 0,11 read; an older W line of four fields (or a short or "
+               "non-numeric tail) still loads with the place unknown", nullptr);
+            int ox = -1, oy = -1, bx = -1, by = -1, qx = -1, qy = -1;
+            const int gs = utCaravanBgPlace(s, 660, 699, &ox, &oy);    // the vanilla grid at 11,46
+            const int gb = utCaravanBgPlace(g, 565, 637, &bx, &by);    // the base game's at 27,126
+            const int go = utCaravanBgPlace(o, 660, 699, &qx, &qy);    // an older file
+            const int gf = utCaravanBgPlace(f, 660, 699, &qx, &qy);    // 57 - 100 < 0: off the background
+            const int gt = utCaravanBgPlace(s, 660, 680, &qx, &qy);    // 46 + 640 > 680
+            const int gz = utCaravanBgPlace(s, 0, 0, &qx, &qy);        // no size
+            const int gd = utCaravanBgPlace(b, 565, 637, &qx, &qy);    // the base fallback
+            g_checks += 1;
+            ok(gs == kUtBgPlaced && ox == 0 && oy == 11 && s.x0 - ox == 11 && s.y0 - oy == 46 &&
+                   gb == kUtBgPlaced && bx == 0 && by == 0 && go == kUtBgUnknown && gf == kUtBgOutside &&
+                   gt == kUtBgOutside && gz == kUtBgOutside && qx == 0 && qy == 0 && gd == kUtBgPlaced,
+               "the background's guard: SVAERA's 0,11 puts the derived 11,57 at 11,46 inside 660 x 699; the "
+               "base game's 0,0 at 27,126; an older file is unknown; a place or a size that leaves the grid "
+               "off the background is refused with the place zeroed", nullptr);
+            UtCaravanBgGrid sv0, sf0, sm0, bv0, bm0;
+            utCaravanBgGrids(s, ox, oy, s.x0, s.y0, 20, 19, &sv0, &sf0);              // SVAERA's collection
+            utCaravanBgGrids(s, ox, oy, s.x0 + 64, s.y0 + 64, 16, 15, &sv0, &sm0);    // a moved 16 x 15
+            utCaravanBgGrids(g, bx, by, 59, 190, 16, 12, &bv0, &bm0);                // the base game's, moved
+            g_checks += 1;
+            ok(sv0.x == 11 && sv0.y == 46 && sv0.cols == 20 && sv0.rows == 20 && sf0.x == 11 && sf0.y == 46 &&
+                   sf0.cols == 20 && sf0.rows == 19 && sm0.x == 75 && sm0.y == 110 && sm0.cols == 16 &&
+                   sm0.rows == 15 && bv0.x == 27 && bv0.y == 126 && bv0.cols == 16 && bv0.rows == 15 &&
+                   bm0.x == 59 && bm0.y == 190 && bm0.cols == 16 && bm0.rows == 12,
+               "the painter's grids less the place: SVAERA's derived 11,57 and its 20 x 19 at 11,46, a moved "
+               "75,121 at 75,110; the base game's 27,126 and a moved 59,190 unchanged (place 0,0)", nullptr);
+        }
+        // a moved Transfer page (TransferWindow at 0,115, its inventory at 107,62): LF, no final line end
+        const char moved[] = "P\t107\t177\t512\t480\t565\t521\tXPack\\UI\\Caravan\\InventoryTransferCover01.tex\n"
+                             "W\t565\t637\t0\t115";
+        UtCaravanGeo mg;
+        const bool pm = utCaravanGeoParse(moved, sizeof(moved) - 1, &mg);
+        g_checks += 1;
+        ok(pm && mg.x0 == 107 && mg.y0 == 177 && mg.cols == 16 && mg.rows == 15 && mg.pageY == 115 &&
+               mg.x0 + mg.w > mg.windowW && mg.y0 + mg.h > mg.windowH,
+           "a moved grid parses (LF, no final line end) and leaves the 565 x 637 window", nullptr);
+        UtCaravanGeo bad;
+        const char noW[] = "P\t27\t126\t512\t480\t565\t521\tx.tex\r\n";
+        const char shortP[] = "P\t27\t126\t512\r\nW\t565\t637\t0\t126\r\n";
+        const char tiny[] = "P\t27\t126\t16\t480\t565\t521\tx.tex\r\nW\t565\t637\t0\t126\r\n";
+        const char junk[] = "P\t27\tx\t512\t480\t565\t521\tx.tex\r\nW\t565\t637\t0\t126\r\n";
+        const bool r1 = utCaravanGeoParse(noW, sizeof(noW) - 1, &bad);
+        const bool r2 = utCaravanGeoParse(shortP, sizeof(shortP) - 1, &bad);
+        const bool r3 = utCaravanGeoParse(tiny, sizeof(tiny) - 1, &bad);
+        const bool r4 = utCaravanGeoParse(junk, sizeof(junk) - 1, &bad);
+        const bool r5 = utCaravanGeoParse("", 0, &bad);
+        g_checks += 1;
+        ok(!r1 && !r2 && !r3 && !r4 && !r5 && !bad.valid,
+           "refused: no W line, a short P line, a grid under one cell, a field that is not a number, an "
+           "empty file", nullptr);
+        // derived vs measured: the page draw's numbers at UI scale 1.5 (the inventory place is scaled)
+        UtCaravanMeasure m;
+        memset(&m, 0, sizeof(m));
+        m.pageX = 0.0f;
+        m.pageY = 126.0f;
+        m.invX = 27.0f * 1.5f;
+        m.invY = 0.0f;
+        m.uiScale = 1.5f;
+        m.gridW = 16;
+        m.gridH = 15;
+        float mx = 0, my = 0;
+        const int a1 = utCaravanGeoAgree(g, m, &mx, &my);
+        const bool at1 = mx == 27.0f && my == 126.0f;
+        UtCaravanMeasure m2 = m;
+        m2.pageY = 115.0f;   // the page elsewhere
+        const int a2 = utCaravanGeoAgree(g, m2, nullptr, nullptr);
+        UtCaravanMeasure m3 = m;
+        m3.gridH = 20;   // a sack of another size
+        const int a3 = utCaravanGeoAgree(g, m3, nullptr, nullptr);
+        UtCaravanMeasure m4 = m;
+        m4.uiScale = 0.0f;
+        const int a4 = utCaravanGeoAgree(g, m4, nullptr, nullptr);
+        UtCaravanMeasure m5 = m;
+        m5.invX = std::numeric_limits<float>::quiet_NaN();
+        const int a5 = utCaravanGeoAgree(g, m5, nullptr, nullptr);
+        UtCaravanMeasure m6 = m;
+        m6.pageY = 115.0f;
+        m6.invX = 107.0f * 1.5f;
+        m6.invY = 62.0f * 1.5f;
+        const int a6 = utCaravanGeoAgree(mg, m6, &mx, &my);
+        g_checks += 1;
+        ok(a1 == kUtGeoAgree && at1 && a2 == kUtGeoDiffer && a3 == kUtGeoDiffer && a4 == kUtGeoUnusable &&
+               a5 == kUtGeoUnusable && a6 == kUtGeoAgree && mx == 107.0f && my == 177.0f,
+           "derived vs measured: agree at UI scale 1.5; differ for a moved page or another cell count; "
+           "unusable at scale 0 or NaN; the moved grid agrees with its own page", nullptr);
+        // a custom game's numbers as a game log measured them: the page draw put the page origin at
+        // 807.0,350.4 and the grid at 822,317 (page pos 15.1,-33.0 px) at UI scale 1.375; the page's
+        // own place is its record's 0,115 (WindowLocationY, [page+0x20]). Measured = 0 + 15.125 /
+        // 1.375, 115 + -33 / 1.375 = 11,91 - against the derived 107,177 (page 0,115 + the inventory
+        // record's 107,62) they differ; the caravan window's top is 350.4 - 115 x 1.375 = 192.3 (the
+        // 177 of that log subtracted the main game's page_y 126 while the tab was off).
+        UtCaravanMeasure sv;
+        memset(&sv, 0, sizeof(sv));
+        sv.pageX = 0.0f;
+        sv.pageY = 115.0f;
+        sv.invX = 15.125f;
+        sv.invY = -33.0f;
+        sv.uiScale = 1.375f;
+        sv.gridW = 16;
+        sv.gridH = 15;
+        float sx = 0, sy = 0;
+        const int as = utCaravanGeoAgree(mg, sv, &sx, &sy);
+        g_checks += 1;
+        ok(as == kUtGeoDiffer && sx == 11.0f && sy == 91.0f,
+           "a custom game's measured numbers: 11,91 against the derived 107,177 - they differ", nullptr);
+        // the caravan window in force: the game's W line unless the player set the [advanced] key
+        const int builtin[3] = {565, 637, 126};
+        const int dflt[3] = {565, 637, 126};
+        int w1[4], w2[4], w3[4], w4[4];
+        const bool d1 = utCaravanWindowOf(mg, true, dflt, builtin, w1);   // the moved page: 0,115
+        const int setY[3] = {565, 637, 140};
+        const bool d2 = utCaravanWindowOf(mg, true, setY, builtin, w2);   // page_y set: it wins
+        UtCaravanGeo big = mg;
+        big.windowW = 660;
+        big.windowH = 699;
+        const int setW[3] = {600, 637, 126};
+        utCaravanWindowOf(big, true, setW, builtin, w3);                   // caravan_w set: it wins
+        const bool d4 = utCaravanWindowOf(mg, false, setY, builtin, w4);   // not read yet: the settings
+        g_checks += 1;
+        ok(d1 && w1[0] == 565 && w1[1] == 637 && w1[2] == 0 && w1[3] == 115 && d2 && w2[3] == 140 &&
+               w3[0] == 600 && w3[1] == 699 && w3[3] == 115 && !d4 && w4[0] == 565 && w4[2] == 0 &&
+               w4[3] == 140,
+           "the caravan window in force: the game's W line (page at 0,115); an [advanced] value the player "
+           "set wins, key by key; before the game's file is read the settings' values", nullptr);
+        // A caravan built for 20 x 20 (the HUD record's window 660 x 699, the Transfer page at 0,81,
+        // its inventory at 11,-24 asking 640 x 640): the derived area 11,57 640 x 640 = 20 x 20; the
+        // real sack measured there (a game's log: inventory 15.1,-33.0 px at UI scale 1.375)
+        // is TQ.exe's 16 x 15 at the same origin - they agree.
+        const char area[] = "P\t11\t57\t640\t640\t0\t0\t\r\nW\t660\t699\t0\t81\r\n";
+        UtCaravanGeo ag;
+        const bool pa = utCaravanGeoParse(area, sizeof(area) - 1, &ag);
+        UtCaravanMeasure am = sv;
+        am.pageY = 81.0f;
+        float ax = 0, ay = 0;
+        const int aa = utCaravanGeoAgree(ag, am, &ax, &ay);
+        am.gridW = 20;
+        am.gridH = 20;
+        const int ab = utCaravanGeoAgree(ag, am, nullptr, nullptr);
+        g_checks += 1;
+        ok(pa && ag.cols == 20 && ag.rows == 20 && ag.plateW == 0 && ag.plate[0] == 0 && aa == kUtGeoAgree &&
+               ax == 11.0f && ay == 57.0f && ab == kUtGeoDiffer,
+           "a 20 x 20 caravan: the area parses (no cover), the real sack 16 x 15 at 11,57 agrees; a real sack "
+           "of 20 x 20 would not be the stock TQ.exe's", nullptr);
+        // the collection's own grid on it: 20 columns, the rows that leave the pad's band of 31 inside
+        // the 699-high window (57 + 19 x 32 = 665, 34 left) while the derived pad is in the window, all
+        // 20 rows with the pad and the label on the screen (57 + 640 = 697 of 699); the base game:
+        // 16 x 15 either way; a smaller area or an unread file: the real sack's 16 x 15
+        int cc = 0, cr = 0, bc = 0, br = 0, sc = 0, sr = 0, nc = 0, nr = 0, fc = 0, fr = 0, fbc = 0, fbr = 0;
+        const bool c1 = utCaravanCollectionCells(ag, kUtCaravanPadBand, &cc, &cr);
+        const bool c2 = utCaravanCollectionCells(g, kUtCaravanPadBand, &bc, &br);
+        UtCaravanGeo small = g;
+        small.cols = 6;
+        small.rows = 12;
+        const bool c3 = utCaravanCollectionCells(small, kUtCaravanPadBand, &sc, &sr);
+        UtCaravanGeo none;
+        memset(&none, 0, sizeof(none));
+        const bool c4 = utCaravanCollectionCells(none, kUtCaravanPadBand, &nc, &nr);
+        const bool c5 = utCaravanCollectionCells(ag, 0, &fc, &fr);
+        const bool c6 = utCaravanCollectionCells(g, 0, &fbc, &fbr);
+        g_checks += 1;
+        ok(c1 && cc == 20 && cr == 19 && c2 && bc == 16 && br == 15 && c3 && sc == 16 && sr == 15 && !c4 &&
+               nc == 16 && nr == 15 && c5 && fc == 20 && fr == 20 && c6 && fbc == 16 && fbr == 15,
+           "the collection's grid on the derived area: 20 x 19 in the 20 x 20 caravan with the pad's band, "
+           "20 x 20 with the pad and the label on the screen, 16 x 15 in the base game, never under the "
+           "real sack", nullptr);
+        // Ctrl+wheel over the whole area (utCaravanAreaRects): SVAERA at UI scale 1.375 (44 px cells),
+        // the measured 16 x 15 at 910,455; a point in column 19 / row 19 is over the whole area and
+        // not over the collection's 20 x 19; the base game keeps the measured rectangle for both
+        const ut::UtRectF meas = ut::UtRectF{910.0f, 455.0f, 704.0f, 660.0f};
+        ut::UtRectF ga, fa, gb, fb, gn, fn;
+        ut::utCaravanAreaRects(meas, 44.0f, 20, 19, 20, 20, &ga, &fa);
+        ut::utCaravanAreaRects(meas, 44.0f, 16, 15, 16, 15, &gb, &fb);
+        ut::utCaravanAreaRects(meas, 0.0f, 20, 19, 20, 20, &gn, &fn);
+        const float px = 910.0f + 44.0f * 19.5f, py = 455.0f + 44.0f * 19.5f;
+        g_checks += 1;
+        ok(ga.w == 880.0f && ga.h == 836.0f && fa.w == 880.0f && fa.h == 880.0f && ut::utRectHas(fa, px, py) &&
+               !ut::utRectHas(ga, px, py) && !ut::utRectHas(meas, px, py) && gb.w == 704.0f && gb.h == 660.0f &&
+               fb.w == 704.0f && fb.h == 660.0f && ut::utRectHas(fb, 910.0f + 44.0f * 15.5f, 455.0f + 44.0f * 14.5f) &&
+               gn.w == 704.0f && fn.h == 660.0f,
+           "Ctrl+wheel's area: SVAERA's column 19 / row 19 lies in the whole 20 x 20 area (880 x 880 px at "
+           "44 px), not in the 16 x 15 measured grid; the base game's area is the measured grid; no cell "
+           "known keeps the measured grid", nullptr);
+        // the 20 x 19 grid is one sack of the box cap the 660 x 699 window gives (the editor's limit)
+        g_checks += 1;
+        ok(utLayoutBoxCap(660, 699) >= 400 && utLayoutBoxCap(565, 637) == 323,
+           "the 660 x 699 window's box cap holds 20 x 20 cells; the base window's stays 323", nullptr);
+    }
+    {   // the grid in force on the Transfer page's inventory widget (viewAccessorGrid)
+        const float none[2] = {0.0f, 0.0f};
+        float own[2], v[4], own2[2], v2[4], own3[2], v3[4];
+        // vanilla at UI scale 1.5: the widget's own place 40.5,0; the grid moved +60,-90 px, 10 x 10
+        // cells of 48 px
+        const float p1[2] = {40.5f, 0.0f};
+        ut::utGridWidget(0, p1, none, none, 60.0f, -90.0f, 48, 48, 10, 10, own, v);
+        const bool a = own[0] == 40.5f && own[1] == 0.0f && v[0] == 100.5f && v[1] == -90.0f &&
+                       v[2] == 480.0f && v[3] == 480.0f;
+        // the next refresh: the widget still holds the place written - the engine's own is the kept one
+        const float p2[2] = {100.5f, -90.0f};
+        const float w2[2] = {v[0], v[1]};
+        ut::utGridWidget(1, p2, w2, own, 60.0f, -90.0f, 48, 48, 10, 10, own2, v2);
+        const bool b = own2[0] == 40.5f && own2[1] == 0.0f && v2[0] == 100.5f && v2[1] == -90.0f;
+        // the widget's loader ran again (UI scale 2.0): its new place is the engine's own
+        const float p3[2] = {54.0f, 0.0f};
+        ut::utGridWidget(1, p3, w2, own2, 80.0f, -120.0f, 64, 64, 12, 9, own3, v3);
+        const bool c = own3[0] == 54.0f && own3[1] == 0.0f && v3[0] == 134.0f && v3[1] == -120.0f &&
+                       v3[2] == 768.0f && v3[3] == 576.0f;
+        // the page draw's numbers less the shift give the derived grid's place, as before the move
+        ut::UtDrawOriginIn dr;
+        memset(&dr, 0, sizeof(dr));
+        dr.originX = 100.0f;
+        dr.originY = 200.0f;
+        dr.posX = 0.0f;
+        dr.posY = 126.0f;
+        dr.invX = v[0] - 60.0f;
+        dr.invY = v[1] + 90.0f;
+        dr.uiScale = 1.5f;
+        dr.pass = 0;
+        dr.downsizingKnown = true;
+        dr.downsizing = false;
+        float px = 0.0f, py = 0.0f, gx = 0.0f, gy = 0.0f;
+        const int r = ut::utDrawOrigin(dr, &px, &py, &gx, &gy);
+        g_checks += 1;
+        ok(a && b && c && r == ut::kUtDrawOk && gx == 140.5f && gy == 389.0f,
+           "the grid in force on the inventory widget: the engine's own place + the shift, the cells at "
+           "the live cell; the place written is never taken for the engine's own; a loader run gives a "
+           "new own place; the draw less the shift measures the derived grid", nullptr);
+    }
+    {   // the re-pack alternation of the log (three seconds of it): grid_565x637=27,126,512,384 saved, then
+        // Ctrl+wheel steps Arcane Formulae -> Transfer -> Legendary Rings -> Transfer -> ... every
+        // ~0.4 s (the view ON, OFF, ON, ...). Read only while the view is ON, the grid line was missing OFF,
+        // so each OFF re-packed 16 x 15 (72 pages) and each ON 16 x 12 (81 pages). The grid in force
+        // (utGridInForce) reads it ON and OFF: the packing stays 16 x 12 and only the first change
+        // re-packs (ut_live liveSetGrid re-packs only when the cells differ).
+        ut::UtGridForceIn in = {};
+        in.coverW = 565;
+        in.coverH = 637;
+        in.frame = ut::UtRectF{873.0f, 282.0f, 777.0f, 876.0f};
+        in.frameGrid = ut::UtRectF{910.1f, 455.2f, 704.0f, 660.0f};
+        in.scale = 1.375f;
+        in.cell = 44.0f;
+        in.derivedCols = 16;
+        in.derivedRows = 15;
+        in.userRect = ut::UtRect{27, 126, 512, 384};
+        const int steps[] = {1, 0, 1, 0, 1, 0, 1, 0, 1};   // the wheel's view states, in order
+        int hostC = 16, hostR = 15, repacks = 0, oldRepacks = 0, oldC = 16, oldR = 15;
+        bool drawnOk = true, wantOk = true;
+        const char* line = "27,126,512,384";   // the grid_565x637 line of the log
+        bool keysOk = true;
+        for (int k = 0; k < (int)(sizeof(steps) / sizeof(steps[0])); ++k) {
+            in.on = steps[k];
+            // the panel's choice (utCollGridKeys): the collection resolves with the line ON and OFF;
+            // the page on screen only ON
+            const ut::UtCollGridKeys keys = ut::utCollGridKeys(in.on, line);
+            keysOk = keysOk && keys.coll == line && keys.page == (in.on ? line : nullptr) && keys.own == !in.on;
+            in.userSet = keys.coll ? 1 : 0;
+            const ut::UtGridForce f = ut::utGridInForce(in);
+            if (f.packCols != hostC || f.packRows != hostR) {   // liveSetGrid's re-pack rule
+                ++repacks;
+                hostC = f.packCols;
+                hostR = f.packRows;
+            }
+            // what the page on screen shows: ON the player's 16 x 12, OFF the real page's 16 x 15
+            drawnOk = drawnOk && (in.on ? (f.drawnUser == 1 && f.drawnCols == 16 && f.drawnRows == 12 &&
+                                           f.drawn.h == 528.0f)
+                                        : (f.drawnUser == 0 && f.drawnCols == 16 && f.drawnRows == 15 &&
+                                           f.drawn.y == in.frameGrid.y && f.drawn.h == 660.0f));
+            // the collection sack's want (ut_view viewSetGrid) is the player's grid in both states
+            wantOk = wantOk && f.packUser == 1 && f.packCols == 16 && f.packRows == 12;
+            in.userSet = keys.page ? 1 : 0;   // the ON-only rule: the collection took the page's line
+            const ut::UtGridForce o = ut::utGridInForce(in);
+            if (o.packCols != oldC || o.packRows != oldR) {
+                ++oldRepacks;
+                oldC = o.packCols;
+                oldR = o.packRows;
+            }
+        }
+        char rp[96];
+        _snprintf_s(rp, sizeof(rp), _TRUNCATE, "re-packs %d (the ON-only rule: %d)", repacks, oldRepacks);
+        g_checks += 1;
+        ok(repacks == 1 && hostC == 16 && hostR == 12 && oldRepacks == 9 && drawnOk && wantOk && keysOk,
+           "the re-pack alternation of the log: ON / OFF / ON ... with a grid line set re-packs once "
+           "(16 x 15 -> 16 x 12) and never again; the real Transfer page keeps its own 16 x 15 grid", rp);
+        // the overlays on the drawn 16 x 12 grid: the last slot ends at the grid's corner, rows of 44 px;
+        // a 16 x 15 division of the same grid gives rows of 35.2 px (the misaligned ground)
+        in.on = 1;
+        in.userSet = 1;
+        const ut::UtGridForce f = ut::utGridInForce(in);
+        const ut::UtRectF last = ut::utSlotDrawnRect(f.drawn, f.drawnCols, f.drawnRows, 15, 11, 1, 1);
+        const ut::UtRectF old = ut::utSlotDrawnRect(f.drawn, 16, 15, 15, 11, 1, 1);
+        g_checks += 1;
+        ok(last.x == 910.0f + 15.0f * 44.0f && last.y == 455.0f + 11.0f * 44.0f && last.w == 44.0f &&
+               last.h == 44.0f && last.x + last.w == f.drawn.x + f.drawn.w &&
+               last.y + last.h == f.drawn.y + f.drawn.h && old.h < 35.3f && old.h > 35.1f,
+           "the overlays follow the grid in force: slot (15,11) of 16 x 12 is the grid's last 44 px cell",
+           nullptr);
+        // the mod's ground (the grid cover) stays inside the caravan window
+        ut::UtRectF in1 = {}, in2 = {};
+        const bool c1 = ut::utRectClip(ut::UtRectF{860.0f, 600.0f, 800.0f, 40.0f}, in.frame, &in1);
+        const bool c2 = ut::utRectClip(ut::UtRectF{1700.0f, 600.0f, 40.0f, 40.0f}, in.frame, &in2);
+        g_checks += 1;
+        ok(c1 && in1.x == 873.0f && in1.w == 777.0f && in1.y == 600.0f && in1.h == 40.0f && !c2,
+           "the ground is clipped to the caravan window; a rectangle outside it draws nothing", nullptr);
+    }
 
     // ---------------------------------------------------------------
     {
@@ -2490,6 +3095,7 @@ int main() {
                             bool sound = ut::utRectInside(o.ground, f, 0.0f) && ut::utRectInside(o.ground, canvas, 0.0f) &&
                                          !ut::utRectsMeet(o.ground, g) && o.label.w > 40.0f;
                             for (int i = 0; i < ut::kUtPadMax && sound; ++i) {
+                                if ((i == ut::kUtPadPage || i >= ut::kUtPadGroup0 + 15) && !(o.btn[i].w > 0.0f)) continue;   // NEXT: paged pads only
                                 sound = o.btn[i].w > 0.0f && o.btn[i].h >= ut::kUtPadRowMinPx &&
                                         ut::utRectInside(o.btn[i], o.ground, 0.0f) && !ut::utRectsMeet(o.btn[i], o.label);
                                 for (int j = i + 1; j < ut::kUtPadMax && sound; ++j)
@@ -2593,9 +3199,9 @@ int main() {
                 {   // the search's highlight on a 1 x 1 and a 2 x 3 slot: the frame on the slot's outermost
                     // ring, 1 px below a 48 px cell and 2 px from there, never in the next slot (right
                     // and below); the wash 1 px inside; the icon's middle left clear
-                    const ut::UtRectF s1 = ut::utSlotDrawnRect(g, 3, 2, 1, 1), s2 = ut::utSlotDrawnRect(g, 4, 0, 2, 3);
-                    const ut::UtRectF n1 = ut::utSlotDrawnRect(g, 4, 2, 1, 1), n2 = ut::utSlotDrawnRect(g, 3, 3, 1, 1);
-                    const ut::UtRectF n3 = ut::utSlotDrawnRect(g, 6, 0, 1, 1), n4 = ut::utSlotDrawnRect(g, 4, 3, 2, 1);
+                    const ut::UtRectF s1 = ut::utSlotDrawnRect(g, 16, 15, 3, 2, 1, 1), s2 = ut::utSlotDrawnRect(g, 16, 15, 4, 0, 2, 3);
+                    const ut::UtRectF n1 = ut::utSlotDrawnRect(g, 16, 15, 4, 2, 1, 1), n2 = ut::utSlotDrawnRect(g, 16, 15, 3, 3, 1, 1);
+                    const ut::UtRectF n3 = ut::utSlotDrawnRect(g, 16, 15, 6, 0, 1, 1), n4 = ut::utSlotDrawnRect(g, 16, 15, 4, 3, 2, 1);
                     const ut::UtRectF m1 = ut::utSearchMarkRect(s1, false), m2 = ut::utSearchMarkRect(s2, false);
                     const ut::UtRectF w1 = ut::utSearchMarkRect(s1, true), w2 = ut::utSearchMarkRect(s2, true);
                     const float mt = ut::utSearchMarkThick(cell);
@@ -2654,7 +3260,7 @@ int main() {
                     ut::utWidgetSlotRects(stale, 4, 0, 2, 3, 4, 0, 2, 3, 1.0f, &slot, &cen, cell))
                     fail("stale widget accepted", s, cv[0]);
                 // the one helper: slot -> drawn rect
-                const ut::UtRectF sd = ut::utSlotDrawnRect(g, 4, 0, 2, 3);
+                const ut::UtRectF sd = ut::utSlotDrawnRect(g, 16, 15, 4, 0, 2, 3);
                 if (sd.x != g.x + 4.0f * cell || sd.w != 2.0f * cell || sd.h != 3.0f * cell) fail("utSlotDrawnRect", s, cv[0]);
             }
         }
@@ -3287,6 +3893,727 @@ int main() {
         ok(trows == 14 && fault,
            "the route token carries the skip: save index and flag round-trip; -1 (a fault "
            "in Pre) = the original runs", d);
+    }
+    // ---- the layout model in the window (ut_layout.h) over the scale sweep ----------------------
+    // With no [layout] line the model's pad is today's pad byte for byte (utPadLayout with the
+    // derived numbers), so every rule above holds for it unchanged; a typed pad_565x637 is drawn
+    // inside the frame and clear of the grid, paged when it is narrow, and every button's centre
+    // hits that button (the panel's hit test: the clear square first, then index order).
+    {
+        const float scales[] = {0.7f, 0.8f, 1.0f, 1.0625f, 1.15625f, 1.25f, 1.375f, 1.5f, 1.6875f, 2.0f};
+        const float canv[3][2] = {{1366.0f, 768.0f}, {1920.0f, 1080.0f}, {3440.0f, 1440.0f}};
+        const char* const pads[3] = {"27,40,512,40", "27,40,300,40", "300,30,260,48"};
+        int combos = 0, bad = 0, typed = 0, paged = 0, hits = 0;
+        char first[200] = "", why[96], d2[300];
+        auto hitOut = [](const ut::UtPadOut& o, float x, float y) {
+            if (o.btn[ut::kUtPadClear].w > 0.0f && ut::utRectHas(o.btn[ut::kUtPadClear], x, y)) return (int)ut::kUtPadClear;
+            for (int i = 0; i < ut::kUtPadMax; ++i)
+                if (i != ut::kUtPadClear && o.btn[i].w > 0.0f && ut::utRectHas(o.btn[i], x, y)) return i;
+            return -1;
+        };
+        auto padSoundL = [](const ut::UtPadOut& o, const ut::UtRectF& f, const ut::UtRectF& g,
+                           float cw, float ch, char* why, size_t cap) {
+            const ut::UtRectF canvas = {0.0f, 0.0f, cw, ch};
+            if (!ut::utRectInside(o.ground, f, 0.0f)) return _snprintf_s(why, cap, _TRUNCATE, "ground leaves the frame"), false;
+            if (!ut::utRectInside(o.ground, canvas, 0.0f)) return _snprintf_s(why, cap, _TRUNCATE, "ground leaves the canvas"), false;
+            if (ut::utRectsMeet(o.ground, g)) return _snprintf_s(why, cap, _TRUNCATE, "ground meets the grid"), false;
+            for (int i = 0; i < ut::kUtPadMax; ++i) {
+                if ((i == ut::kUtPadPage || i >= ut::kUtPadGroup0 + 15) && !(o.btn[i].w > 0.0f)) continue;   // NEXT: only while paged
+                if (!(o.btn[i].w > 0.0f && o.btn[i].h > 0.0f)) return _snprintf_s(why, cap, _TRUNCATE, "button %d empty", i), false;
+                if (!ut::utRectInside(o.btn[i], o.ground, 0.0f)) return _snprintf_s(why, cap, _TRUNCATE, "button %d leaves the ground", i), false;
+                if (ut::utRectsMeet(o.btn[i], o.label)) return _snprintf_s(why, cap, _TRUNCATE, "button %d meets the label", i), false;
+                for (int j = i + 1; j < ut::kUtPadMax; ++j)
+                    if (!(i == ut::kUtPadSearch && j == ut::kUtPadClear) && ut::utRectsMeet(o.btn[i], o.btn[j])) return _snprintf_s(why, cap, _TRUNCATE, "buttons %d and %d overlap", i, j), false;
+            }
+            if (!ut::utRectInside(o.btn[ut::kUtPadClear], o.btn[ut::kUtPadSearch], 0.0f)) return _snprintf_s(why, cap, _TRUNCATE, "the clear square leaves the field"), false;
+            if (!(o.label.w > 40.0f) || !ut::utRectInside(o.label, o.ground, 0.0f)) return _snprintf_s(why, cap, _TRUNCATE, "label box"), false;
+            why[0] = 0;
+            return true;
+        };
+        auto note = [&](const char* what, float s, float cw) {
+            ++bad;
+            if (!first[0]) _snprintf_s(first, sizeof(first), _TRUNCATE, "%s at %.4f on %.0f", what, s, cw);
+        };
+        for (float s : scales)
+            for (const auto& cv : canv) {
+                if (565.0f * s > cv[0] || 637.0f * s > cv[1]) continue;
+                ut::UtFrameIn in;
+                in.scale = s;
+                in.canvasW = cv[0];
+                in.canvasH = cv[1];
+                in.originX = ut::utPadFloor((cv[0] - 565.0f * s) * 0.5f);
+                in.originY = (cv[1] - 637.0f * s) * 0.5f + 126.0f * s;
+                in.gridX = in.originX + 27.0f * s;
+                in.gridY = in.originY;
+                in.cellW = ut::utEngineCellPx(s);
+                in.cellH = in.cellW;
+                in.pageX = 0.0f;
+                in.pageY = 126.0f;
+                in.frameW = 565.0f;
+                in.frameH = 637.0f;
+                ut::UtRectF f, g;
+                if (ut::utFrameFromHover(in, &f, &g) != ut::kUtFrameOk) continue;
+                ++combos;
+                ut::UtLayoutSource src;
+                src.frame = f;
+                src.grid = g;
+                src.scale = s;
+                src.canvasW = cv[0];
+                src.canvasH = cv[1];
+                src.coverW = 565;
+                src.coverH = 637;
+                src.pad = nullptr;
+                src.label = nullptr;
+                src.groups = 15;
+                src.widest = 5;
+                src.labelPx = (int)ut::utPadRound(13.0f * s);
+                src.search = true;
+                ut::UtLayoutLive L;
+                ut::utLayoutFromSource(src, &L);
+                ut::UtPadIn p;
+                p.frame = f;
+                p.grid = g;
+                p.scale = s;
+                p.canvasW = cv[0];
+                p.canvasH = cv[1];
+                p.dx = 0;
+                p.dy = 4;
+                p.cellH = 14;
+                p.gap = 1;
+                p.search = true;
+                ut::UtPadOut o;
+                if (ut::utPadLayout(p, &o) != L.defBand || memcmp(&o, &L.defOut, sizeof(o)) != 0 || L.L.user[1] ||
+                    L.L.user[2] || !L.L.labelInPad)
+                    note("the default is not today's pad", s, cv[0]);
+                if (!padSoundL(L.defOut, f, g, cv[0], cv[1], why, sizeof(why))) note(why, s, cv[0]);
+                for (const char* pv : pads) {
+                    src.pad = pv;
+                    ut::UtLayoutLive U;
+                    ut::utLayoutFromSource(src, &U);
+                    if (!U.L.user[1]) continue;
+                    ++typed;
+                    const ut::UtPadFit& pf = U.L.pad;
+                    if (pf.pages.pages > 1) ++paged;
+                    for (int pg = 0; pg < pf.pages.pages; ++pg) {
+                        ut::UtPadOut uo;
+                        ut::utPadOutFromFit(pf, pg, ut::utPadRound(f.x), ut::utPadRound(f.y), s, true, false, &uo);
+                        if (!ut::utRectInside(uo.ground, f, ut::kUtFrameTol) || ut::utRectsMeet(uo.ground, g))
+                            note("a typed pad leaves the frame or meets the grid", s, cv[0]);
+                        for (int i = 0; i < ut::kUtPadMax; ++i) {
+                            const ut::UtRectF& r = uo.btn[i];
+                            if (!(r.w > 0.0f)) continue;
+                            const int h = hitOut(uo, r.x + r.w * 0.5f, r.y + r.h * 0.5f);
+                            if (h == i || (i == ut::kUtPadSearch && h == ut::kUtPadClear)) ++hits;
+                            else note("a button's centre hits another", s, cv[0]);
+                            if (!ut::utRectInside(r, uo.ground, 0.0f)) note("a button leaves the ground", s, cv[0]);
+                        }
+                        if (ut::utRectsMeet(uo.label, uo.btn[ut::kUtPadSearch]) || !ut::utRectInside(uo.label, uo.ground, 0.0f))
+                            note("the label box", s, cv[0]);
+                    }
+                }
+            }
+        _snprintf_s(d2, sizeof(d2), _TRUNCATE,
+                    "%d combinations, %d bad%s%s; typed pads in force %d (%d paged), %d button hits", combos, bad,
+                    first[0] ? " - first: " : "", first, typed, paged, hits);
+        ok(combos >= 20 && bad == 0 && typed > combos && paged > 0,
+           "layout: no [layout] line = today's pad at every scale; a typed pad_565x637 fits the frame, "
+           "clear of the grid, paged when narrow, every button hit", d2);
+    }
+    // ---- the pad keyed by the buttons file over the scale sweep: N = 15 (the default file), 3 and 40
+    // With 15 buttons the pad is the derived pad byte for byte (no cut); 3 and 40 cut row 1 only -
+    // the ground, Transfer, OWN, < >, the field, its x and the label are the 15-button pad's - every
+    // page passes the pad's rules, every button is on exactly one page and its centre hits it.
+    {
+        const float scales[] = {0.7f, 0.8f, 1.0f, 1.0625f, 1.15625f, 1.25f, 1.375f, 1.5f, 1.6875f, 2.0f};
+        const float canv[3][2] = {{1366.0f, 768.0f}, {1920.0f, 1080.0f}, {3440.0f, 1440.0f}};
+        int combos = 0, bad = 0, pagesSeen = 0, hits = 0;
+        char first[160] = "", d2[260];
+        auto note = [&](const char* what, float s, float cw) {
+            ++bad;
+            if (!first[0]) _snprintf_s(first, sizeof(first), _TRUNCATE, "%s at %.4f on %.0f", what, s, cw);
+        };
+        for (float s : scales)
+            for (const auto& cv : canv) {
+                if (565.0f * s > cv[0] || 637.0f * s > cv[1]) continue;
+                ut::UtFrameIn in;
+                in.scale = s;
+                in.canvasW = cv[0];
+                in.canvasH = cv[1];
+                in.originX = ut::utPadFloor((cv[0] - 565.0f * s) * 0.5f);
+                in.originY = (cv[1] - 637.0f * s) * 0.5f + 126.0f * s;
+                in.gridX = in.originX + 27.0f * s;
+                in.gridY = in.originY;
+                in.cellW = ut::utEngineCellPx(s);
+                in.cellH = in.cellW;
+                in.pageX = 0.0f;
+                in.pageY = 126.0f;
+                in.frameW = 565.0f;
+                in.frameH = 637.0f;
+                ut::UtRectF f, g;
+                if (ut::utFrameFromHover(in, &f, &g) != ut::kUtFrameOk) continue;
+                ++combos;
+                ut::UtLayoutSource src;
+                src.frame = f;
+                src.grid = g;
+                src.scale = s;
+                src.canvasW = cv[0];
+                src.canvasH = cv[1];
+                src.coverW = 565;
+                src.coverH = 637;
+                src.pad = nullptr;
+                src.label = nullptr;
+                src.groups = 15;
+                src.widest = 5;
+                src.labelPx = (int)ut::utPadRound(13.0f * s);
+                src.search = true;
+                ut::UtLayoutLive lay15;
+                ut::utLayoutFromSource(src, &lay15);
+                if (lay15.L.pad.cols != 15 || lay15.L.pad.pages.pages != 1)
+                    note("15 buttons: the derived pad is cut again", s, cv[0]);
+                for (int n : {3, 40}) {
+                    src.groups = n;
+                    ut::UtLayoutLive L;
+                    ut::utLayoutFromSource(src, &L);
+                    if (memcmp(&L.defOut, &lay15.defOut, sizeof(L.defOut)) != 0 || !L.L.pad.ok)
+                        note("N buttons: the derived pad moved", s, cv[0]);
+                    std::vector<int> seen((size_t)n, 0);
+                    for (int pg = 0; pg < L.L.pad.pages.pages; ++pg) {
+                        ++pagesSeen;
+                        ut::UtPadOut o = L.defOut;
+                        ut::utPadDerivedCut(L.L.pad, pg, s, &o);
+                        for (int k : {(int)ut::kUtPadToggle, (int)ut::kUtPadOwn, (int)ut::kUtPadPrev, (int)ut::kUtPadNext,
+                                      (int)ut::kUtPadSearch, (int)ut::kUtPadClear})
+                            if (memcmp(&o.btn[k], &lay15.defOut.btn[k], sizeof(o.btn[k])) != 0) note("row 2 moved", s, cv[0]);
+                        if (memcmp(&o.label, &lay15.defOut.label, sizeof(o.label)) != 0 ||
+                            memcmp(&o.ground, &lay15.defOut.ground, sizeof(o.ground)) != 0)
+                            note("the label or the ground moved", s, cv[0]);
+                        for (int i = 0; i < ut::kUtPadMax; ++i) {
+                            const ut::UtRectF& r = o.btn[i];
+                            if (!(r.w > 0.0f)) continue;
+                            if (!ut::utRectInside(r, o.ground, 0.0f)) note("a button leaves the ground", s, cv[0]);
+                            for (int j = i + 1; j < ut::kUtPadMax; ++j)
+                                if (o.btn[j].w > 0.0f && ut::utRectsMeet(r, o.btn[j]) &&
+                                    !(i == ut::kUtPadSearch && j == ut::kUtPadClear))
+                                    note("two buttons meet", s, cv[0]);
+                            int h = -1;   // the panel's hit test: the clear square first, then index order
+                            if (o.btn[ut::kUtPadClear].w > 0.0f && ut::utRectHas(o.btn[ut::kUtPadClear], r.x + r.w * 0.5f, r.y + r.h * 0.5f))
+                                h = ut::kUtPadClear;
+                            for (int k = 0; k < ut::kUtPadMax && h < 0; ++k)
+                                if (k != ut::kUtPadClear && o.btn[k].w > 0.0f && ut::utRectHas(o.btn[k], r.x + r.w * 0.5f, r.y + r.h * 0.5f))
+                                    h = k;
+                            if (h == i || (i == ut::kUtPadSearch && h == ut::kUtPadClear)) ++hits;
+                            else note("a button's centre hits another", s, cv[0]);
+                            if (ut::utPadIsCell(i)) {
+                                const int b = i - ut::kUtPadGroup0;
+                                if (b >= n || ut::utPadPageOf(L.L.pad.pages, b) != pg) note("a button on the wrong page", s, cv[0]);
+                                else ++seen[(size_t)b];
+                                if (r.w < (float)ut::kUtPadCellWMin * s - 1.0f) note("a cell under 20 record px", s, cv[0]);
+                            }
+                        }
+                        if ((o.btn[ut::kUtPadPage].w > 0.0f) != (L.L.pad.pages.pages > 1)) note("NEXT out of place", s, cv[0]);
+                    }
+                    for (int v : seen)
+                        if (v != 1) note("a button on no page or on two", s, cv[0]);
+                    if (n == 3 && L.L.pad.pages.pages != 1) note("3 buttons paged", s, cv[0]);
+                    if (n == 40 && L.L.pad.pages.pages < 2) note("40 buttons not paged", s, cv[0]);
+                }
+            }
+        _snprintf_s(d2, sizeof(d2), _TRUNCATE, "%d combinations, %d bad%s%s; %d pages drawn, %d button hits",
+                    combos, bad, first[0] ? " - first: " : "", first, pagesSeen, hits);
+        ok(combos >= 20 && bad == 0 && pagesSeen > 2 * combos,
+           "buttons: 15 = the derived pad unchanged; 3 and 40 cut row 1 only (40 paged with NEXT), row 2 "
+           "and the label kept, every button on one page and hit", d2);
+    }
+    sweepRealMeasure();
+    // ---- the game switch (ut_gameswitch.h): the state machine, offline -----------------------
+    {
+        struct Sw {
+            ut::UtGameState st;
+            int resets;      // the switches whose resets ran
+            int protos;      // prototypes alive
+            bool ixLive;     // the search index built
+            unsigned ixAt;   // the switch it was built under
+            bool worldUp;    // the world-gone edge had not fired before the entry
+            int ran[ut::kUtResetSteps];   // each step's runs
+            int order[160];               // every step run, in order
+            int n;
+        };
+        Sw w;
+        memset(&w, 0, sizeof(w));
+        // hooks.cpp gameResets' steps: utGameResets calls them in kUtResetOrder's order
+        auto gsStep = [](int id, void* p) {
+            Sw* s = (Sw*)p;
+            if (id >= 0 && id < ut::kUtResetSteps) ++s->ran[id];
+            if (s->n < (int)(sizeof(s->order) / sizeof(s->order[0]))) s->order[s->n++] = id;
+            if (id == ut::kUtResetWorld) s->worldUp = false;   // the teardown
+            if (id == ut::kUtResetProtos) s->protos = 0;
+            if (id == ut::kUtResetIndex) s->ixLive = false;
+        };
+        auto gsSay = [&]() {
+            _snprintf_s(d, sizeof(d), _TRUNCATE, "resets %d protos %d index %d leaf '%s' off %d steps %d",
+                        w.resets, w.protos, (int)w.ixLive, w.st.leaf, (int)w.st.off, w.n);
+        };
+        auto enter = [&](const char* leaf, bool off) {
+            if (ut::utGameEnter(&w.st, leaf, off) == ut::kUtGameSwitched) {
+                ++w.resets;   // gameAfterEntry true -> gameResets, once
+                ut::utGameResets(w.worldUp, gsStep, &w);
+            }
+            gsSay();
+        };
+        auto gsTrail = [&](int from, char* out, size_t cap) {   // W P O T I G S = the steps
+            size_t k = 0;
+            for (int i = from; i < w.n && k + 1 < cap; ++i)
+                out[k++] = (w.order[i] >= 0 && w.order[i] < ut::kUtResetSteps) ? "WPOTIGS"[w.order[i]] : '?';
+            out[k] = 0;
+        };
+        auto page = [&]() {   // a page built and the index (re)built in the game in force
+            w.protos = 12;
+            if (!w.ixLive || ut::utGameStale(w.ixAt, w.st.switches)) {
+                w.ixLive = true;
+                w.ixAt = w.st.switches;
+            }
+        };
+        char gsO[32];
+        page();
+        enter("mymod-0e607ba7", false);
+        ok(w.resets == 1 && w.protos == 0 && !w.ixLive && !strcmp(w.st.leaf, "mymod-0e607ba7") && !w.st.off,
+           "game switch: main -> mod is one switch - the resets once, no prototype, no index", d);
+        gsTrail(0, gsO, sizeof(gsO));
+        ok(!strcmp(gsO, "POTIGS") && w.ran[ut::kUtResetWorld] == 0 && w.ran[ut::kUtResetState] == 1,
+           "game switch: the resets in kUtResetOrder - prototypes, owned counts, tables, index, panel, "
+           "state, each once; no world up, no teardown", gsO);
+        page();
+        enter("mymod-0e607ba7", false);
+        ok(w.resets == 1 && w.protos == 12 && w.ixLive && w.n == 6,
+           "game switch: the same game entered again is no switch (nothing dropped, no step run)", d);
+        w.worldUp = true;   // the world-gone edge had not fired before this entry
+        const int gsN0 = w.n;
+        enter("othermod", false);
+        gsTrail(gsN0, gsO, sizeof(gsO));
+        ok(w.resets == 2 && w.protos == 0 && !w.ixLive && !strcmp(w.st.leaf, "othermod") &&
+               !strcmp(gsO, "WPOTIGS") && !w.worldUp,
+           "game switch: mod -> other mod is one switch; a world still up is torn down first", gsO);
+        enter("othermod", false);
+        ok(w.n == gsN0 + 7 && w.ran[ut::kUtResetWorld] == 1 && w.ran[ut::kUtResetProtos] == 2 &&
+               w.ran[ut::kUtResetState] == 2,
+           "game switch: each step once per switch - the game in force again runs none", d);
+        page();
+        const unsigned built = w.ixAt;
+        enter("", false);
+        ok(w.resets == 3 && w.protos == 0 && !w.st.leaf[0] && ut::utGameStale(built, w.st.switches),
+           "game switch: mod -> main is one switch; the old index is stale", d);
+        enter("", false);
+        ok(w.resets == 3, "game switch: CleanseDatabase in the main game is no switch", d);
+        enter("bigmod", true);
+        ok(w.resets == 4 && w.st.off && !strcmp(w.st.leaf, "bigmod"),
+           "game switch: a refused generation - the tab off in that game (one switch)", d);
+        enter("bigmod", true);
+        ok(w.resets == 4, "game switch: the refused game again, still refused - no switch", d);
+        enter("bigmod", false);
+        ok(w.resets == 5 && !w.st.off, "game switch: the next entry passes the guard - a switch", d);
+        {   // Engine::InitializeMod(name, folder): the engine's own load is <folder><name>/Database/<name>.arz
+            const char* kName = "SomeGameX1";
+            const char* kFolder = "steamapps\\workshop\\content\\475150\\1000000001\\";
+            const ut::UtGameCall call = ut::utGameCallOf(kName, kFolder);
+            ok(!strcmp(call.name, kName) && !strcmp(call.folder, kFolder) && ut::utGameNameFault(call.name) == 0 &&
+                   ut::utGameNameFault(call.folder) == 3 && ut::utGameNameFault("") == 1 &&
+                   ut::utGameNameFault("..") == 2,
+               "InitializeMod: the first string is the game's name (one folder name), the second its folder - "
+               "read the other way round the folder is refused as a name (the log's WARN)",
+               kFolder);
+            // some games are entered twice in a row before the world loads: the second call is the
+            // game in force again (gameBeforeEntry's utGameAgain) - no generation, no switch
+            ut::UtGameState st;
+            memset(&st, 0, sizeof(st));
+            int generations = 0;
+            for (int k = 0; k < 2; ++k) {
+                if (ut::utGameAgain(st.leaf, st.off, call.name)) continue;
+                ++generations;                                // the stamp asked, the catalogue built
+                ut::utGameEnter(&st, call.name, false);       // gameAfterEntry: the switch
+            }
+            ut::UtGameState so;
+            memset(&so, 0, sizeof(so));
+            ut::utGameEnter(&so, "bigmod", true);
+            ok(generations == 1 && st.switches == 1 && !strcmp(st.leaf, kName) &&
+                   !ut::utGameAgain(so.leaf, so.off, "bigmod") && !ut::utGameAgain(st.leaf, st.off, "othermod"),
+               "InitializeMod twice in a row, utGameAgain as gameBeforeEntry asks it: the second call is the "
+               "game in force again (one generation, one switch); a game whose tab is off is asked again; "
+               "another game is no repeat",
+               d);
+        }
+        enter("", false);
+        ok(w.resets == 6 && !w.st.off && !w.st.leaf[0], "game switch: back to the main game, the tab on", d);
+        // an entry that cannot be completed (the locator refused, or it threw): utGameEntryFailed
+        char gsFl[96];
+        enter("othermod", false);
+        const int gsR0 = w.resets;
+        bool gsDue = ut::utGameEntryFailed("", w.st.leaf, gsFl, sizeof(gsFl));
+        if (gsDue) enter(gsFl, true);
+        ok(gsDue && w.resets == gsR0 + 1 && w.st.off && !w.st.leaf[0],
+           "game switch: a refused locate while a custom game is in force - the tab off over the "
+           "start-up files (one switch)", d);
+        gsDue = ut::utGameEntryFailed("", w.st.leaf, gsFl, sizeof(gsFl));
+        gsSay();
+        ok(!gsDue && w.st.off && w.resets == gsR0 + 1, "game switch: refused again - still off, no switch", d);
+        enter("", false);
+        ok(w.resets == gsR0 + 2 && !w.st.off && !w.st.leaf[0],
+           "game switch: CleanseDatabase after it - the main game, the tab on", d);
+        gsDue = ut::utGameEntryFailed("", w.st.leaf, gsFl, sizeof(gsFl));
+        gsSay();
+        ok(!gsDue && w.resets == gsR0 + 2 && !w.st.off,
+           "game switch: a refused locate in the main game keeps the main files (no switch)", d);
+        gsDue = ut::utGameEntryFailed("thirdmod", w.st.leaf, gsFl, sizeof(gsFl));
+        if (gsDue) enter(gsFl, true);
+        ok(gsDue && w.resets == gsR0 + 3 && w.st.off && !strcmp(w.st.leaf, "thirdmod"),
+           "game switch: an entry that threw after naming its game - that game, the tab off", d);
+        enter("", false);
+        ok(ut::utGameGuardMiss(63) == 64 && ut::utGameGuardMiss(64) == 0 &&
+               ut::utGameGuardMiss(127) == 0 && ut::utGameGuardMiss(207) == 0,
+           "game guard: reading a game's set needs 64 MB of the largest free block - 127 MB and "
+           "207 MB read (no generation gate)", "4 rows");
+        char line[400];
+        ut::utGameRefusalLine(line, sizeof(line), "bigmod", 40, 64);
+        ok(strstr(line, "live: the tab is off in this game (the bigmod game) because the largest free "
+                        "address block is 40 MB, below the 64 MB reading its catalogue needs") != nullptr,
+           "game guard: the refusal is GD's sentence in TQ's word", line);
+        // the entry's decisions: the start-up builds running -> wait; then current -> read, not
+        // built -> the tab off (built at the next start), current below the floor -> the tab off
+        ok(ut::utGameEntryStep(true, false, 207) == ut::kUtEntryWait &&
+               ut::utGameEntryStep(true, true, 207) == ut::kUtEntryWait &&
+               ut::utGameEntryStep(true, true, 10) == ut::kUtEntryWait,
+           "entry: the start-up builds still running - the entry waits for them, built or not", "3 rows");
+        ok(ut::utGameEntryStep(false, true, 207) == ut::kUtEntryLoad &&
+               ut::utGameEntryStep(false, true, 127) == ut::kUtEntryLoad &&
+               ut::utGameEntryStep(false, true, 64) == ut::kUtEntryLoad,
+           "entry: up to date - the set is read at 207 / 127 / 64 MB of the largest free block", "3 rows");
+        ok(ut::utGameEntryStep(false, false, 2000) == ut::kUtEntryNotBuilt &&
+               ut::utGameEntryStep(false, false, 10) == ut::kUtEntryNotBuilt,
+           "entry: not built (a mod installed while the game ran, a failed build) - the tab off, "
+           "whatever the memory: nothing is generated in a running game", "2 rows");
+        ok(ut::utGameEntryStep(false, true, 63) == ut::kUtEntryLowMemory,
+           "entry: up to date below the 64 MB floor - the tab off", "1 row");
+        {   // the start-up builds' order: the entered game first, none started once a world comes
+            const int P = ut::kUtGamePending, B = ut::kUtGameBuilding, D = ut::kUtGameDone;
+            const int s1[4] = {D, P, P, P};
+            const int s2[4] = {D, B, P, P};
+            const int s3[4] = {D, D, D, D};
+            ok(ut::utGamesNext(s1, 4, -1, false) == 1 && ut::utGamesNext(s2, 4, -1, false) == 2 &&
+                   ut::utGamesNext(s3, 4, -1, false) == -1,
+               "start-up builds: in order, one at a time, until every game is done", "3 rows");
+            ok(ut::utGamesNext(s1, 4, 3, false) == 3 && ut::utGamesNext(s1, 4, 3, true) == 3 &&
+                   ut::utGamesNext(s1, 4, -1, true) == -1 && ut::utGamesNext(s2, 4, 1, true) == -1 &&
+                   ut::utGamesNext(s1, 4, 0, true) == -1 && ut::utGamesNext(s1, 4, 9, true) == -1,
+               "start-up builds: the entered game next; a world coming starts no other game (the "
+               "wanted one only while pending)",
+               "6 rows");
+            ok(ut::utGamesEntryWaits(-1) && ut::utGamesEntryWaits(P) && ut::utGamesEntryWaits(B) &&
+                   !ut::utGamesEntryWaits(D),
+               "entry: waits only while its own game is pending or being built (or the list is not "
+               "made yet); done or not listed - the stamp decides at once",
+               "4 rows");
+        }
+        {   // a wait, then the same entry decided again once the builds ended
+            int step = ut::utGameEntryStep(true, false, 207);
+            const bool waited = step == ut::kUtEntryWait;
+            step = ut::utGameEntryStep(false, true, 207);
+            ok(waited && step == ut::kUtEntryLoad,
+               "entry: waited for the start-up builds, then read the set they built", "wait -> read");
+        }
+        ut::utGameNotBuiltLine(line, sizeof(line), "bigmod", "catalogue.bin is missing");
+        ok(strstr(line, "live: the tab is off in this game (the bigmod game) because its catalogue is "
+                        "not built (catalogue.bin is missing) - every installed custom game is built "
+                        "when the game starts, so this one is built at the next start") != nullptr,
+           "entry: the not-built WARN names the reason and the next start", line);
+        ut::utGameNotBuiltLine(line, sizeof(line), "", "");
+        ok(strstr(line, "(the ? game)") != nullptr && strstr(line, "(no reason recorded)") != nullptr,
+           "entry: the not-built WARN with no leaf and no reason", line);
+        char rel[128], rel2[128], g1[128], g2[128];
+        ut::utGameRel("", "catalogue.bin", rel, sizeof(rel));
+        ut::utGameRel("mymod", "uniq-groups.txt", rel2, sizeof(rel2));
+        ut::utGameGrayName("", "ug0123456789abcdef.tex", g1, sizeof(g1));
+        ut::utGameGrayName("mymod", "ug0123456789abcdef.tex", g2, sizeof(g2));
+        _snprintf_s(d, sizeof(d), _TRUNCATE, "%s | %s | %s | %s", rel, rel2, g1, g2);
+        ok(!strcmp(rel, "catalogue.bin") && !strcmp(rel2, "mods\\mymod\\uniq-groups.txt") &&
+               !strcmp(g1, "ug0123456789abcdef.tex") && !strcmp(g2, "mymod/gray/ug0123456789abcdef.tex"),
+           "game files: the start-up game's in the mod folder, a game's under mods\\<leaf>; its gray "
+           "names never the start-up game's", d);
+        {   // the engine's 63-character name parts (ut_resname.h)
+            const std::string p63(63, 'a'), p64(64, 'a');
+            size_t at = 99, len = 99;
+            const bool bad64 = ut::utResNameBadPart(("x/" + p64 + "\\y").c_str(), 68, &at, &len);
+            ok(ut::utResNameOk(p63.c_str()) && ut::utResNameOk(("x/" + p63 + "\\y.tex").c_str()) &&
+                   !ut::utResNameOk(p64.c_str()) && bad64 && at == 2 && len == 64,
+               "engine names: a part of 63 characters is handed over, one of 64 is refused (and found)",
+               "63 / 64");
+            ok(!ut::utResNameOk(("a/" + p64).c_str()) && !ut::utResNameOk(("a\\" + p64).c_str()) &&
+                   !ut::utResNameOk((p64 + "/a").c_str()) && !ut::utResNameOk((p64 + "\\a").c_str()) &&
+                   ut::utResNameOk("a/b\\c"),
+               "engine names: '/' and '\\' both end a part", "both separators");
+            ok(!ut::utResNameOk("") && !ut::utResNameOk("a//b") && !ut::utResNameOk("/a") &&
+                   !ut::utResNameOk("a\\") && !ut::utResNameOk("a\\/b"),
+               "engine names: an empty part is refused (empty name, two separators, leading, trailing)",
+               "empty parts");
+            ok(!ut::utResNameOk("uniq_plate_32x32_565x637_itemization_quest-d1d5b2f1_L42ef5abf.tex") &&
+                   ut::utResLongestPart("uniq_plate_32x32_565x637_itemization_quest-d1d5b2f1_L42ef5abf.tex") == 65,
+               "engine names: the 65-character plate name the engine fast-failed on is refused", "65");
+            // the game leaf is bounded where it is made (utSaveSetLeaf: 48 characters, '-', 8 hex)
+            char set[96], leaf[80], gray[160];
+            const std::string longName(200, 'Q');
+            const std::string lossy = std::string(120, 'x') + " " + std::string(120, 'y');
+            bool bounded = true;
+            size_t longest = 0;
+            for (const std::string* nm : {&longName, &lossy}) {
+                const bool made = ut::utSaveSetLeaf(true, nm->c_str(), false, false, set, sizeof(set)) &&
+                                  ut::utSaveSetGame(set, leaf, sizeof(leaf)) &&
+                                  ut::utGameGrayName(leaf, "ug0123456789abcdef.tex", gray, sizeof(gray));
+                if (!made) leaf[0] = gray[0] = 0;
+                longest = strlen(leaf) > longest ? strlen(leaf) : longest;
+                bounded = bounded && made && strlen(leaf) <= 57 &&
+                          ut::utResNameOk(gray);
+            }
+            char det[96];
+            _snprintf_s(det, sizeof(det), _TRUNCATE, "longest leaf %zu", longest);
+            ok(bounded && longest == 57,
+               "engine names: a 200-character mod name gives a leaf of 57 characters at most, and its gray "
+               "icon names pass the engine's part check", det);
+        }
+        const ut::UtAddrSpace a = ut::utAddrSpace();
+        _snprintf_s(d, sizeof(d), _TRUNCATE, "largest %u MB, total %u MB", a.largestMb, a.totalMb);
+        ok(a.largestMb > 0 && a.totalMb >= a.largestMb && a.totalMb <= 2048,
+           "game guard: the address-space measure (this x86 process)", d);
+    }
+
+    {   // the two-deep retire list (ut_retire.h): a replaced table is freed two retirements later
+        struct T {
+            int id;
+        };
+        T t[5] = {{1}, {2}, {3}, {4}, {5}};
+        ut::UtRetireList<T> l;
+        const ut::UtRetired<T> r1 = l.retire(&t[0], 1, 100);
+        const ut::UtRetired<T> r2 = l.retire(&t[1], 2, 200);
+        const ut::UtRetired<T> r3 = l.retire(&t[2], 3, 400);
+        const ut::UtRetired<T> r4 = l.retire(&t[3], 4, 800);
+        char det[160];
+        _snprintf_s(det, sizeof(det), _TRUNCATE, "out: %d %d %d(%u,%zu) %d(%u) held %zu", r1.table ? r1.table->id : 0,
+                    r2.table ? r2.table->id : 0, r3.table ? r3.table->id : 0, r3.when, r3.bytes,
+                    r4.table ? r4.table->id : 0, r4.when, l.heldBytes());
+        ok(!r1.table && !r2.table && r3.table == &t[0] && r3.when == 1 && r3.bytes == 100 && r4.table == &t[1] &&
+               r4.when == 2 && l.count == 2 && l.heldBytes() == 1200,
+           "retire list: the first two are kept, each later one frees the oldest", det);
+        const ut::UtRetired<T> again = l.retire(&t[3], 5, 800);   // already held
+        const ut::UtRetired<T> none = l.retire(nullptr, 6, 0);
+        ok(!again.table && !none.table && l.count == 2 && l.heldBytes() == 1200 && l.holds(&t[2]) &&
+               l.holds(&t[3]) && !l.holds(&t[0]),
+           "retire list: a table held already, or null, changes nothing (never freed twice)", "");
+        // the published pointer's lifetime: a reader that took the table before a switch still
+        // finds it held after that switch and the next one; it is freed at the third
+        ut::UtRetireList<T> g;
+        T* pub = &t[0];
+        T* reader = pub;                    // a reader takes the pointer (game 1 in force)
+        int freedAt = 0;
+        for (int sw = 1; sw <= 3 && !freedAt; ++sw) {
+            T* old = pub;
+            pub = &t[sw];                   // switch #sw publishes the next game's table
+            const ut::UtRetired<T> out = g.retire(old, (unsigned)sw, 1);
+            if (out.table == reader) freedAt = sw;
+        }
+        _snprintf_s(det, sizeof(det), _TRUNCATE, "freed at switch #%d", freedAt);
+        ok(freedAt == 3, "retire list: a table retired at switch #1 is freed at switch #3", det);
+    }
+    {   // the memory lines (ut_mem.h): the walk, the line, the change since the index started
+        const ut::UtMemSpace sp = ut::utMemSpace();
+        const ut::UtAddrSpace a = ut::utAddrSpace();
+        char det[200];
+        _snprintf_s(det, sizeof(det), _TRUNCATE, "largest %.0f / free %.0f MB, image %.1f, private %.1f + %.1f",
+                    ut::utMemMb(sp.largest), ut::utMemMb(sp.freeTotal), ut::utMemMb(sp.image),
+                    ut::utMemMb(sp.privCommit), ut::utMemMb(sp.privReserve));
+        ok((unsigned)(sp.largest >> 20) == a.largestMb && sp.image > 0 && sp.privCommit > 0 &&
+               sp.freeTotal + sp.image + sp.mapped + sp.privCommit + sp.privReserve <= 0x7FFE0000ull,
+           "mem: the walk's free blocks are utAddrSpace's; the rest split by type", det);
+        ut::UtMemSnap s;
+        s.space.largest = 524ull << 20;
+        s.space.freeTotal = 982ull << 20;
+        s.space.image = 180ull << 20;
+        s.proc = true;
+        s.privateUsage = 700ull << 20;
+        s.workingSet = 650ull << 20;
+        s.heap = true;
+        s.heapReserved = 300ull << 20;
+        s.heapCommitted = 290ull << 20;
+        s.heapAllocated = 250ull << 20;
+        s.engine = ut::kUtMemEngineRead;
+        s.records = 12000;
+        s.objects = 5000;
+        s.pending = 3;
+        s.resources = 120ull << 20;
+        s.mod = true;
+        s.indexBytes = 3093u * 1024u;
+        s.protos = 240;
+        s.gray = 230;
+        s.retired = (size_t)(1.44 * 1048576.0);
+        char line[1024];
+        ut::utMemLine(line, sizeof(line), "world #2 is up", s);
+        const std::string L = line;
+        ok(L.find("world #2 is up | space: largest 524 MB, free 982 MB, image 180.0 MB") == 0 &&
+               L.find("| process: private 700.0 MB, working set 650.0 MB") != std::string::npos &&
+               L.find("| heap: reserved 300.0 MB, committed 290.0 MB, allocated 250.0 MB") != std::string::npos &&
+               L.find("| engine: records 12000, objects 5000, pending 3, resources 120.0 MB") != std::string::npos &&
+               L.find("| mod: index 3093 KB, prototypes 240, gray 230, retired tables 1.44 MB") != std::string::npos,
+           "mem: one line, every field in its place", "");
+        ut::UtMemSnap base = s;
+        base.records = 3000;
+        base.heapAllocated = 235ull << 20;
+        base.heapReserved = 290ull << 20;
+        base.resources = 119ull << 20;
+        char delta[256];
+        ut::utMemDelta(delta, sizeof(delta), s, base, 4637);
+        ok(!strcmp(delta, "since the index started: records +9000, heap allocated +15.0 MB, reserved +10.0 MB, "
+                          "resources +1.0 MB, pending peak 4637"),
+           "mem: the change since the index started", delta);
+        ut::UtMemSnap w;   // the worker's line: no engine, no mod figures
+        ut::utMemLine(line, sizeof(line), "the DLL is loaded", w);
+        ok(strstr(line, "| process: not read | heap: not read | engine: not read on this thread") &&
+               !strstr(line, "| mod:"),
+           "mem: a thread other than the game's reads neither the engine nor the mod", line);
+        ok(!strstr(line, "| arena:"), "mem: no arena part while no build arena is reserved", line);
+        w.arenaBase = 0x76F00000ull;   // the start-up builds' arena while it is reserved (any thread)
+        w.arenaSize = 128ull << 20;
+        w.arenaHighWater = (unsigned long long)(75.8 * 1048576.0);
+        w.arenaCommitted = 4ull << 20;
+        ut::utMemLine(line, sizeof(line), "world #1 is up", w);
+        {
+            const char* ar = strstr(line, " | arena: 128 MB at 0x76F00000 (top-down), high-water 75.8 MB, "
+                                          "committed 4.0 MB");
+            ok(ar && !strcmp(ar + strlen(" | arena: 128 MB at 0x76F00000 (top-down), high-water 75.8 MB, "
+                                         "committed 4.0 MB"), "") &&
+                   strstr(line, "world #1 is up | space: ") == line,
+               "mem: the build arena's part is the line's last, in the release line's form", line);
+        }
+        base.engine = ut::kUtMemEngineOff;
+        ut::utMemDelta(delta, sizeof(delta), s, base, 0);
+        ok(strstr(delta, "records ?") && strstr(delta, "resources ?"),
+           "mem: no engine reading on one side: its deltas are '?'", delta);
+    }
+
+    {   // the saved row on a page that has just become a button's union (ut_unionrow.h, GD's rule)
+        ut::UtRowRestore r = {-1, 0, false};
+        char ud[96];
+        ok(ut::utUnionRestoredRow(r, 0, 0, 2, 1) == 0, "unionrow: nothing restored - the row in force stays",
+           "");
+        // uniquetab.state gives group 3, row 7; the group alone is 16 records 4 wide in a 2-row window,
+        // so a page built before the buttons file is resolved clamps row 7 to its own last window
+        ut::utRowRestoreArm(r, 3, 7);
+        const int clamped = ut::utClampRow(7, ut::utMaxRowOf(16, 4, 2));
+        _snprintf_s(ud, sizeof(ud), _TRUNCATE, "clamped to %d", clamped);
+        ok(clamped == 2, "unionrow: the page before the resolve clamps the saved row 7 to row 2", ud);
+        int to = ut::utUnionRestoredRow(r, 3, clamped, 2, 1);
+        _snprintf_s(ud, sizeof(ud), _TRUNCATE, "row %d", to);
+        ok(to == 7, "unionrow: the group becomes a 2-member union, nothing moved - the saved row 7 comes back",
+           ud);
+        // the page build clamps it against the union: 16 + 12 records, 4 wide, 2 rows
+        const int onUnion = ut::utClampRow(to, ut::utMaxRowOf(28, 4, 2));
+        _snprintf_s(ud, sizeof(ud), _TRUNCATE, "row %d", onUnion);
+        ok(onUnion == 5, "unionrow: the union's page clamps the restored row to its own last window", ud);
+        ok(ut::utUnionRestoredRow(r, 3, clamped, 1, 1) == clamped,
+           "unionrow: a one-group page keeps the clamped row", "");
+        ok(ut::utUnionRestoredRow(r, 3, clamped, 2, 2) == clamped,
+           "unionrow: a page that was a union already keeps its row", "");
+        ok(ut::utUnionRestoredRow(r, 4, clamped, 2, 1) == clamped,
+           "unionrow: another group than the restored one keeps its row", "");
+        ok(ut::utUnionRestoredRow(r, 3, 7, 2, 1) == 7 && ut::utUnionRestoredRow(r, 3, 9, 2, 1) == 9,
+           "unionrow: a row at or below the saved one is never moved back", "");
+        // the player scrolls one row up before the resolve (and before the state is written back)
+        ut::utRowRestoreMoved(r);
+        to = ut::utUnionRestoredRow(r, 3, clamped - 1, 2, 1);
+        _snprintf_s(ud, sizeof(ud), _TRUNCATE, "row %d", to);
+        ok(to == clamped - 1, "unionrow: moved since the restore - the player's row is kept", ud);
+        ok(ut::utUnionRestoredRow(r, 3, clamped, 2, 1) == clamped,
+           "unionrow: moved and back on the clamped row - still the player's", "");
+        // a switch to another game restores that game's state: nothing has moved since THAT restore
+        ut::utRowRestoreArm(r, 3, 7);
+        ok(ut::utUnionRestoredRow(r, 3, clamped, 2, 1) == 7, "unionrow: the next restore re-arms the rule", "");
+        ut::utRowRestoreArm(r, 3, -1);
+        ok(r.row == 0 && ut::utUnionRestoredRow(r, 3, 0, 2, 1) == 0,
+           "unionrow: a negative saved row restores as row 0", "");
+    }
+
+    // ---- the caravan re-opened in place: a goodbye inside OnPlayerInteract is a close, then an open
+    {
+        ok(ut::utCaravanInteract(false, 3, 3) == ut::kUtCaravanOpened, "caravan: a closed caravan opens", "");
+        ok(ut::utCaravanInteract(true, 3, 3) == ut::kUtCaravanAlready,
+           "caravan: a call while open with no goodbye inside - the open goes on", "");
+        ok(ut::utCaravanInteract(true, 3, 4) == ut::kUtCaravanReopened,
+           "caravan: a goodbye inside the call while open - again in place", "");
+        ok(ut::utCaravanInteract(false, 3, 4) == ut::kUtCaravanReopened,
+           "caravan: a goodbye inside the call of a closed caravan - the view is told it is open", "");
+        ok(ut::utCaravanInteract(true, 7, 9) == ut::kUtCaravanReopened,
+           "caravan: two goodbyes inside the call - again in place", "");
+        // the view's state through the logged order: open, Transfer, ON; a click on the caravan
+        // driver: the interact's PRE (open), the goodbye inside, mode 0 inside; then mode 1
+        ut::UtViewState s;
+        s.bindingsOk = true;
+        ut::utViewApply(&s, ut::kUtViewEvWorldUp, 0);
+        ut::utViewApply(&s, ut::kUtViewEvOpen, 0);
+        ut::utViewApply(&s, ut::kUtViewEvModeChanged, 0);
+        ut::utViewApply(&s, ut::kUtViewEvModeChanged, 1);
+        ok(ut::utViewApply(&s, ut::kUtViewEvToggle, 0).turnedOn, "caravan: the view turns ON after an open", "");
+        ut::UtViewStep st = ut::utViewApply(&s, ut::kUtViewEvOpen, 0);
+        ok(st.turnedOff && st.why == ut::kUtViewWhyOpen && !s.on,
+           "caravan: the interact's PRE turns the view OFF (the load path sees the real sack)", "");
+        ut::utViewApply(&s, ut::kUtViewEvGoodbye, 0);
+        ut::utViewApply(&s, ut::kUtViewEvModeChanged, 0);
+        ut::UtViewState stale = s;   // without the re-open: the state the session kept
+        ut::utViewApply(&stale, ut::kUtViewEvModeChanged, 1);
+        st = ut::utViewApply(&stale, ut::kUtViewEvToggle, 0);
+        ok(!st.turnedOn && st.why == ut::kUtViewWhyRefusedClosed && !stale.open,
+           "caravan: with the goodbye last the state says closed on the open window (the stale state)", "");
+        // the re-open (viewOnReopen: the open's event once more after the original returned)
+        st = ut::utViewApply(&s, ut::kUtViewEvOpen, 0);
+        ok(!st.turnedOff && s.open && !s.on, "caravan: the re-open in place - open, the view still OFF", "");
+        ut::utViewApply(&s, ut::kUtViewEvModeChanged, 1);
+        ok(ut::utViewRefusal(s) == ut::kUtViewWhyOk, "caravan: on the Transfer tab the toggle is taken", "");
+        ok(ut::utViewApply(&s, ut::kUtViewEvToggle, 0).turnedOn && s.on,
+           "caravan: the view turns ON as after a normal open", "");
+        // the user closes the caravan: OFF and closed, as always
+        st = ut::utViewApply(&s, ut::kUtViewEvGoodbye, 0);
+        ok(st.turnedOff && !s.open && ut::utViewRefusal(s) == ut::kUtViewWhyRefusedClosed,
+           "caravan: the goodbye after the re-open closes it", "");
+    }
+
+    {   // the relic page's take by the place's slot (ut_view takeOnDisk), the re-list, and the
+        // unique pages' not-shown count
+        ok(ut::utRelicTakeCallOf(false, 3) == ut::kUtRelicTakeUnique &&
+               ut::utRelicTakeCallOf(true, 0) == ut::kUtRelicTakeUnique,
+           "relic take: no slot or slot 0 is a unique's place (its newest row)", "");
+        ok(ut::utRelicTakeCallOf(true, 1) == ut::kUtRelicTakeShard, "relic take: slot 1 = the red slot, one shard", "");
+        ok(ut::utRelicTakeCallOf(true, 2) == ut::kUtRelicTakeRow && ut::utRelicTakeCallOf(true, 15) == ut::kUtRelicTakeRow,
+           "relic take: slot 2 and above = a green slot, its row whole", "");
+        ok(ut::utRelicTakeHeld(ut::kUtRelicTakeShard, true, 7, 12) == 12,
+           "relic take: after a shard take the cursor holds the shard's own row", "");
+        ok(ut::utRelicTakeHeld(ut::kUtRelicTakeShard, false, 7, 0) == 7 &&
+               ut::utRelicTakeHeld(ut::kUtRelicTakeRow, true, 7, 12) == 7 &&
+               ut::utRelicTakeHeld(ut::kUtRelicTakeUnique, true, 7, 12) == 7,
+           "relic take: otherwise it holds the place's row", "");
+        ok(ut::utRelicTakeRebuild(ut::kUtRelicTakeShard, false) && ut::utRelicTakeRebuild(ut::kUtRelicTakeRow, false),
+           "relic take: a refused relic take rebuilds the page", "");
+        ok(!ut::utRelicTakeRebuild(ut::kUtRelicTakeShard, true) && !ut::utRelicTakeRebuild(ut::kUtRelicTakeRow, true) &&
+               !ut::utRelicTakeRebuild(ut::kUtRelicTakeUnique, false),
+           "relic take: a written take, or a unique's take, does not", "");
+        ok(ut::utRelicRelistDue(-1, 0) && ut::utRelicRelistDue(4, 5) && !ut::utRelicRelistDue(5, 5),
+           "relic re-list: once per change of the journal's write count, never again on the same count", "");
+        ok(ut::utNotShownCounts(false, -1) && !ut::utNotShownCounts(true, -1) && !ut::utNotShownCounts(false, 0) &&
+               !ut::utNotShownCounts(false, 252),
+           "not shown: a held record no unique page lists counts, a relic / charm row never", "");
+    }
+    {   // the relic page's have-mark: a carried completed relic's key is its (record, bonus)
+        char a[300], b[300];
+        ok(ut::utRelicHaveKey("records/r/x.dbr", "records/b/one.dbr", a, sizeof(a)) &&
+               ut::utRelicHaveKey("records/r/x.dbr", "Records\\B\\ONE.dbr", b, sizeof(b)) &&
+               strcmp(a, b) == 0 &&
+               ut::utRelicHaveKey("records/r/x.dbr", "records/b/two.dbr", b, sizeof(b)) && strcmp(a, b) != 0 &&
+               !ut::utRelicHaveKey("records/r/x.dbr", nullptr, b, sizeof(b)),
+           "have-mark: one key per (record, bonus), any case or slash; another bonus is another key; "
+           "a partial piece has none (the red slot never gets the mark)", "");
     }
     printf(g_fail ? "[viewgate]  FAILED: %d\n" : "[viewgate]  ALL PASS\n", g_fail);
     return g_fail ? 1 : 0;

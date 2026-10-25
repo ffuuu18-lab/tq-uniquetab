@@ -62,6 +62,8 @@ bool ownedMarkRect(int i, float* x, float* y, float* w, float* h);   // prototyp
 // same trust as the veil), the record is uncollected and the slot is not the hovered one (the earlier
 // un-veil rule: the item under the cursor shows its colours). Game thread; no allocation.
 bool ownedGrayWanted(int i);
+// Prototype i is a slot of the relic page (no veil there: an empty slot shows its gray copy).
+bool ownedRelicSlot(int i);
 // prototype i's background draw (the engine's red, class tint, rarity border) is to be
 // SKIPPED - ut_viewgate.h utBackgroundSkip over: the record uncollected, the slot not the hovered
 // one (the same g_unveil as the gray lend and the veil), the marks' style this frame (0 when the
@@ -75,6 +77,12 @@ bool ownedLabel(int* owned, int* total);        // the shown group; false = unkn
 // the whole catalogue (every group): the records collected and the records; false = unknown.
 // Counted on the game thread when the journal set changes, never per frame.
 bool ownedLabelAll(int* owned, int* total);
+// The collected records no page of this game shows (the catalogue lacks them): the label's
+// "+N not on these pages"; 0 = none, or the set is not known. Counted with the `all` count.
+int ownedNotShown();
+// The collected monster infrequents (journal records of the catalogue's KIND): the heartbeat's
+// mi=; -1 = the set or the KIND table is not known. Counted with the `all` count.
+int ownedHeldMi();
 // the corner tick of an UNCOLLECTED prototype whose record the player has somewhere (the
 // store set; ini have_marks). False when there is none for prototype i.
 bool ownedHaveRect(int i, float* x, float* y, float* w, float* h);

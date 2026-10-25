@@ -79,6 +79,8 @@ FORBIDDEN = [
 # The development process - FATAL, like the rules above. Each pattern is written so that this file
 # does not spell the token it looks for (the file ships, and a plain search of the public tree must
 # find none of them). The .gitignore is read as it ships: without its development-tree block.
+GEN_HEAP_HEADERS = re.compile(r"#\s*include\s*<(?:iostream|istream|ostream|fstream|sstream|locale|regex)>")
+
 PROCESS = [
     ("a test sitting's name", re.compile(r"u[s]er[ -]?test", re.IGNORECASE)),
     ("a test sitting's attribution", re.compile(
@@ -164,7 +166,7 @@ PUBLIC_ALLOW = [
     "CHANGELOG.md", "HANDOFF.md", "LICENSE", "README.md", "THIRD_PARTY.md",
     "build.bat", "build_model.bat", "deploy.bat", "undeploy.bat",
     "data/oracle/ORACLE.txt",
-    "src/*", "tests/model_test.cpp", "third_party/*", "tools/*",
+    "src/*", "tests/model_test.cpp", "tests/uniq-groups-7fields.txt", "third_party/*", "tools/*",
     "data/allitems/tq-uniq-items-all.jsonl", "data/allitems/tq-uniq-items-all.report.txt",
 ]
 # Named files that ship although a DENY pattern matches them: the all-items collection file is the
@@ -176,6 +178,7 @@ PUBLIC_KEEP = {"data/allitems/tq-uniq-items-all.jsonl"}
 PUBLIC_DENY = [d + "/*" for d in ("docs", "rese" "arch", "pro" "be", "bin", "build", "out")] + [
     "*.log", "*.pdb", "*.asi", "*.obj", "*.jsonl", "*/__pycache__/*",
     "tools/release_check.local", "tools/publish.ps1", "tools/test_" "pro" "be_bindings.py",
+    "tools/seed_relic_rows.py",
 ]
 # Every one of these must be present in a public tree.
 PUBLIC_REQUIRED = [
@@ -491,6 +494,12 @@ def main(argv):
                 m = pat.search(line)
                 if m and where not in ALLOWED:
                     failures.append((where, name, m.group(0), line.strip()[:120]))
+            # The generator runs inside private heaps (src/gen/gen_heap.h): a stream, locale or
+            # regex header brings the CRT's lazily made facets, which would outlive the heap.
+            m = GEN_HEAP_HEADERS.search(line) if slug.startswith("src/gen/") else None
+            if m:
+                failures.append((where, "a stream, locale or regex header in the generator", m.group(0),
+                                 line.strip()[:120]))
             if strict:
                 names_here = []
                 for name, pat in HISTORY:

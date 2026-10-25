@@ -9,13 +9,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <malloc.h>
 
+#include <chrono>
 #include <string>
 #include <vector>
 
 #include "ut_search.h"
+#include "ut_searchsave.h"   // the index text kept per game
 #include "ut_color.h"
 #include "ut_padlayout.h"
+#include "ut_padpage.h"   // one page per button: utUnionLocate / utUnionMarked
+#include "ut_relicpage.h"   // the relic page's search: one text per (record, bonus)
 
 static int g_fails = 0;
 static void check(bool ok, const char* what) {
@@ -614,6 +619,294 @@ int main() {
         check(utPadFieldLaidOut(true, 1, 0) && utPadFieldLaidOut(true, 1, 1) && utPadFieldLaidOut(false, 1, 1) &&
                   !utPadFieldLaidOut(false, 1, 0) && !utPadFieldLaidOut(true, 0, 1) && !utPadFieldLaidOut(false, 0, 1),
               "the field is laid out with search=1: ON always, OFF with search_transfer=1 only");
+    }
+
+    printf("\nthe index's bytes per record\n");
+    {
+        // The index keeps one folded std::string and one state byte per record (ut_search.cpp
+        // Index). The text is the engine's tooltip, read in-game only: its mean length here is
+        // the INFO line's size over its records in-game (432 KB over 1588 records; g_bytes counts
+        // size() + 1). Measured: what such an entry costs in this build's x86 heap, for the
+        // catalogue with the monster infrequents (2678 records).
+        const size_t meanText = (432u * 1024u) / 1588u - 1u;
+        const std::vector<std::string> ixText(2678, std::string(meanText, 'x'));
+        size_t heap = 0;
+        for (const std::string& t : ixText) heap += t.capacity() > 15 ? _msize((void*)t.data()) + 8 : 0;
+        const double per = double(sizeof(std::string) + 1) + double(heap) / double(ixText.size());
+        printf("[measure] search index: %zu B text -> %zu B heap block + 8 B header + %zu B string + 1 B state "
+               "= %.0f B per record, %.0f KB for %zu records\n", meanText, heap / ixText.size() - 8,
+               sizeof(std::string), per, per * double(ixText.size()) / 1024.0, ixText.size());
+        check(per > double(meanText) && per < 1024.0, "an index entry costs its text plus a fixed few dozen bytes");
+    }
+
+    // ---- one page per button: a union's search counts are its members' -------------------------
+    {
+        printf("\n-- a union's search counts (one page per button)\n");
+        const unsigned char ownA[5] = {1, 0, 1, 0, 1}, matA[5] = {1, 1, 0, 0, 1};
+        const unsigned char ownB[3] = {0, 1, 1}, matB[3] = {1, 1, 0};
+        std::vector<unsigned char> own(ownA, ownA + 5), mat(matA, matA + 5);
+        own.insert(own.end(), ownB, ownB + 3);
+        mat.insert(mat.end(), matB, matB + 3);
+        bool sums = true;
+        for (int o = 0; o < 2; ++o)
+            sums = sums && ut::utSearchCount(own.data(), mat.data(), 8, o != 0) ==
+                               ut::utSearchCount(ownA, matA, 5, o != 0) + ut::utSearchCount(ownB, matB, 3, o != 0);
+        check(sums && ut::utSearchCount(own.data(), mat.data(), 8, false) == 5 &&
+                  ut::utSearchCount(own.data(), mat.data(), 8, true) == 3,
+              "a union's found count = its members' (5 of 8; 3 with OWN), the label's and the log's number");
+        const std::vector<int> members = {2, 7};
+        auto count = [](int gi) { return gi == 2 ? 5 : gi == 7 ? 3 : 0; };
+        bool same = true;
+        for (int k = 0; k < 8; ++k) {
+            int gi = -1, idx = -1;
+            same = same && ut::utUnionLocate(members, count, k, &gi, &idx);
+            const unsigned char* m = gi == 2 ? matA : matB;
+            same = same && ut::utSearchHighlight(mat.data(), 8, k, true) == ut::utSearchHighlight(m, count(gi), idx, true);
+        }
+        check(same && !ut::utUnionLocate(members, count, 8, nullptr, nullptr),
+              "a union page's highlight of item k = its member's own match flag (utUnionLocate)");
+        const int marks = (1 << 2);
+        check(ut::utUnionMarked(members.data(), 2, [&](int gi) { return (marks >> gi) & 1; }) &&
+                  !ut::utUnionMarked(members.data(), 2, [](int) { return false; }),
+              "the union's button is marked when any of its groups is");
+    }
+
+    printf("9. the index text kept per game (uniq-search.txt): the round trip and the key\n");
+    {
+        ut::UtSearchKey k;
+        const char stampBytes[] = "stamp 12 inputs\nversion 7\n";
+        k.stamp = ut::utSearchFnv(stampBytes, sizeof(stampBytes) - 1);
+        k.lang = "EN";
+        k.db = 0x3AA41F3A;
+        k.lore = 0;
+        k.version = "9.8.7";
+        std::vector<ut::UtSearchSaved> rows(4);
+        rows[0].record = "records/item/equipmentring/us_e_gladiator'screed01.dbr";
+        rows[0].indexed = true;
+        rows[0].text = "alke\n+86 strength\n+24% strength";
+        rows[1].record = "records/xpack/item/artifacts/n_la_amberflask.dbr";
+        rows[1].indexed = true;
+        rows[1].text = "a\\b\ttab\rcr\n\xd0\xbc\xd0\xb5\xd1\x87 \\n literal";   // backslash, tab, CR, UTF-8, "\n" as text
+        rows[2].record = "records/item/odd.dbr";
+        rows[2].indexed = false;
+        rows[3].record = "records/item/empty.dbr";
+        rows[3].indexed = true;
+        rows[3].text = "";
+        const std::string bytes = ut::utSearchSaveText(k, rows);
+        check(bytes.compare(0, 14, "uniq-search 1\n") == 0 &&
+                  bytes.find("key stamp=") == 14 && bytes.find("lang=EN db=0x3AA41F3A lore=0 version=9.8.7\n") != std::string::npos,
+              "the file opens with its magic and the key line (stamp, lang, db, lore, version)");
+        std::vector<ut::UtSearchSaved> back;
+        std::string why;
+        const bool loaded = ut::utSearchLoadText(bytes, k, &back, &why);
+        check(loaded && why.empty() && back.size() == 4, "the same key reads every row back");
+        bool same = loaded;
+        for (const ut::UtSearchSaved& r : rows) {
+            const ut::UtSearchSaved* f = ut::utSearchFind(back, r.record.c_str());
+            same = same && f && f->indexed == r.indexed && (!r.indexed || f->text == r.text);
+        }
+        check(same, "every row round-trips: backslash, tab, CR, newline, UTF-8 and an empty text");
+        check(!ut::utSearchFind(back, "records/item/none.dbr") && !ut::utSearchFind(back, nullptr),
+              "a record the file does not hold is not found");
+        size_t lines = 0;
+        for (char c : bytes) lines += c == '\n' ? 1 : 0;
+        check(lines == 6, "one line per row: escaped text never breaks a row");
+
+        // a record the group table lists twice: the file holds a row per (group, entry), the first
+        // of equal records is found for both, and both index slots keep the text
+        {
+            std::vector<ut::UtSearchSaved> dup(4);
+            dup[0].record = "records/item/twice.dbr";
+            dup[0].indexed = true;
+            dup[0].text = "twice\n+10 health";
+            dup[1] = rows[0];
+            dup[2] = dup[0];   // the second (group, entry) of the same record
+            dup[3] = rows[1];
+            std::vector<ut::UtSearchSaved> rd;
+            std::string w;
+            check(ut::utSearchLoadText(ut::utSearchSaveText(k, dup), k, &rd, &w) && rd.size() == 4,
+                  "a file with a duplicate record loads, every row kept");
+            // the group table: twice.dbr in slots 0 and 2, gladiator in slot 1, once
+            const char* table[3] = {"records/item/twice.dbr", rows[0].record.c_str(), "records/item/twice.dbr"};
+            std::vector<std::string> slots(3);
+            std::vector<int> takenBy(rd.size(), -1);
+            for (int s = 0; s < 3; ++s) {
+                ut::UtSearchSaved* r = ut::utSearchFind(rd, table[s]);
+                if (r && r->indexed) ut::utSearchTakeText(rd, takenBy, r, slots, s);
+            }
+            check(slots[0] == dup[0].text && slots[2] == dup[0].text && slots[1] == rows[0].text,
+                  "both slots of the record listed twice keep its text; the other record's is moved as before");
+            // a file with ONE row for a record the table lists twice: the copy still comes from the
+            // first slot
+            std::vector<ut::UtSearchSaved> one(2);
+            one[0] = dup[0];
+            one[1] = rows[0];
+            std::vector<ut::UtSearchSaved> r1;
+            ut::utSearchLoadText(ut::utSearchSaveText(k, one), k, &r1, &w);
+            std::vector<std::string> s1(3);
+            std::vector<int> t1(r1.size(), -1);
+            for (int s = 0; s < 3; ++s) {
+                ut::UtSearchSaved* r = ut::utSearchFind(r1, table[s]);
+                if (r && r->indexed) ut::utSearchTakeText(r1, t1, r, s1, s);
+            }
+            check(s1[0] == dup[0].text && s1[2] == dup[0].text && s1[1] == rows[0].text,
+                  "one saved row for a record listed twice: both slots keep its text");
+        }
+
+        // the invalidation: each part of the key, alone
+        struct Case {
+            const char* says;
+            ut::UtSearchKey key;
+        };
+        std::vector<Case> cases(5, Case{"", k});
+        cases[0].says = "the game's catalogue.stamp changed";
+        cases[0].key.stamp = ut::utSearchFnv("stamp 13 inputs\nversion 7\n", 26);
+        cases[1].says = "text_language changed";
+        cases[1].key.lang = "RU";
+        cases[2].says = "the database checksum changed";
+        cases[2].key.db = 0x3AA41F3B;
+        cases[3].says = "search_lore changed";
+        cases[3].key.lore = 1;
+        cases[4].says = "the mod's version changed";
+        cases[4].key.version = "9.8.8";
+        for (const Case& c : cases) {
+            std::vector<ut::UtSearchSaved> none(1);
+            std::string w;
+            const bool refused = !ut::utSearchLoadText(bytes, c.key, &none, &w);
+            char what[160];
+            _snprintf_s(what, sizeof(what), _TRUNCATE, "another key is not used - \"%s\"", c.says);
+            check(refused && w == c.says && none.empty(), what);
+        }
+
+        // a damaged or foreign file is refused whole
+        const char* const bad[] = {
+            "",
+            "uniq-search 2\n",
+            "uniq-search 1\n",
+            "uniq-search 1\nkey stamp=1\n",
+        };
+        bool refusedAll = true;
+        for (const char* b : bad) {
+            std::vector<ut::UtSearchSaved> none;
+            std::string w;
+            refusedAll = refusedAll && !ut::utSearchLoadText(b, k, &none, &w) && !w.empty() && none.empty();
+        }
+        check(refusedAll, "an empty file, another magic, no key line, a short key line: not used");
+        const std::string head = ut::utSearchSaveHead(k);
+        const std::string damaged[] = {
+            head + "X records/a.dbr\ttext\n",        // not a row kind
+            head + "R records/a.dbr\n",              // an indexed row without its text
+            head + "U records/a.dbr\ttext\n",        // an unindexable row with a text
+            head + "R records/a.dbr\tbad \\q escape\n",   // an escape this form never writes
+            head + "R records/a.dbr\tends in \\\n",  // a lone backslash at the end
+        };
+        bool damagedAll = true;
+        for (const std::string& d : damaged) {
+            std::vector<ut::UtSearchSaved> none;
+            std::string w;
+            damagedAll = damagedAll && !ut::utSearchLoadText(d, k, &none, &w) &&
+                         w.find("line 3") != std::string::npos && none.empty();
+        }
+        check(damagedAll, "a damaged row refuses the whole file and names its line");
+        std::string row;
+        check(!ut::utSearchSaveRow(&row, "records/a\tb.dbr", true, "x") && !ut::utSearchSaveRow(&row, "", false, "") &&
+                  row.empty(),
+              "a record path with a tab (or none) is never written");
+        std::string truncated = bytes.substr(0, bytes.size() - 1);   // the last row without its newline
+        std::vector<ut::UtSearchSaved> tb;
+        std::string tw;
+        check(ut::utSearchLoadText(truncated, k, &tb, &tw) && tb.size() == 4,
+              "the last row needs no newline");
+    }
+    {
+        // the set-bonus class (0x16) is kept and counted: such a record is held back from the file
+        FakeVec v = makeVec(3);
+        setLine(v.first + 0 * kLine, 0x12, L"Gladiator's Creed");
+        setLine(v.first + 1 * kLine, 0x16, L"+30% Fire Resistance");
+        setLine(v.first + 2 * kLine, 0x11, L"Required Player Level: 34");
+        const int n = ut::utSearchStage(&v, &g_stage);
+        ut::UtSearchCounts c = {};
+        std::string text;
+        ut::utSearchFoldStage(&g_stage, false, &text, &c);
+        check(n == 3 && c.kept == 2 && c.setBonus == 1 && c.dropReq == 1 &&
+                  text == "gladiator's creed\n+30% fire resistance",
+              "a set-bonus line (0x16) is kept in the text and counted (the record is not saved)");
+        ut::utSearchFreeStaged(&g_stage, &countingDelete);
+    }
+
+    {
+        // the saved text at SVAERA's size (9,009 records, about 3 MB): the game thread's cost of the
+        // text made, read back and every record looked up (the file's own write and read come on top)
+        ut::UtSearchKey k;
+        k.stamp = 0x1234567890ABCDEFull;
+        k.lang = "EN";
+        k.db = 0x3AA41F3Au;
+        k.lore = 0;
+        k.version = "9.8.7";
+        std::vector<ut::UtSearchSaved> rows(9009);
+        std::string body(330, 'x');
+        for (size_t i = 0; i < rows.size(); ++i) {
+            char rec[96];
+            snprintf(rec, sizeof(rec), "records/xpack/items/loottables/item%05u.dbr", (unsigned)i);
+            rows[i].record = rec;
+            rows[i].indexed = i % 50 != 0;
+            if (rows[i].indexed) rows[i].text = "name " + std::to_string(i) + "\n" + body;
+        }
+        const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        const std::string text = ut::utSearchSaveText(k, rows);
+        const std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
+        std::vector<ut::UtSearchSaved> back;
+        std::string why;
+        const bool loaded = ut::utSearchLoadText(text, k, &back, &why);
+        int found = 0;
+        for (size_t i = 0; i < rows.size(); ++i)
+            if (ut::utSearchFind(back, rows[i].record.c_str())) ++found;
+        const std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
+        printf("  [info] the saved text at SVAERA's size: %u KB, made in %.1f ms, read and every record "
+               "found in %.1f ms\n",
+               (unsigned)((text.size() + 1023) / 1024),
+               std::chrono::duration<double, std::milli>(t1 - t0).count(),
+               std::chrono::duration<double, std::milli>(t2 - t1).count());
+        check(loaded && back.size() == rows.size() && found == (int)rows.size(),
+              "9,009 rows of SVAERA's size round-trip and every record is found");
+    }
+    {
+        // a search in game A, a switch, a world in game B with no focus: B's index does not start
+        bool started = true;   // game A was searched
+        started = ut::utSearchStartedAfterSwitch(started, false);   // the field was cleared in A
+        check(!started, "a game switch with no query standing: the next game's index waits for a focus");
+        check(ut::utSearchStartedAfterSwitch(true, true),
+              "a game switch with a query standing: the next game's index starts to apply it");
+        check(!ut::utSearchStartedAfterSwitch(false, true) && !ut::utSearchStartedAfterSwitch(false, false),
+              "an index never started stays so across a switch (the query path starts it)");
+    }
+
+    printf("\nthe relic page: one text per (record, bonus)\n");
+    {
+        // two records: r0 with two bonuses, r1 (its own block) with one; the states red, then each bonus
+        ut::UtRelicList l;
+        l.blocks.resize(2);
+        l.blocks[0].firstRow = 0;
+        l.blocks[0].rows = 1;
+        l.blocks[1].firstRow = 1;
+        l.blocks[1].rows = 1;
+        l.rows.resize(2);
+        l.rows[0].bonuses = {"a", "b"};
+        l.rows[0].block = 0;
+        l.rows[1].bonuses = {"c"};
+        l.rows[1].block = 1;
+        const int first[2] = {0, 3};
+        const std::string texts[5] = {"", "+15% attack speed", "+20 strength", "", "+10% attack speed"};
+        const std::string needle = ut::utSearchNeedleWide((const unsigned short*)L"Attack Speed", 12);
+        unsigned char match[5];
+        for (int k = 0; k < 5; ++k) match[k] = (unsigned char)(!texts[k].empty() && ut::utSearchHit(texts[k], needle));
+        const unsigned char keep[2] = {0, 1};
+        check(ut::utRelicSearchFound(l, first, match, nullptr) == 2 &&
+                  ut::utRelicSearchFound(l, first, match, keep) == 1,
+              "relic: 'Attack Speed' finds the two green slots with it; OWN keeps the held block's");
+        check(ut::utRelicSearchHit(match, 1, 1, true) && !ut::utRelicSearchHit(match, 2, 2, true) &&
+                  !ut::utRelicSearchHit(match, 0, 0, true),
+              "relic: the matching green slot is marked, the other bonus and the red slot are not");
     }
 
     printf("\n%s (%d failure(s))\n", g_fails ? "FAILED" : "PASSED", g_fails);

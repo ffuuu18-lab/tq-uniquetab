@@ -1,7 +1,8 @@
 // ut_rescue.cpp - the journal (TQ-1): the mod's own record of every stored copy, and its CSV export.
 //
 // TQ PORT of GD's ut_rescue.cpp. See ut_rescue.h for what stayed GD's and what TQ forced. The mod
-// writes only its own files here (tq-uniq-items*.jsonl, tq-uniq-items*.csv, the .bad- copy aside),
+// writes only its own files here (tq-uniq-items*.jsonl, tq-uniq-items*.csv, the .bad- copy aside;
+// a mod's set in its folder mods\<leaf>\, ut_folders.h),
 // always whole and always atomically; the game's own save files are only ever READ (the character
 // save's last-write time, journalNewestCharacterSave).
 //
@@ -22,6 +23,11 @@
 //              "pending"     OPTIONAL: "in" = deposited, the character file on disk still holds the
 //                            item (no save since); "out" = taken, the character file on disk does
 //                            not hold it yet. Absent = settled
+//              "depositedVar1"  OPTIONAL, u32, right after "pending":"in" only: a relic / charm row
+//                            pending in that a shard take has SPLIT - the shard count of the item
+//                            the character file on disk still holds (the row's own var1 is what
+//                            the collection keeps). Dropped when the row settles. A reader that
+//                            does not know it skips it (the row is then looked for by its var1)
 //              "taken"       ISO-8601 UTC, with "pending":"out" only
 //
 // THE ROW COUNT GOVERNS. Two lines may be byte-identical except for "deposited" (a 15-bit seed):
@@ -45,6 +51,8 @@
 #include "ut_ownedfold.h"
 #include "ut_paths.h"
 #include "ut_depositgate.h"   // utJournalStack
+#include "ut_folders.h"       // utMakeRelDirs
+#include "ut_relicroute.h"    // the relic / charm choices (journalTakeRow, journalTakeShard)
 
 namespace ut {
 
@@ -65,6 +73,8 @@ struct Row {
                                       // check (session only; the save watch leaves it alone)
     bool wasOut = false;              // an unresolved row that was "pending out" and
                                       // was RESTORED at the open (session only; see settleAtLoad)
+    unsigned int depositedVar1 = 0;   // "pending":"in" only: the shard count the character file
+                                      // still holds after a split (0 = none: var1 is)
 };
 
 const int kPendNone = 0, kPendIn = 1, kPendOut = 2;
@@ -79,8 +89,48 @@ unsigned int g_collected = 0;
 unsigned long long g_nextSeq = 0;
 char g_dir[MAX_PATH] = {0};
 char g_leaf[96] = {0};
+char g_rel[96] = {0};    // the open set's folder under g_dir ("" = the root, else mods\<leaf>)
 char g_path[MAX_PATH] = {0};
 char g_csvPath[MAX_PATH] = {0};
+// The mod folder while journal_dir is in force ("" = journal_dir is not in force): its journals
+// are not read then, and a set whose .jsonl is still there is named once (g_unreadSaid).
+char g_modDir[MAX_PATH] = {0};
+unsigned long long g_unreadSaid[32] = {0};
+int g_unreadSaidN = 0;
+
+// True when a file can be created in `dir` (journal_dir's one write check at start-up).
+bool folderWritable(const char* dir) {
+    char tmp[MAX_PATH];
+    _snprintf_s(tmp, sizeof(tmp), _TRUNCATE, "%s\\uniquetab-write.tmp", dir);
+    const HANDLE h = CreateFileA(tmp, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                 FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    CloseHandle(h);
+    return true;
+}
+
+// While journal_dir is in force: one WARN per set whose journal is still in the mod folder (its
+// own folder there, or the root), which is not read - the collection is journal_dir's.
+void sayUnreadModFolderJournal(const char* leaf, const char* rel) {
+    if (!g_modDir[0] || !leaf || !leaf[0]) return;
+    char old[MAX_PATH] = {0};
+    for (int pass = rel && rel[0] ? 0 : 1; pass < 2 && !old[0]; ++pass) {
+        char p[MAX_PATH];
+        if (pass == 0) _snprintf_s(p, sizeof(p), _TRUNCATE, "%s\\%s\\%s.jsonl", g_modDir, rel, leaf);
+        else _snprintf_s(p, sizeof(p), _TRUNCATE, "%s\\%s.jsonl", g_modDir, leaf);
+        if (_stricmp(p, g_path) != 0 && GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES)
+            memcpy(old, p, sizeof(old));
+    }
+    if (!old[0]) return;
+    unsigned long long h = 1469598103934665603ull;
+    for (const char* c = old; *c; ++c) h = (h ^ (unsigned char)*c) * 1099511628211ull;
+    for (int i = 0; i < g_unreadSaidN; ++i)
+        if (g_unreadSaid[i] == h) return;
+    if (g_unreadSaidN < (int)(sizeof(g_unreadSaid) / sizeof(g_unreadSaid[0]))) g_unreadSaid[g_unreadSaidN++] = h;
+    logW("***** journal: \"%s\" is NOT read while journal_dir is set - this set's collection is "
+         "\"%s\"; move the file into journal_dir with the game closed *****",
+         old, g_path);
+}
 volatile LONG g_setOpen = 0;
 HANDLE g_event = nullptr;
 volatile LONG g_dirty = 0;
@@ -231,7 +281,10 @@ void appendRowLine(std::string* out, const Row& r) {
     appendKeyU32(out, "var1", r.var1);
     appendKeyU32(out, "var2", r.var2);
     appendKeyU32(out, "b8", r.b8);
-    if (r.pending == kPendIn) appendKeyStr(out, "pending", "in");
+    if (r.pending == kPendIn) {
+        appendKeyStr(out, "pending", "in");
+        if (r.depositedVar1) appendKeyU32(out, "depositedVar1", r.depositedVar1);
+    }
     if (r.pending == kPendOut) {
         appendKeyStr(out, "pending", "out");
         isoFromFileTime(r.takenAt, iso, sizeof(iso));
@@ -548,6 +601,8 @@ bool rowFromKVs(const std::vector<JsonKV>& kvs, Row* r, char* why, size_t whyCap
         else if (kv.key == "deposited" && kv.isString) r->at = fileTimeFromIso(kv.val);
         else if (kv.key == "pending" && kv.isString) pending = kv.val;
         else if (kv.key == "taken" && kv.isString) taken = kv.val;
+        else if (kv.key == "depositedVar1" && !kv.isString && !jsonU32(kv.val, &r->depositedVar1))
+            r->depositedVar1 = 0;   // not a plain number: the refinement is dropped, not the row
         // anything else: skipped (forward compatibility; the format number guards meaning)
     }
     if (!haveRecord) {
@@ -591,6 +646,7 @@ bool rowFromKVs(const std::vector<JsonKV>& kvs, Row* r, char* why, size_t whyCap
         _snprintf_s(why, whyCap, _TRUNCATE, "\"pending\" is neither \"in\" nor \"out\"");
         return false;
     }
+    if (r->pending != kPendIn) r->depositedVar1 = 0;   // meaningful on a row pending in only
     return true;
 }
 
@@ -770,6 +826,7 @@ void settleAtLoad(unsigned long long saveTime, unsigned long long processStart, 
             ++settledOut;
         } else if (r.pending == kPendIn && utLoadSettles(r.at, saveTime, processStart)) {
             r.pending = kPendNone;
+            r.depositedVar1 = 0;
             ++settledIn;
         }
     }
@@ -841,6 +898,8 @@ void csvField(std::string* out, const char* text, bool last) {
     }
 }
 
+UtRelicCellsFn g_relicCells = nullptr;   // journalSetRelicCells (the live relic list)
+
 void csvRow(std::string* out, const Row& r) {
     char num[32], iso[64];
     csvField(out, r.key.c_str(), false);
@@ -858,7 +917,15 @@ void csvRow(std::string* out, const Row& r) {
     _snprintf_s(num, sizeof(num), _TRUNCATE, "%u", r.var2);
     csvField(out, num, false);
     _snprintf_s(num, sizeof(num), _TRUNCATE, "%u", r.b8);
-    csvField(out, num, true);
+    csvField(out, num, false);
+    // the relic cells: the record's tier and the row's shards "k / N" (empty for a unique)
+    int tier = 0;
+    unsigned shards = 0;
+    char cell[32] = "";
+    const bool relic = g_relicCells && g_relicCells(r.key.c_str(), &tier, &shards);
+    if (relic) utRelicShardsCell(r.var1, shards, cell, sizeof(cell));
+    csvField(out, relic ? utRelicTierWord(tier) : "", false);
+    csvField(out, cell, true);
 }
 
 void csvWrite() {
@@ -868,7 +935,7 @@ void csvWrite() {
     g_csvFieldOk = true;
     try {
         text.append("record,collected,deposited,stack,base,prefix,suffix,relic,relicBonus,relic2,"
-                    "relicBonus2,seed,var1,var2,b8\r\n");
+                    "relicBonus2,seed,var1,var2,b8,tier,shards\r\n");
         for (size_t i = 0; i < g_rows->size(); ++i) {
             if ((*g_rows)[i].pending == kPendOut && mode < 2) continue;
             csvRow(&text, (*g_rows)[i]);
@@ -979,7 +1046,7 @@ bool utCaptureValid(const UtReplicaCapture& cap, char* why, size_t whyCap) {
     return true;
 }
 
-bool journalInit(HMODULE selfModule) {
+bool journalInit(HMODULE selfModule, const char* journalDir) {
     if (!g_csReady) {
         InitializeCriticalSection(&g_cs);
         g_csReady = true;
@@ -991,21 +1058,60 @@ bool journalInit(HMODULE selfModule) {
     } catch (...) {
         return false;
     }
-    utModDirA(selfModule, g_dir, sizeof(g_dir));
+    char outDir[MAX_PATH] = {0};
+    utModDirA(selfModule, outDir, sizeof(outDir));
+    _snprintf_s(g_dir, sizeof(g_dir), _TRUNCATE, "%s", outDir);
+    // journal_dir (GD's journalInit): read once, here. The journals and their CSV copies go there;
+    // the log, the settings and the generated set stay in the mod folder.
+    if (journalDir && journalDir[0]) {
+        const std::string jd = utJournalDirResolved(journalDir);
+        if (!jd.empty() && !folderWritable(jd.c_str())) {
+            logW("***** journal: journal_dir=%s in the ini cannot be written - IGNORED, the journal "
+                 "stays in %s *****",
+                 journalDir, outDir);
+        } else if (!jd.empty()) {
+            _snprintf_s(g_dir, sizeof(g_dir), _TRUNCATE, "%s", jd.c_str());
+            _snprintf_s(g_modDir, sizeof(g_modDir), _TRUNCATE, "%s", outDir);
+            logI("collection: journal_dir=%s - the collection is kept there", g_dir);
+            logD("journal_dir is read once at start-up and never re-read");
+        } else {
+            logW("***** journal: journal_dir=%s in the ini is not an existing folder - IGNORED, the "
+                 "journal stays in %s *****",
+                 journalDir, outDir);
+        }
+    }
     g_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     logD("journal: the files live in \"%s\"; the set is chosen at the first world", g_dir);
     return true;
 }
 
+const char* journalFolder() { return g_dir; }
+
 bool journalOpenSet(const char* leaf, unsigned long long saveTime,
-                    unsigned long long processStart, bool defer) {
+                    unsigned long long processStart, bool defer, const char* folderRel) {
+    const char* rel = folderRel ? folderRel : "";
     if (!g_rows || !g_csReady) return false;
     const bool want = leaf && leaf[0];
     if (want && !leafOk(leaf)) {
         logW("journal: set name \"%s\" refused - moves are refused for this world", leaf);
         return journalOpenSet(nullptr);
     }
-    if (InterlockedCompareExchange(&g_setOpen, 0, 0) && want && strcmp(leaf, g_leaf) == 0)
+    if (want) {
+        // The longest name the set writes is <leaf>.jsonl.bad-<yyyymmdd-hhmmss> in its folder. A
+        // set whose names would not fit MAX_PATH is refused rather than written under a cut name
+        // (a cut .jsonl name would also make its .tmp the file itself).
+        const size_t longest = strlen(g_dir) + (rel[0] ? 1 + strlen(rel) : 0) + 1 + strlen(leaf) +
+                               strlen(".jsonl.bad-") + 15;
+        if (longest >= MAX_PATH) {
+            logW("journal: set \"%s\" refused - its files in \"%s%s%s\" would need paths of up to %u "
+                 "characters, over the %d the game's file calls allow; moves are refused for this "
+                 "world. A shorter install path fixes it",
+                 leaf, g_dir, rel[0] ? "\\" : "", rel, (unsigned)longest, MAX_PATH - 1);
+            return journalOpenSet(nullptr);
+        }
+    }
+    if (InterlockedCompareExchange(&g_setOpen, 0, 0) && want && strcmp(leaf, g_leaf) == 0 &&
+        strcmp(rel, g_rel) == 0)
         return true;   // the same set again: nothing moves
     if (InterlockedCompareExchange(&g_setOpen, 0, 0) &&
         InterlockedCompareExchange(&g_dirty, 0, 0)) {
@@ -1020,11 +1126,20 @@ bool journalOpenSet(const char* leaf, unsigned long long saveTime,
     InterlockedExchange(&g_readOnly, 0);
     InterlockedExchange(&g_copyAside, 0);
     InterlockedExchange(&g_readOnlySaid, 0);
-    g_path[0] = g_csvPath[0] = g_leaf[0] = 0;
+    g_path[0] = g_csvPath[0] = g_leaf[0] = g_rel[0] = 0;
     if (want) {
         _snprintf_s(g_leaf, sizeof(g_leaf), _TRUNCATE, "%s", leaf);
-        _snprintf_s(g_path, sizeof(g_path), _TRUNCATE, "%s\\%s.jsonl", g_dir, leaf);
-        _snprintf_s(g_csvPath, sizeof(g_csvPath), _TRUNCATE, "%s\\%s.csv", g_dir, leaf);
+        _snprintf_s(g_rel, sizeof(g_rel), _TRUNCATE, "%s", rel);
+        char dir[MAX_PATH];
+        if (rel[0]) {
+            _snprintf_s(dir, sizeof(dir), _TRUNCATE, "%s\\%s", g_dir, rel);
+            utMakeRelDirs(g_dir, rel);   // the mod's folder (ut_folders.h)
+        } else {
+            _snprintf_s(dir, sizeof(dir), _TRUNCATE, "%s", g_dir);
+        }
+        _snprintf_s(g_path, sizeof(g_path), _TRUNCATE, "%s\\%s.jsonl", dir, leaf);
+        _snprintf_s(g_csvPath, sizeof(g_csvPath), _TRUNCATE, "%s\\%s.csv", dir, leaf);
+        sayUnreadModFolderJournal(leaf, rel);
         try {
             readSetFile();
             settleAtLoad(saveTime, processStart, defer);
@@ -1124,6 +1239,27 @@ unsigned int journalCollectedTotal() {
     const unsigned int n = g_collected;
     LeaveCriticalSection(&g_cs);
     return n;
+}
+
+void journalHeldKeys(std::vector<std::string>* out) {
+    if (!out) return;
+    out->clear();
+    if (!g_rows || !g_csReady || !journalSetKnown()) return;
+    EnterCriticalSection(&g_cs);
+    // an allocation failure gives an empty list and still leaves the lock
+    try {
+        std::unordered_map<unsigned long long, unsigned int> seen;
+        seen.reserve(g_rows->size());
+        out->reserve(g_rows->size());
+        for (size_t i = 0; i < g_rows->size(); ++i) {
+            const Row& r = (*g_rows)[i];
+            if (r.pending == kPendOut) continue;
+            if (seen.emplace(keyHash(r.key.c_str()), 1u).second) out->push_back(r.key);
+        }
+    } catch (...) {
+        out->clear();
+    }
+    LeaveCriticalSection(&g_cs);
 }
 
 size_t journalCount() {
@@ -1257,6 +1393,187 @@ bool journalTakeCommit(const char* key, unsigned long long seq, bool* rolledBack
     return true;
 }
 
+// ---- the relic and charm rows ----------------------------------------------------------------
+namespace {
+
+void rowToCapture(const Row& r, UtReplicaCapture* out) {
+    memset(out, 0, sizeof(*out));
+    _snprintf_s(out->record, sizeof(out->record), _TRUNCATE, "%s", r.key.c_str());
+    for (int k = 0; k < kUtIdStrCount; ++k)
+        _snprintf_s(out->str[k], kUtIdStrMax, _TRUNCATE, "%s", r.s[k].c_str());
+    out->seed = r.seed;
+    out->var1 = r.var1;
+    out->var2 = r.var2;
+    out->b8 = r.b8;
+    out->stack = r.stack;
+}
+
+void rowFacts(const Row& r, UtRelicRowFacts* f) {
+    memset(f, 0, sizeof(*f));
+    f->seq = r.seq;
+    f->deposited = r.at;
+    f->var1 = r.var1;
+    f->pending = r.pending;
+    f->unresolved = r.unresolved;
+    if (!utRelicFold(r.s[kUtIdRelicBonus].c_str(), f->bonus, sizeof(f->bonus))) {
+        f->bonus[0] = '?';   // too long to fold: still a completed row, never a red one
+        f->bonus[1] = 0;
+    }
+}
+
+// The facts of every row of `key` and where each row is. Caller holds g_cs.
+void factsOfKey(const char* key, std::vector<UtRelicRowFacts>* facts, std::vector<size_t>* at) {
+    facts->clear();
+    at->clear();
+    for (size_t i = 0; i < g_rows->size(); ++i) {
+        const Row& r = (*g_rows)[i];
+        if (r.key != key) continue;
+        UtRelicRowFacts f;
+        rowFacts(r, &f);
+        facts->push_back(f);
+        at->push_back(i);
+    }
+}
+
+// Today's take of row i (journalTakeCommit's body). Caller holds g_cs. True = erased.
+bool takeWhole(size_t i) {
+    Row& r = (*g_rows)[i];
+    if (r.pending == kPendIn) {
+        g_rows->erase(g_rows->begin() + (ptrdiff_t)i);
+        return true;
+    }
+    r.pending = kPendOut;
+    r.takenAt = nowFileTime();
+    r.unresolved = false;
+    return false;
+}
+
+}  // namespace
+
+bool journalRowBySeq(unsigned long long seq, UtReplicaCapture* out, int* pending) {
+    if (!seq || !g_rows || !g_csReady || !journalSetKnown()) return false;
+    bool found = false;
+    EnterCriticalSection(&g_cs);
+    for (size_t i = 0; i < g_rows->size(); ++i) {
+        const Row& r = (*g_rows)[i];
+        if (r.seq != seq) continue;
+        if (out) rowToCapture(r, out);
+        if (pending) *pending = r.pending;
+        found = true;
+        break;
+    }
+    LeaveCriticalSection(&g_cs);
+    return found;
+}
+
+size_t journalRowsOf(const char* key, UtRelicRowFacts* out, size_t cap) {
+    if (!key || !*key || !g_rows || !g_csReady || !journalSetKnown()) return 0;
+    size_t n = 0;
+    EnterCriticalSection(&g_cs);
+    for (size_t i = 0; i < g_rows->size(); ++i) {
+        const Row& r = (*g_rows)[i];
+        if (r.key != key) continue;
+        if (out && n < cap) rowFacts(r, &out[n]);
+        ++n;
+    }
+    LeaveCriticalSection(&g_cs);
+    return n;
+}
+
+bool journalTakeRow(const char* key, unsigned long long seq, bool* rolledBack) {
+    if (rolledBack) *rolledBack = false;
+    if (!key || !journalUsable()) return false;
+    bool stale = false, erased = false;
+    const bool ok = commitWith(
+        [&]() -> bool {
+            std::vector<UtRelicRowFacts> f;
+            std::vector<size_t> at;
+            factsOfKey(key, &f, &at);
+            int me = -1;
+            for (size_t i = 0; i < f.size(); ++i)
+                if (f[i].seq == seq && f[i].pending != kPendOut) me = (int)i;
+            if (me < 0) return false;
+            bool split = false;
+            const int choice = utRelicRowIsRed(f[(size_t)me])
+                                   ? utRelicShardSource(f.data(), (int)f.size(), &split)
+                                   : utRelicGreenChoice(f.data(), (int)f.size(), f[(size_t)me].bonus);
+            if (choice != me || split) {   // not the row its slot hands out now: stale
+                stale = true;
+                return false;
+            }
+            erased = takeWhole(at[(size_t)me]);
+            return true;
+        },
+        rolledBack);
+    if (!ok) {
+        logW("take REFUSED: %s - nothing was handed out",
+             stale ? "the page's copy is not the row its slot hands out (stale page)"
+                   : "the journal could not be written or has no such row");
+        return false;
+    }
+    logD("journal: take row %llu %s%s", seq, key, erased ? " (an unsaved deposit: erased)" : "");
+    return true;
+}
+
+bool journalTakeShard(const char* key, unsigned long long seq, unsigned long long* outSeq,
+                      unsigned* left, bool* rolledBack) {
+    if (rolledBack) *rolledBack = false;
+    if (outSeq) *outSeq = 0;
+    if (left) *left = 0;
+    if (!key || !journalUsable()) return false;
+    bool stale = false, erased = false, split = false;
+    unsigned long long shardSeq = 0;
+    unsigned remain = 0;
+    const bool ok = commitWith(
+        [&]() -> bool {
+            std::vector<UtRelicRowFacts> f;
+            std::vector<size_t> at;
+            factsOfKey(key, &f, &at);
+            const int src = utRelicShardSource(f.data(), (int)f.size(), &split);
+            if (src < 0) return false;
+            if (f[(size_t)src].seq != seq) {   // not the record's shard source now: stale
+                stale = true;
+                return false;
+            }
+            const size_t i = at[(size_t)src];
+            if (!split) {
+                erased = takeWhole(i);
+                shardSeq = seq;
+                return true;
+            }
+            Row& r = (*g_rows)[i];
+            Row s = r;   // the shard: the source's identity and deposit, one shard, taken now
+            if (r.pending == kPendIn && !r.depositedVar1) r.depositedVar1 = r.var1;
+            r.var1 -= 1u;
+            remain = r.var1;
+            s.var1 = 1u;
+            s.stack = 1u;
+            s.pending = kPendOut;
+            s.takenAt = nowFileTime();
+            s.unresolved = false;
+            s.wasOut = false;
+            s.depositedVar1 = 0;
+            s.seq = shardSeq = ++g_nextSeq;
+            g_rows->push_back(s);
+            return true;
+        },
+        rolledBack);
+    if (!ok) {
+        logW("take REFUSED: %s - nothing was handed out",
+             stale ? "the page's copy is not the row its slot hands out (stale page)"
+                   : "the journal could not be written or has no such row");
+        return false;
+    }
+    if (outSeq) *outSeq = shardSeq;
+    if (left) *left = remain;
+    if (split)
+        logD("journal: take row %llu %s (one shard of row %llu, %u left)", shardSeq, key, seq,
+             remain);
+    else
+        logD("journal: take row %llu %s%s", seq, key, erased ? " (an unsaved deposit: erased)" : "");
+    return true;
+}
+
 // the "out" row whose item is still on the cursor (game thread writes, the settle
 // reads it under g_cs).
 static unsigned long long g_heldSeq = 0;
@@ -1317,6 +1634,7 @@ int journalSaveObserved(unsigned long long saveWriteTime) {
             if (r.unresolved) continue;   // the container check decides these
             if (r.pending == kPendIn && r.at < saveWriteTime) {
                 r.pending = kPendNone;
+                r.depositedVar1 = 0;
                 ++changed;
             } else if (r.pending == kPendOut && r.takenAt < saveWriteTime &&
                        !(g_heldSeq && r.seq == g_heldSeq)) {
@@ -1379,7 +1697,8 @@ size_t journalUnresolvedRows(UtPendingRow* out, size_t cap) {
         for (int k = 0; k < kUtIdStrCount; ++k)
             _snprintf_s(o.id.str[k], kUtIdStrMax, _TRUNCATE, "%s", r.s[k].c_str());
         o.id.seed = r.seed;
-        o.id.var1 = r.var1;
+        // a split row pending in: the item the character file holds has the deposited count
+        o.id.var1 = (r.pending == kPendIn && !r.wasOut && r.depositedVar1) ? r.depositedVar1 : r.var1;
         o.id.var2 = r.var2;
         o.id.b8 = r.b8;
         o.id.stack = r.stack;
@@ -1423,6 +1742,7 @@ int journalApplyVerdicts(const UtVerdictItem* v, size_t n, const char* fallbackW
                     // rows do not record their character; one journal serves the save set), so
                     // it proves nothing about another character: today's WARN wording stays.
                     r.pending = kPendNone;
+                    r.depositedVar1 = 0;
                     r.unresolved = false;
                     disk = true;
                     logW("journal: %s - a row written before a character save that never came is "
@@ -1503,6 +1823,8 @@ void journalSetCsvExport(int mode) {
 const char* journalPath() { return g_path; }
 const char* journalCsvPath() { return g_csvPath; }
 long journalWrites() { return InterlockedCompareExchange(&g_writes, 0, 0); }
+
+void journalSetRelicCells(UtRelicCellsFn fn) { g_relicCells = fn; }
 long journalCsvWrites() { return InterlockedCompareExchange(&g_csvWrites, 0, 0); }
 
 }  // namespace ut

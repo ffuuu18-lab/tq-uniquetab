@@ -11,6 +11,7 @@
 //   * nothing here logs per frame: the per-frame paths only count (the refusal counters).
 
 #include "ut_view.h"
+#include "ut_cover.h"   // the caravan background swap, restored at every OFF
 
 #include <windows.h>
 
@@ -19,7 +20,9 @@
 #include "hooks.h"
 #include "ut_bindings.h"
 #include "ut_config.h"
+#include "ut_generate.h"   // gameTabOff
 #include "ut_live.h"
+#include "ut_mikind.h"
 #include "ut_log.h"
 #include "ut_owned.h"
 #include "ut_panel.h"
@@ -33,6 +36,7 @@
 namespace ut {
 void viewSelectSet();
 void viewTakeTick();
+void viewGridRestore(const char* why);
 namespace {
 
 void holdRelease(const char* why);   // (defined with the take state below)
@@ -196,6 +200,9 @@ bool mpNote() {
 // 1 = the last buildPage built an EMPTY page on purpose (OWN, nothing owned), so
 // the getter keeps the mod sack on the page. Game thread (buildPage and the accessor share it).
 volatile LONG g_emptyByDesign = 0;
+// 1 = the last buildPage built the layout editor's empty page: the items hidden while the editor
+// is open (ut_layoutedit.h utEditHidesItems), the normal page built again at its close. Game thread.
+volatile LONG g_editHid = 0;
 
 // Build the wanted page into the mod sack. Game thread, view ON. `navigation`: the view was already
 // showing a window, which this one replaces - timed together.
@@ -211,8 +218,12 @@ bool buildPage(bool navigation = false) {
     const int prevGroup = liveShownGroup(), prevRow = liveShownPage();
     const bool hadPage = navigation && protoCount() > 0;
     static UtProtoPlace places[kUtProtoMax];
-    const int n = livePagePlaces(places, kUtProtoMax);   // the wanted window becomes the shown one
-    const bool emptyOk = n == 0 && liveEmptyPageOk();   // OWN, a group with nothing owned
+    const int wanted = livePagePlaces(places, kUtProtoMax);   // the wanted window becomes the shown one
+    // the layout editor open on the page: its items are hidden - an empty page of the same window
+    const bool hide = panelLayoutEditOpen();
+    const int n = hide ? 0 : wanted;
+    // OWN, a group with nothing owned; or the editor's empty page of a window that has entries
+    const bool emptyOk = n == 0 && (liveEmptyPageOk() || (hide && wanted > 0));
     InterlockedExchange(&g_emptyByDesign, 0);   // set again below on success
     if (n <= 0 && !emptyOk) {
         if (navigation) protoDestroyAll();   // the old window never outlives a failed build
@@ -262,7 +273,8 @@ bool buildPage(bool navigation = false) {
             _snprintf_s(input, sizeof(input), _TRUNCATE, "; input-to-window %.1f ms", lat);
         }
     }
-    const char* own = liveOwnedOnlyActive() ? " (OWN: the records you own)" : "";
+    const char* own = hide ? " (hidden while the layout editor is open)"
+                      : liveOwnedOnlyActive() ? " (OWN: the records you own)" : "";
     if (failed) {
         logW("view: page %s rows %s / %d: %d of %d prototypes placed, %d refused by the engine",
              label, span, rows, placed, n, failed);
@@ -283,6 +295,7 @@ bool buildPage(bool navigation = false) {
     // An empty page counts only once the mod sack exists (it is what the getter then hands out).
     const bool ok = (placed > 0 || (emptyOk && protoSackBuilt() != nullptr)) && failed == 0;
     InterlockedExchange(&g_emptyByDesign, ok && placed == 0 && emptyOk ? 1 : 0);
+    InterlockedExchange(&g_editHid, ok && hide ? 1 : 0);
     return ok;
 }
 
@@ -335,8 +348,6 @@ void viewInit(bool hooksOk) {
     }
     if (!why[0] && !hooksOk)
         _snprintf_s(why, sizeof(why), _TRUNCATE, "a detour or the capability slot is missing");
-    if (!why[0] && !liveActive())
-        _snprintf_s(why, sizeof(why), _TRUNCATE, "the group table (uniq-groups.txt) did not load");
     if (why[0]) {
         _snprintf_s(g_unavailable, sizeof(g_unavailable), _TRUNCATE, "%s", why);
         g_vs.bindingsOk = false;
@@ -348,6 +359,9 @@ void viewInit(bool hooksOk) {
     g_vs.bindingsOk = true;
     InterlockedExchange(&g_available, 1);
     _snprintf_s(g_unavailable, sizeof(g_unavailable), _TRUNCATE, "%s", "");
+    // the start-up game's group table is this game's data, not the session's: a set that did not
+    // load turns the tab off in this game only (the WARN above it says why)
+    if (!liveActive() && !gameTabOff()) viewOnGameTable(false, false);
     logI("view: available - member at sub-window+0x%X+0x%X, right-click / held pick-up / left-click "
          "refused at TQ.exe+0x%X / +0x%X / +0x%X, %d groups on %d pages",
          g_tq.pageUiOff, g_tq.pageSackOff,
@@ -373,6 +387,8 @@ void viewForceOff(const char* reason, bool worldGone) {
     g_vs.on = false;
     InterlockedExchange(&g_on, 0);   // the refusals stop at once...
     const int rp = repoint();        // ...G2: the member holds the real sack again...
+    viewGridRestore(reason);         // ...and the inventory its own place
+    coverRestore(reason, worldGone); // ...and the caravan window its own background
     // ...G5: no prototype survives the view (after a world teardown they are only dropped).
     const int n = worldGone ? protoForgetAll() : protoDestroyAll();
     ownedOnViewOff();
@@ -390,6 +406,27 @@ void viewForceOff(const char* reason, bool worldGone) {
                         : "already the real sack",
              n);
     }
+}
+
+// A DATA fault: this game's generated set. The tab is off in THIS game - the toggle is refused
+// (kUtViewWhyRefusedGameData) until the next game switch (viewOnGameTable) - and the engine-fault
+// latch (g_vs.faulted, viewFault) is not touched. `said`: the cause is already one WARN (the
+// live load, the page build), so this line is INFO; else this line is the one WARN.
+void viewDataFault(const char* where, bool said) {
+    if (!g_vs.gameOff) {
+        if (said)
+            logI("view: the tab is off in this game until the next game switch (%s)", where);
+        else
+            logW("view: %s - the tab is off in this game until the next game switch", where);
+    }
+    event(kUtViewEvDataFault, 0);
+}
+
+void viewOnGameTable(bool loaded, bool tabOff) {
+    const bool was = g_vs.gameOff;
+    event(kUtViewEvGameSwitch, 0);
+    if (was) logI("view: the game switched - the previous game's data fault is forgotten");
+    if (!loaded && !tabOff) viewDataFault("its group table did not load - the WARN above says why", true);
 }
 
 void viewFault(const char* where) {
@@ -436,12 +473,20 @@ static bool takeSwitchRequest() {
 
 void viewTick() {
     ++g_ticks;
+    panelButtonsTick();   // the buttons file: the first open's table, a new read resolved
     // G6: the session state, polled twice a second (and at every toggle request below). a
     // CHANGE (single / multiplayer / unknown) turns the view OFF once; multiplayer itself does not.
     if ((g_ticks % 30) == 0 && viewAvailable()) mpNote();
-    if (takeSwitchRequest()) {
+    // enabled=0 (the ini's master switch): the view is not available - a shown one goes off at
+    // once, and a request still queued is refused and said.
+    if (!g_cfg.enabled) {
+        if (g_vs.on) viewForceOff("enabled=0 in uniquetab.ini", false);
+        if (takeSwitchRequest()) logI("view: toggle refused - enabled=0 in uniquetab.ini");
+    } else if (takeSwitchRequest()) {
         if (g_vs.on) {
             event(kUtViewEvToggle, 0);
+        } else if (gameTabOff()) {
+            logI("view: toggle refused - the tab is off in this game (the WARN at its entry says why)");
         } else if (!viewAvailable()) {
             logI("view: toggle refused - the view is unavailable (%s)", g_unavailable);
         } else {
@@ -461,7 +506,7 @@ void viewTick() {
                     if (st.turnedOn) {
                         liveDropDirty();   // this build is the page; no second one
                         if (!buildPage()) {
-                            viewFault("the first page could not be built");
+                            viewDataFault("the first page could not be built", true);
                         } else {
                             InterlockedExchange(&g_on, 1);
                             const bool movesMp =
@@ -505,9 +550,11 @@ void viewTick() {
         logI("view: the mod sack's cell went from %ux%u to %ux%u px (the UI scale changed) - the "
              "window is rebuilt on the new cell", pw, ph, lw, lh);
     }
-    if ((dirty || cellMoved) && g_vs.on) {
+    // the layout editor opened or closed on the collection page: its items hidden / back
+    const bool editFlip = g_vs.on && panelLayoutEditOpen() != (InterlockedCompareExchange(&g_editHid, 0, 0) != 0);
+    if ((dirty || cellMoved || editFlip) && g_vs.on) {
         if (!buildPage(true)) {   // the destroy is timed with the build
-            viewFault("a page could not be built");
+            viewDataFault("a page could not be built", true);
         } else {
             ownedPageBuilt();
         }
@@ -530,12 +577,12 @@ void viewTick() {
     _snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
                 "view=%s mp=%s group=%d row=%d/%d protos=%d refused(drop=%ld add=%ld setid=%ld "
                 "remove=%ld under=%ld unsure=%ld sort=%ld sackadd=%ld caller=%ld) "
-                "hover=%ld %s",
+                "hover=%ld mi=%d %s",
                 g_vs.on ? "on" : (viewAvailable() ? "off" : "unavailable"), g_mpShape,
                 liveShownGroup(),
                 liveShownPage() + 1, liveShownRows(), protoCount(), g_refDrop,
                 g_refAdd, g_refSetId, g_refRemove, g_refUnder, g_refUnsure, g_refSort,
-                g_refSackAdd, g_refQuickCaller, g_passHover, ownedStatus());
+                g_refSackAdd, g_refQuickCaller, g_passHover, ownedHeldMi(), ownedStatus());
 }
 
 void viewOnModeChanged(int mode) {
@@ -552,6 +599,13 @@ void viewOnOpen() {
 void viewOnGoodbye() {
     event(kUtViewEvGoodbye, 0);
     viewForceOff("caravan close");  // G2: idempotent; re-points even if the state says OFF
+    InterlockedExchange(&g_memberVerified, 0);
+}
+
+void viewOnReopen() {
+    // the open's event once more after the goodbye that ran inside it: the state is open again
+    // with the view OFF (both PREs turned it off), the live check runs again at this open
+    event(kUtViewEvOpen, 0);
     InterlockedExchange(&g_memberVerified, 0);
 }
 
@@ -620,6 +674,144 @@ void viewAccessorLeave(void* subWindow) {
     }
 }
 
+// ---- the grid in force: the collection sack moved and sized ----------------------------------
+// TQ.exe 0xC2F50 (the Transfer page refresh, every frame the page is shown) SetDims the sack in
+// the member to 16 x 15 cells and writes the inventory widget's size (+0x18 / +0x1C); its place
+// (+0x10 / +0x14, record x UI scale) is written once, by the widget's loader 0x10E850. While the
+// view is ON with the player's grid in force the refresh's POST re-dims the collection sack and
+// writes the widget's place and size; the engine's own place is kept and put back at every OFF
+// and whenever the view stops asking. The REAL Transfer page is never moved.
+namespace {
+struct GridWant {
+    int user;
+    float dx, dy;      // the grid in force's top-left against the derived grid's, drawn px
+    int cols, rows;
+};
+GridWant g_gridWant = {0, 0.0f, 0.0f, 16, 15};   // game thread (ut_panel's layout)
+struct GridDone {
+    int applied;
+    unsigned char* ui;   // the inventory widget written
+    float orig[4];       // the engine's own place and size
+    float wrote[4];
+    float dx, dy;        // the shift written (0 while the engine's own place is in force)
+    int cols, rows;
+    unsigned cw, ch;
+};
+GridDone g_gridDone = {};
+GridDone g_gridSaid = {};
+bool g_gridOff = false;   // a fault: the grid is not moved again in this session
+
+bool writeFloats(unsigned char* at, const float* v, int n) {
+    if (!at || !v || n <= 0 || !readable(at, sizeof(float) * (size_t)n)) return false;
+    bool ok = false;
+    utGuardEnter();
+    __try {
+        for (int i = 0; i < n; ++i) ((float*)at)[i] = v[i];
+        ok = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    utGuardLeave();
+    return ok;
+}
+}  // namespace
+
+void viewSetGrid(bool user, float dx, float dy, int cols, int rows) {
+    g_gridWant.user = user ? 1 : 0;
+    g_gridWant.dx = user ? dx : 0.0f;
+    g_gridWant.dy = user ? dy : 0.0f;
+    g_gridWant.cols = user ? cols : 16;
+    g_gridWant.rows = user ? rows : 15;
+    protoSetGrid(g_gridWant.cols, g_gridWant.rows);
+}
+
+void viewGridShift(float* dx, float* dy) {
+    if (dx) *dx = g_gridDone.applied ? g_gridDone.dx : 0.0f;
+    if (dy) *dy = g_gridDone.applied ? g_gridDone.dy : 0.0f;
+}
+
+// The engine's own place and size back in the widget, written only while the page object is the
+// one the accessor last saw (its vftable) and the place is still the one written.
+void viewGridRestore(const char* why) {
+    if (!g_gridDone.applied) return;
+    unsigned char* ui = g_gridDone.ui;
+    g_gridDone.applied = 0;
+    g_gridDone.dx = g_gridDone.dy = 0.0f;
+    void* sub = g_subWindow;
+    const void* vt = nullptr;
+    float cur[2] = {0.0f, 0.0f};
+    if (!sub || ui != (unsigned char*)sub + g_tq.pageUiOff || !safeRead(sub, &vt, sizeof(vt)) ||
+        vt != g_subVft || !safeRead(ui + 0x10, cur, sizeof(cur))) {
+        logI("view: the Transfer page's inventory place is not written back (%s) - the page object "
+             "is gone", why ? why : "?");
+        return;
+    }
+    if (cur[0] != g_gridDone.wrote[0] || cur[1] != g_gridDone.wrote[1]) {
+        logI("view: the Transfer page's inventory place is not written back (%s) - the engine wrote "
+             "its own (%.1f,%.1f) since", why ? why : "?", cur[0], cur[1]);
+        return;
+    }
+    const bool ok = writeFloats(ui + 0x10, g_gridDone.orig, 4);
+    if (!ok) g_gridOff = true;
+    logI("view: the Transfer page's inventory back at its own place %.1f,%.1f %.0fx%.0f (%s)%s",
+         g_gridDone.orig[0], g_gridDone.orig[1], g_gridDone.orig[2], g_gridDone.orig[3],
+         why ? why : "?", ok ? "" : " - the WRITE FAILED; the grid is not moved again in this session");
+}
+
+void viewAccessorGrid(void* subWindow) {
+    if (g_gridOff || !subWindow || subWindow != g_subWindow || !g_tq.pageUiOff || !g_tq.pageSackOff)
+        return;
+    unsigned char* ui = (unsigned char*)subWindow + g_tq.pageUiOff;
+    TqSack* cur = nullptr;
+    float place[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (!safeRead(ui + g_tq.pageSackOff, &cur, sizeof(cur)) || !safeRead(ui + 0x10, place, sizeof(place))) {
+        g_gridOff = true;
+        logE("view: the Transfer page's inventory could not be read after its refresh - the grid "
+             "is not moved again in this session");
+        return;
+    }
+    if (!g_vs.on || !g_gridWant.user || !cur || cur != protoSackBuilt()) {
+        if (g_gridDone.applied) viewGridRestore(!g_vs.on ? "the view is OFF" : "the derived grid");
+        return;
+    }
+    unsigned cw = 0, ch = 0;
+    if (!protoGridReapply(cur, &cw, &ch)) return;   // the engine call: not guarded
+    // the engine's own place: what the widget holds unless it is the place written last
+    float own[2], v[4];
+    utGridWidget(g_gridDone.applied && g_gridDone.ui == ui, place, g_gridDone.wrote, g_gridDone.orig,
+                 g_gridWant.dx, g_gridWant.dy, cw, ch, g_gridWant.cols, g_gridWant.rows, own, v);
+    g_gridDone.orig[0] = own[0];
+    g_gridDone.orig[1] = own[1];
+    g_gridDone.orig[2] = place[2];   // the size the refresh has just written (16 x 15 cells)
+    g_gridDone.orig[3] = place[3];
+    if (!writeFloats(ui + 0x10, v, 4)) {
+        g_gridOff = true;
+        logE("view: the Transfer page's inventory could not be written - the grid is not moved again "
+             "in this session");
+        return;
+    }
+    g_gridDone.applied = 1;
+    g_gridDone.ui = ui;
+    for (int i = 0; i < 4; ++i) g_gridDone.wrote[i] = v[i];
+    g_gridDone.dx = g_gridWant.dx;
+    g_gridDone.dy = g_gridWant.dy;
+    g_gridDone.cols = g_gridWant.cols;
+    g_gridDone.rows = g_gridWant.rows;
+    g_gridDone.cw = cw;
+    g_gridDone.ch = ch;
+    if (g_gridSaid.applied && g_gridSaid.dx == g_gridDone.dx && g_gridSaid.dy == g_gridDone.dy &&
+        g_gridSaid.cols == g_gridDone.cols && g_gridSaid.rows == g_gridDone.rows &&
+        g_gridSaid.cw == cw && g_gridSaid.ch == ch && g_gridSaid.orig[0] == g_gridDone.orig[0] &&
+        g_gridSaid.orig[1] == g_gridDone.orig[1])
+        return;
+    g_gridSaid = g_gridDone;
+    logI("view: the collection sack is moved for the grid in force - the Transfer page's inventory "
+         "at %.1f,%.1f %.0fx%.0f (its own place %.1f,%.1f + %.1f,%.1f px), %d x %d cells of %ux%u "
+         "px; the page refresh had written %.0fx%.0f (16 x 15)",
+         v[0], v[1], v[2], v[3], g_gridDone.orig[0], g_gridDone.orig[1], g_gridDone.dx, g_gridDone.dy,
+         g_gridDone.cols, g_gridDone.rows, cw, ch, place[2], place[3]);
+}
+
 TqSack* viewGetterResult(TqSack* real) {
     if (!utViewSubstitute(InterlockedCompareExchange(&g_inAccessor, 0, 0) != 0, g_vs.on,
                           g_vs.mode, g_vs.world, g_vs.mpUnknown))
@@ -627,8 +819,10 @@ TqSack* viewGetterResult(TqSack* real) {
     TqSack* mod = protoSackBuilt();
     const int n = protoCount();
     // an empty OWN page keeps the MOD sack on the page (ut_viewgate.h).
+    // the layout editor's empty page too (its items hidden while it is open)
     const bool emptyByDesign =
-        n == 0 && InterlockedCompareExchange(&g_emptyByDesign, 0, 0) != 0 && liveEmptyPageOk();
+        n == 0 && InterlockedCompareExchange(&g_emptyByDesign, 0, 0) != 0 &&
+        (liveEmptyPageOk() || InterlockedCompareExchange(&g_editHid, 0, 0) != 0);
     return utViewGetterPicksMod(mod != nullptr, n, emptyByDesign) ? mod : real;
 }
 
@@ -844,6 +1038,11 @@ bool viewRefuseSort(const TqSack* s) {
 
 bool viewIsModSack(const void* s) { return protoIsModSack(s); }
 
+bool viewRealPageSite(const TqSack* s, const void* ret) {
+    if (!s || g_vs.on || protoIsModSack(s) || s != realTransfer()) return false;
+    return ret == g_tq.retRightClick || ret == g_tq.retHeldPickup || ret == g_tq.retLeftClick;
+}
+
 bool viewRefuseTransferAdd() {
     if (!viewOn()) return false;
     InterlockedIncrement(&g_refAdd);
@@ -919,6 +1118,12 @@ const char* stackText(unsigned n, char* buf, unsigned cap) {
     return buf;
 }
 
+// kUtDepRefuseHave of a monster infrequent: the reason names the roll the collection holds
+// (record, item level, prefix, suffix, seed). "" for every other record.
+const char* miRollWhy(const char* record, char* buf, size_t cap) {
+    return utMiRollWhy(liveMiTable(), record, buf, cap);
+}
+
 // `detail` carries the raw facts (Item::GetNumberInStack, the stacked-id vector).
 unsigned g_haveSaidId = 0;    // the item id whose "already in the collection" line was said
 void sayRefusal(const char* gesture, int why, const char* record, const char* detail,
@@ -932,9 +1137,11 @@ void sayRefusal(const char* gesture, int why, const char* record, const char* de
         }
         g_haveSaidId = itemId;
         g_lastRefusalSaid = why;
-        logI("%s REFUSED - %s: %s [%s, %u row(s) of it]; the item was not touched", gesture,
+        char roll[640];
+        miRollWhy(record, roll, sizeof(roll));
+        logI("%s REFUSED - %s: %s [%s, %u row(s) of it]%s%s; the item was not touched", gesture,
              utDepositWhyText(why), record ? record : "?", detail ? detail : "",
-             record ? storeCount(record) : 0u);
+             record ? storeCount(record) : 0u, roll[0] ? " - " : "", roll);
         return;
     }
     if (why == g_lastRefusalSaid) {
@@ -990,8 +1197,24 @@ void baseFacts(UtDepositFacts* f, int caller) {
     f->mp = isMultiplayer(&known);
     f->mpKnown = known;
     f->mpCollect = g_cfg.mpCollect != 0;   // GD's rule (utMpMoves)
+    f->pristineOnly = g_cfg.collectPristineOnly != 0;   // GD's collect_pristine_only
     f->tableOwns = storeTableOwns();
     f->bindings = depositBindings(caller == kUtDepCallerDrag);
+}
+
+// collect_pristine_only: the captured identity's parts beyond its record (utPartsPristine).
+// `why` names the first one found; "" when the item is pristine or nothing was captured.
+void pristineFacts(UtDepositFacts* f, const UtReplicaCapture& cap, char* why, size_t whyCap) {
+    why[0] = 0;
+    if (!f->haveCap) return;
+    const char* parts[kUtIdStrCount - 1];
+    const char* names[kUtIdStrCount - 1];
+    for (int i = kUtIdPrefix; i < kUtIdStrCount; ++i) {
+        parts[i - 1] = cap.str[i];
+        names[i - 1] = kUtIdStrKey[i];
+    }
+    f->notPristine =
+        !utPartsPristineKind(parts, names, kUtIdStrCount - 1, f->relicKind, why, whyCap);
 }
 
 // One walk: the object of `id`, its folded record, its stack, whether the record is collectable.
@@ -1005,7 +1228,82 @@ void itemFacts(unsigned id, unsigned ctrlId, const void** item, const void** ctr
     *isItem = true;
     *stack = protoStackCount(*item);   // through the object's own vftable slot
     protoObjectRecord(*item, name, nameCap);
-    *inCat = name[0] && liveHasRecord(name);
+    *inCat = name[0] && (liveHasRecord(name) || liveRelicFind(name) >= 0);
+}
+
+// A relic or charm of the relic list (any number of rows; routed by its capture). Sets the
+// gate's kind and, once the capture is read, its route. An accepted route gets the DEBUG relic
+// line; a refused one gets none - its facts go into `refusal` for the deposit's ONE REFUSED line
+// (as a refused unique has one line).
+bool relicFacts(UtDepositFacts* f, const char* name) {
+    f->relicKind = name[0] && liveRelicFind(name) >= 0;
+    return f->relicKind;
+}
+
+void relicRouteFacts(UtDepositFacts* f, const UtReplicaCapture& cap, const char* name,
+                     char* refusal, size_t refusalCap) {
+    if (refusal && refusalCap) refusal[0] = 0;
+    if (!f->relicKind || !f->haveCap) return;
+    unsigned shards = 0;
+    const char* const* table = nullptr;
+    int tableN = 0, bonusIndex = -1;
+    if (!liveRelicFacts(name, &shards, nullptr, &table, &tableN)) return;
+    f->relicRoute = utRelicRoute(cap.var1, shards, cap.str[kUtIdRelicBonus], table, tableN,
+                                 &bonusIndex);
+    if (!utRelicRouteAccepted(f->relicRoute)) {
+        utRelicRefusalFacts(refusal, refusalCap, cap.var1, shards, cap.str[kUtIdRelicBonus],
+                            cap.seed);
+        return;
+    }
+    char tail[320], line[1024];
+    utRelicRouteTail(f->relicRoute, bonusIndex >= 0 && table ? table[bonusIndex] : "", tail,
+                     sizeof(tail));
+    utRelicDebugLine(line, sizeof(line), name, cap.var1, shards, cap.str[kUtIdRelic],
+                     cap.str[kUtIdRelicBonus], cap.seed, tail);
+    logD("%s", line);
+}
+
+// The take written to the journal before the prototype leaves (G7). A unique's place: today's
+// take of its row. A relic place: the green slot's row whole (journalTakeRow), the red slot's ONE
+// shard (journalTakeShard: `*held` = the row of the shard handed out, which the cursor then
+// holds). A stale relic page is refused and rebuilt. The red take's DEBUG relic line reads the
+// prototype back (protoCapture) before it is handed out.
+bool takeOnDisk(unsigned id, const char* record, unsigned long long seq, unsigned long long* held) {
+    int slot = 0;
+    const bool haveSlot = protoSlotOf(id, &slot);
+    const UtRelicTakeCall call = utRelicTakeCallOf(haveSlot, slot);
+    *held = seq;
+    if (call == kUtRelicTakeUnique) return storeOnTake(record, seq);
+    bool taken = false;
+    if (call == kUtRelicTakeShard) {
+        unsigned long long outSeq = 0;
+        unsigned left = 0;
+        taken = storeOnTakeShard(record, seq, &outSeq, &left);
+        *held = utRelicTakeHeld(call, taken, seq, outSeq);
+        if (taken) {
+            static UtReplicaCapture cap;   // ~2 KB: kept off the engine's stack
+            memset(&cap, 0, sizeof(cap));
+            const void* item = nullptr;
+            char capName[256], tail[96], line[1024];
+            unsigned st = 0, shards = 0;
+            if (protoFindObjects(id, 0, &item, nullptr) && item &&
+                protoCapture(item, &cap, capName, sizeof(capName), &st)) {
+                liveRelicFacts(record, &shards, nullptr, nullptr, nullptr);
+                utRelicShardTail(seq, left, tail, sizeof(tail));
+                utRelicDebugLine(line, sizeof(line), record, cap.var1, shards, cap.str[kUtIdRelic],
+                                 cap.str[kUtIdRelicBonus], cap.seed, tail);
+                logD("%s (row %llu handed out)", line, outSeq);
+            } else {
+                logD("relic: %s - one shard of row %llu, %u left (the prototype could not be read back)",
+                     record, seq, left);
+            }
+        }
+    } else {
+        taken = storeOnTakeRow(record, seq);
+        if (taken) logD("relic: %s - row %llu taken whole (green slot %d)", record, seq, slot - 1);
+    }
+    if (utRelicTakeRebuild(call, taken)) liveMarkDirty();   // a stale relic page: rebuilt
+    return taken;
 }
 
 void afterMove() {
@@ -1034,16 +1332,20 @@ bool viewCapable(const TqCursorItemMove* handler) {
     f.inCatalogue = g_capCat;
     f.stack = g_capStack;
     f.rowsNow = g_capRows;   // one copy per record (no per-frame journal read)
+    if (g_capCat) relicFacts(&f, g_capName);   // a binary search of the list, no journal read
     const int v = utDepositCapableVerdict(f);
     // the user could not tell why nothing happened - ONE debug line per cursor id naming
     // the fact that failed (the slot is asked every frame; the line is not).
     if (v != kUtDepTable && id != g_capSaidId) {
         g_capSaidId = id;
         char sn[16];
-        logD("view: the collection page does not accept item %u%s%s as a deposit - %s "
+        char roll[640];
+        if (v == kUtDepRefuseHave) miRollWhy(g_capName, roll, sizeof(roll));
+        else roll[0] = 0;
+        logD("view: the collection page does not accept item %u%s%s as a deposit - %s%s%s "
              "(Item::GetNumberInStack %s)",
-             id, g_capName[0] ? " " : "", g_capName, utDepositWhyText(v),
-             stackText(g_capStack, sn, sizeof(sn)));
+             id, g_capName[0] ? " " : "", g_capName, utDepositWhyText(v), roll[0] ? " - " : "",
+             roll, stackText(g_capStack, sn, sizeof(sn)));
     }
     return v == kUtDepTable;
 }
@@ -1059,19 +1361,24 @@ int viewDepositDrop(TqCursorItemMove* handler) {
     char name[256] = {0};
     static UtReplicaCapture cap;   // ~2 KB: kept off the engine's stack
     memset(&cap, 0, sizeof(cap));
+    char relicWhy[400] = "";
     if (f.viewOn && f.bindings && id) {
         if (!handlerController(handler, &ctrlId)) f.bindings = false;
         itemFacts(id, ctrlId, &item, &ctrl, name, sizeof(name), &f.isItem, &f.inCatalogue,
                   &f.stack);
         if (!ctrl) f.bindings = false;
         if (f.isItem && f.inCatalogue) f.rowsNow = storeCount(name);
-        if (f.isItem && f.inCatalogue && !f.rowsNow && utStackIsSingle(f.stack)) {
+        if (f.isItem && f.inCatalogue) relicFacts(&f, name);
+        if (f.isItem && f.inCatalogue && (!f.rowsNow || f.relicKind) && utStackIsSingle(f.stack)) {
             char capName[256];
             unsigned st = 0;
             f.haveCap = protoCapture(item, &cap, capName, sizeof(capName), &st);
             f.capMatches = f.haveCap && strcmp(cap.record, name) == 0 && utStackIsSingle(st);
+            relicRouteFacts(&f, cap, name, relicWhy, sizeof(relicWhy));
         }
     }
+    char partWhy[128];
+    pristineFacts(&f, cap, partWhy, sizeof(partWhy));
     const unsigned rawStack = f.stack;
     // the engine's own drop also moves the handler's stacked ids (Game.dll 0x152623 /
     // 0x152710); the mod's SetId(0) would just empty that vector. confirmed the layout by
@@ -1091,14 +1398,15 @@ int viewDepositDrop(TqCursorItemMove* handler) {
     }
     utGuardLeave();
     if (utStackIsSingle(f.stack) && (!idsRead || idsFirst != idsLast)) f.stack = 2u;
-    char detail[160], sn[16];
+    char detail[600], sn[16];
     _snprintf_s(detail, sizeof(detail), _TRUNCATE,
-                "Item::GetNumberInStack %s, stacked ids [+0x28]=%08X [+0x2C]=%08X%s",
-                stackText(rawStack, sn, sizeof(sn)), idsFirst, idsLast,
+                "%s%sItem::GetNumberInStack %s, stacked ids [+0x28]=%08X [+0x2C]=%08X%s", relicWhy,
+                relicWhy[0] ? ", " : "", stackText(rawStack, sn, sizeof(sn)), idsFirst, idsLast,
                 idsRead ? "" : " (unreadable)");
     const int v = utDepositDecide(f);
     if (utDepositIsRefusal(v)) {
-        sayRefusal("deposit (drag-drop)", v, name, detail, id);
+        sayRefusal("deposit (drag-drop)", v, name, v == kUtDepRefuseNotPristine ? partWhy : detail,
+                   id);
         return kUtMoveRefuse;
     }
     unsigned long long seq = 0;
@@ -1142,22 +1450,32 @@ int viewDepositQuick(unsigned id) {
     char name[256] = {0};
     static UtReplicaCapture cap;
     memset(&cap, 0, sizeof(cap));
+    char relicWhy[400] = "";
     if (f.viewOn && f.bindings && id) {
         itemFacts(id, 0, &item, nullptr, name, sizeof(name), &f.isItem, &f.inCatalogue, &f.stack);
         if (f.isItem && f.inCatalogue) f.rowsNow = storeCount(name);
-        if (f.isItem && f.inCatalogue && !f.rowsNow && utStackIsSingle(f.stack)) {
+        if (f.isItem && f.inCatalogue) relicFacts(&f, name);
+        if (f.isItem && f.inCatalogue && (!f.rowsNow || f.relicKind) && utStackIsSingle(f.stack)) {
             char capName[256];
             unsigned st = 0;
             f.haveCap = protoCapture(item, &cap, capName, sizeof(capName), &st);
             f.capMatches = f.haveCap && strcmp(cap.record, name) == 0 && utStackIsSingle(st);
+            relicRouteFacts(&f, cap, name, relicWhy, sizeof(relicWhy));
         }
     }
-    char detail[96], sn[16];
-    _snprintf_s(detail, sizeof(detail), _TRUNCATE, "Item::GetNumberInStack %s",
-                stackText(f.stack, sn, sizeof(sn)));
+    char partWhy[128];
+    pristineFacts(&f, cap, partWhy, sizeof(partWhy));
+    // A refusal here leaves the item where it is and nothing else: the hook returns false to the
+    // quick-move's primary call (TQ.exe 0x107A6C), whose false branch (0x107C05) reports the click
+    // handled, so the caller (0x107461) never runs its own right-click (the item's secondary cursor
+    // handler - for a relic, the socketing cursor). The same for every kind of item.
+    char detail[512], sn[16];
+    _snprintf_s(detail, sizeof(detail), _TRUNCATE, "%s%sItem::GetNumberInStack %s", relicWhy,
+                relicWhy[0] ? ", " : "", stackText(f.stack, sn, sizeof(sn)));
     const int v = utDepositDecide(f);
     if (utDepositIsRefusal(v)) {
-        sayRefusal("deposit (quick-move)", v, name, detail, id);
+        sayRefusal("deposit (quick-move)", v, name, v == kUtDepRefuseNotPristine ? partWhy : detail,
+                   id);
         return kUtMoveRefuse;
     }
     unsigned long long seq = 0;
@@ -1288,8 +1606,12 @@ int takeDecideFor(unsigned id, const char** record, unsigned long long* seq) {
     if (t.isPrototype && *record) {
         char key[256];
         t.rows = storeCount(*record);
-        t.rowIsNewest = utJournalKey(*record, key, sizeof(key)) &&
-                        journalNewest(key, nullptr, &newest) && newest == *seq;
+        int slot = 0;
+        if (protoSlotOf(id, &slot) && slot > 0)
+            t.rowIsNewest = true;   // a relic place: the take re-checks its slot's choice
+        else
+            t.rowIsNewest = utJournalKey(*record, key, sizeof(key)) &&
+                            journalNewest(key, nullptr, &newest) && newest == *seq;
     }
     return utTakeDecide(t);
 }
@@ -1362,7 +1684,8 @@ unsigned viewTakeRightClick(const TqSack* s, unsigned id, unsigned rawId, float 
         if (room == 0 && viaMouse) playInventoryFullSound();   // not silent
         return 0;
     }
-    if (!storeOnTake(rec, seq)) {   // G7: the row is marked out on disk, or nothing happens
+    unsigned long long held = seq;
+    if (!takeOnDisk(id, rec, seq, &held)) {   // G7: the row is marked out on disk, or nothing happens
         InterlockedIncrement(&g_moveRefused);
         return 0;
     }
@@ -1370,7 +1693,7 @@ unsigned viewTakeRightClick(const TqSack* s, unsigned id, unsigned rawId, float 
     // right-click (b2; it reads the id the detour returned from [page+0x110]), 0xBFE6E on the button
     // handler's
     g_takeId = id;
-    g_takeSeq = seq;
+    g_takeSeq = held;   // a relic shard: the row of the shard handed out
     g_takeRight = true;
     protoKeep(id);   // never destroyed from now on
     return id;
@@ -1393,8 +1716,13 @@ unsigned viewTakeFilterUnder(unsigned id) {
     if (t.isPrototype && record) {
         char key[256];
         t.rows = storeCount(record);
-        t.rowIsNewest = utJournalKey(record, key, sizeof(key)) &&
-                        journalNewest(key, nullptr, &newest) && newest == seq;
+        int slot = 0;
+        if (protoSlotOf(id, &slot) && slot > 0) {
+            t.rowIsNewest = true;   // a relic place: the take re-checks its slot's choice
+        } else {
+            t.rowIsNewest = utJournalKey(record, key, sizeof(key)) &&
+                            journalNewest(key, nullptr, &newest) && newest == seq;
+        }
     }
     const int v = utTakeDecide(t);
     if (v != kUtTakeOk) {
@@ -1411,9 +1739,10 @@ unsigned viewFilterSetId(unsigned id) {
         g_takeArmedId = 0;
         const char* record = nullptr;
         unsigned long long seq = 0;
-        if (protoLookup(id, &record, &seq) && seq && viewOn() && storeOnTake(record, seq)) {
+        unsigned long long held = 0;
+        if (protoLookup(id, &record, &seq) && seq && viewOn() && takeOnDisk(id, record, seq, &held)) {
             g_takeId = id;   // G7: the take is on disk; the cursor may have the prototype now
-            g_takeSeq = seq;
+            g_takeSeq = held;   // a relic shard: the row of the shard handed out
             protoKeep(id);   // from now on this object is never destroyed
             return id;
         }
@@ -1504,6 +1833,7 @@ void viewSelectSet() {
         }
     }
     storeSelectSet(modKnown, mod, questKnown, inMain);
+    liveFollowGame();   // the game's uniquetab.state, when the set chose another game
 }
 
 void viewTakeOnCursor(TqCursorItemMove* handler, unsigned id) {
@@ -1652,8 +1982,10 @@ int viewDrawOrigin(void* page, const void* origin, int pass, float* pageX, float
         in.originY = o[1];
         in.posX = *(const float*)(pg + 0x1C);   // 0xC31AE / 0xC31B5
         in.posY = *(const float*)(pg + 0x20);
-        in.invX = *(const float*)(ui + 0x10);   // the handler's `F3 0F 10 5B 10` / `53 14`
-        in.invY = *(const float*)(ui + 0x14);
+        // less the shift of a moved collection sack: the frame is the page's, wherever the grid
+        // in force sits (viewAccessorGrid)
+        in.invX = *(const float*)(ui + 0x10) - g_gridDone.dx;   // the handler's `F3 0F 10 5B 10`
+        in.invY = *(const float*)(ui + 0x14) - g_gridDone.dy;   // / `53 14`
         if (e && g_tq.EngineGetUIScale) in.uiScale = g_tq.EngineGetUIScale(e);
         TqGraphicsEngine* gfx =
             (e && g_tq.EngineGetGraphicsEngine) ? g_tq.EngineGetGraphicsEngine(e) : nullptr;
@@ -1674,6 +2006,140 @@ int viewDrawOrigin(void* page, const void* origin, int pass, float* pageX, float
     if (cellW) *cellW = cw;
     if (cellH) *cellH = ch;
     return utDrawOrigin(in, pageX, pageY, gridX, gridY);
+}
+
+// The Transfer page's cover (TransferPlate, read by the page's loader TQ.exe 0xC2C50 into the
+// widget at page+0xE2C: TQ.exe's bitmap class, vftable rva 0x21C998). Its GraphicsTexture* sits at
+// widget+0x34 - the loader 0xB61F0 reads the texture's rect from it (0xB657D GetRect) and the
+// destructor 0xB6D70 hands whatever pointer is there to GraphicsEngine::UnloadTexture (0xB6DCB);
+// The floats at widget+0x40 / +0x44 (written at 0xB64A8 / 0xB64BC) are logged as read: in the game
+// they are not the bitmap's place (0.0,0.0 and 0.0,4.6e27 have been read there), so nothing uses
+// them. One INFO line per world, pure reads under SEH, nothing written.
+static void viewCoverRead(const void* page) {
+    const void* vt = nullptr;
+    const void* tex = nullptr;
+    float bx = 0.0f, by = 0.0f;
+    bool read = false;
+    utGuardEnter();
+    __try {
+        const unsigned char* w = (const unsigned char*)page + 0xE2C;
+        vt = *(const void* const*)w;
+        tex = *(const void* const*)(w + 0x34);
+        bx = *(const float*)(w + 0x40);
+        by = *(const float*)(w + 0x44);
+        read = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        read = false;
+    }
+    utGuardLeave();
+    if (!read) {
+        logW("view: the Transfer page's cover could not be read (page+0xE2C) - no cover line in this world");
+        return;
+    }
+    const unsigned char* exe = (const unsigned char*)GetModuleHandleA(nullptr);
+    const bool shape = exe && vt == (const void*)(exe + 0x21C998);
+    logI("view: the Transfer page's cover at page+0xE2C: vftable %p (%s TQ.exe's bitmap class +0x21C998), "
+         "texture [+0x34] %p, the widget's +0x40/+0x44 %.1f,%.1f",
+         vt, shape ? "=" : "NOT", tex, bx, by);
+}
+
+// The caravan geometry, derived (the game's uniq-geometry.txt, liveCaravanGeometry) against
+// measured (the numbers the Transfer page draw places its inventory with, and the REAL Transfer
+// sack's cell count: InventorySack +0x20 / +0x24, which SetDims writes - Game.dll 0x1B5790), one
+// line at the first Transfer page draw of each world. The widget's size [widget+0x18 / +0x1C] is
+// logged too: TQ.exe writes cellW x 16 / cellW x 15 there whenever the page is shown (0xC2F50).
+// Pure reads under SEH; the engine getters outside the guarded frame; nothing allocated. Said
+// whether the tab is on or off in the game: with no derived geometry (a game whose set carries no
+// uniq-geometry.txt) the line gives the measured place only.
+void viewGeometryCheck(void* page, int pass) {
+    static unsigned s_saidWorld = 0xFFFFFFFFu;
+    const unsigned world = viewWorldGeneration();
+    if (s_saidWorld == world || pass == 1) return;
+    if (!page || page != g_subWindow || !g_tq.pageUiOff) return;
+    UtCaravanGeo d;
+    const bool derived = liveCaravanGeometry(&d);
+    if (!derived) d = utCaravanGeoBase();   // the measured numbers only (utCaravanGeoAgree's mx, my)
+    static unsigned s_coverWorld = 0xFFFFFFFFu;
+    if (s_coverWorld != world) {   // the cover's inputs, once per world
+        s_coverWorld = world;
+        viewCoverRead(page);
+    }
+    UtCaravanMeasure m;
+    memset(&m, 0, sizeof(m));
+    TqSack* real = realTransfer();
+    float ww = 0.0f, wh = 0.0f;
+    bool read = false;
+    utGuardEnter();
+    __try {
+        const unsigned char* pg = (const unsigned char*)page;
+        const unsigned char* ui = pg + g_tq.pageUiOff;
+        m.pageX = *(const float*)(pg + 0x1C);
+        m.pageY = *(const float*)(pg + 0x20);
+        m.invX = *(const float*)(ui + 0x10) - g_gridDone.dx;   // the engine's own place
+        m.invY = *(const float*)(ui + 0x14) - g_gridDone.dy;
+        ww = *(const float*)(ui + 0x18);
+        wh = *(const float*)(ui + 0x1C);
+        if (real) {
+            m.gridW = *(const int*)((const unsigned char*)real + 0x20);
+            m.gridH = *(const int*)((const unsigned char*)real + 0x24);
+        }
+        read = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        read = false;
+    }
+    utGuardLeave();
+    if (!read) {
+        s_saidWorld = world;
+        logE("view: the caravan geometry could not be measured (a fault reading the Transfer page) - "
+             "not measured again in this world");
+        return;
+    }
+    TqEngine* e = engine();
+    bool downsizing = true;
+    if (e && g_tq.EngineGetUIScale) m.uiScale = g_tq.EngineGetUIScale(e);
+    TqGraphicsEngine* gfx =
+        (e && g_tq.EngineGetGraphicsEngine) ? g_tq.EngineGetGraphicsEngine(e) : nullptr;
+    if (gfx && g_tq.GfxIsDownsizing) downsizing = g_tq.GfxIsDownsizing(gfx);
+    if (downsizing || !real) {
+        // Said once per world with the reason; the inventory place is scaled while downsized.
+        s_saidWorld = world;
+        if (!derived)
+            logI("view: caravan geometry - derived: none (this game's set has no uniq-geometry.txt); "
+                 "not measured in this world: %s",
+                 !real ? "the real Transfer sack is not known"
+                 : (gfx && g_tq.GfxIsDownsizing) ? "the UI is downsized (the inventory place is scaled)"
+                                                 : "GraphicsEngine::IsDownsizing is not bound");
+        else
+        logI("view: caravan geometry - derived %d,%d %dx%d = %d x %d cells (the game's database); "
+             "not measured in this world: %s", d.x0, d.y0, d.w, d.h, d.cols, d.rows,
+             !real ? "the real Transfer sack is not known"
+             : (gfx && g_tq.GfxIsDownsizing) ? "the UI is downsized (the inventory place is scaled)"
+                                             : "GraphicsEngine::IsDownsizing is not bound");
+        return;
+    }
+    float mx = 0.0f, my = 0.0f;
+    const int r = utCaravanGeoAgree(d, m, &mx, &my);
+    if (r == kUtGeoUnusable) return;
+    s_saidWorld = world;
+    if (!derived)
+        logI("view: caravan geometry - derived: none (this game's set has no uniq-geometry.txt); "
+             "measured %.0f,%.0f (the Transfer page at %.0f,%.0f + its inventory at %.1f,%.1f / UI "
+             "scale %.3f), the Transfer sack %d x %d cells, its widget %.0fx%.0f",
+             mx, my, m.pageX, m.pageY, m.invX, m.invY, m.uiScale, m.gridW, m.gridH, ww, wh);
+    else if (r == kUtGeoAgree)
+        logI("view: caravan geometry - derived %d,%d %dx%d = %d x %d cells (the game's database); "
+             "measured %.0f,%.0f (the Transfer page at %.0f,%.0f + its inventory at %.1f,%.1f / UI "
+             "scale %.3f), the Transfer sack %d x %d cells, its widget %.0fx%.0f - they agree",
+             d.x0, d.y0, d.w, d.h, d.cols, d.rows, mx, my, m.pageX, m.pageY, m.invX, m.invY, m.uiScale,
+             m.gridW, m.gridH, ww, wh);
+    else
+        logW("view: caravan geometry - derived %d,%d %dx%d = %d x %d cells (the game's database); "
+             "measured %.0f,%.0f (the Transfer page at %.0f,%.0f + its inventory at %.1f,%.1f / UI "
+             "scale %.3f), the Transfer sack %d x %d cells, its widget %.0fx%.0f - they DIFFER; the "
+             "measured place is the one in force (the grid, the pad and the layout editor are laid on "
+             "the engine's Transfer sack, the database's grid place is not used)",
+             d.x0, d.y0, d.w, d.h, d.cols, d.rows, mx, my, m.pageX, m.pageY, m.invX, m.invY, m.uiScale,
+             m.gridW, m.gridH, ww, wh);
 }
 
 const char* viewStatus() { return g_status; }

@@ -12,8 +12,10 @@ if errorlevel 1 (echo [test] no x86 C++ toolchain - see the message above & exit
 call "%VCVARS%" >nul
 :have_env
 
+if not defined TQ_GAME_DIR for /f "usebackq delims=" %%d in (`python "%ROOT%\tools\tqpath.py"`) do set "TQ_GAME_DIR=%%d"
 cl /nologo /W4 /WX /EHsc /std:c++17 /GR- /MT /O2 /DNDEBUG /D_CRT_SECURE_NO_WARNINGS ^
-   /Fo"%OUT%\\" /Fe"%OUT%\test_viewgate.exe" "%ROOT%\tools\test_viewgate.cpp"
+   /I"%ROOT%\src" /Fo"%OUT%\\" /Fe"%OUT%\test_viewgate.exe" "%ROOT%\tools\test_viewgate.cpp" ^
+   "%ROOT%\src\gen\inflate.cpp" "%ROOT%\src\gen\arz_reader.cpp" "%ROOT%\src\gen\arc_reader.cpp"
 if errorlevel 1 (echo [test] BUILD FAILED & exit /b 1)
 
 "%OUT%\test_viewgate.exe" > "%OUT%\test_viewgate.out.txt" 2>&1

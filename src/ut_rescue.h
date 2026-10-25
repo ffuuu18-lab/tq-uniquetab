@@ -35,9 +35,14 @@
 
 #include <stddef.h>
 
+#include <string>
+#include <vector>
+
 #include "ut_ownedfold.h"
 
 namespace ut {
+
+struct UtRelicRowFacts;   // ut_relicroute.h
 
 // The seven strings of the replica, in replica order (+0x04 .. +0x9C).
 enum UtIdString {
@@ -129,9 +134,14 @@ inline bool utJournalKey(const char* baseName, char* out, size_t cap) {
 }
 bool utCaptureValid(const UtReplicaCapture& cap, char* why, size_t whyCap);
 
-// Resolves the mod folder (%UNIQUETAB_OUT% first). Opens NO file: the set is not known before a
-// world exists. Safe to call twice.
-bool journalInit(HMODULE selfModule);
+// Resolves the journals' folder: `journalDir` (the ini key journal_dir, GD's) when it names an
+// existing folder, else the mod folder (%UNIQUETAB_OUT% first). Read ONCE, here: a journal that
+// could move under a running game would be a footgun. Opens NO file: the set is not known before
+// a world exists. Safe to call twice.
+bool journalInit(HMODULE selfModule, const char* journalDir = nullptr);
+// The folder journalInit chose (journal_dir or the mod folder); "" before it ran. A mod's set is
+// under its mods\<leaf>\ (ut_folders.h utJournalSetRel).
+const char* journalFolder();
 
 // At world load (game thread): flush and close the open set, then open `leaf` ("tq-uniq-items"
 // or "tq-uniq-items-<mod>" or "tq-uniq-items-custom"; ".jsonl" / ".csv" are appended). An empty
@@ -147,8 +157,11 @@ bool journalInit(HMODULE selfModule);
 // save of this session); only a find (present) erases it later. An unresolved "in" row still
 // pending at a character save gets today's WARN, then that save settles it (journalSaveObserved).
 // false = today's rule at the open (the offline tests).
+// `folderRel`: the set's folder under the mod folder - "mods\<leaf>" for a mod's set
+// (ut_folders.h utJournalSetRel), null or "" for the root.
 bool journalOpenSet(const char* leaf, unsigned long long saveTime = 0,
-                    unsigned long long processStart = 0, bool defer = false);
+                    unsigned long long processStart = 0, bool defer = false,
+                    const char* folderRel = nullptr);
 bool journalSetKnown();
 const char* journalSetLeaf();
 
@@ -168,6 +181,9 @@ bool journalFlushNow();
 // Rows of `key` in the collection (taken-pending rows are not). 0 without a set. No allocation.
 unsigned int journalRows(const char* key);
 unsigned int journalCollectedTotal();   // every row in the collection
+// The distinct keys of the rows in the collection (taken-pending rows are not), copied under the
+// lock so the caller looks them up after it is released. Empty without a set.
+void journalHeldKeys(std::vector<std::string>* out);
 size_t journalCount();                  // every row in the file (taken-pending included)
 // The NEWEST row of `key` in the collection (the prototype is built from it; a take removes it).
 // `seq` identifies the row for journalTakeCommit. False = none.
@@ -181,6 +197,29 @@ bool journalDepositCommit(const UtReplicaCapture& cap, unsigned long long* seqOu
 // THE TAKE'S step: row `seq` must be the newest in-collection row of `key`; it is marked taken
 // ("pending":"out", it no longer counts) and the file is written. On failure the mark is undone.
 bool journalTakeCommit(const char* key, unsigned long long seq, bool* rolledBack);
+
+// ---- the relic and charm rows (several rows of one record; ut_relicroute.h decides) -----------
+// The identity of row `seq` (any state); `pending` (may be null) gets 0 settled, 1 "in", 2 "out".
+// False = no such row.
+bool journalRowBySeq(unsigned long long seq, UtReplicaCapture* out, int* pending);
+// The facts of every row of `key` (pending out included, file order), up to `cap` copied into
+// `out` under the lock (no allocation). Returns how many rows the key has.
+size_t journalRowsOf(const char* key, UtRelicRowFacts* out, size_t cap);
+// A WHOLE take of row `seq` of a relic / charm key: the row must be the one its slot hands out NOW
+// (utRelicGreenChoice for a completed row, utRelicShardSource with no split for a partial one),
+// else the page is stale and nothing changes. Then today's take: a settled row becomes "out", a
+// row pending in is erased. On a failed write the pre-image is put back.
+bool journalTakeRow(const char* key, unsigned long long seq, bool* rolledBack);
+// The red slot's take of ONE shard, in one all-or-nothing write. Row `seq` must be the record's
+// shard source now (utRelicShardSource), else the page is stale and nothing changes. A 1-shard
+// source is taken whole (journalTakeRow's rule; *outSeq = seq). A source of k >= 2 shards is
+// SPLIT: it keeps its seq, state and identity with var1 = k - 1 (a row pending in also records
+// "depositedVar1" = k, the count the character file still holds, unless it has one), and a new
+// row of the same identity with var1 = 1 is appended "pending out" (deposited = the source's,
+// taken = now): *outSeq = its seq, the row of the shard handed out. *left = the source's shards
+// after the take (0 for a whole take).
+bool journalTakeShard(const char* key, unsigned long long seq, unsigned long long* outSeq,
+                      unsigned* left, bool* rolledBack);
 
 // ---- the crash window -----------------------------------------------------------------------
 // A character save was observed with the given last-write time (FILETIME ticks): every "in" row
@@ -238,6 +277,10 @@ void journalSetCsvExport(bool on) = delete;
 const char* journalPath();
 const char* journalCsvPath();
 long journalWrites();
+// The CSV's relic cells: `fn(key)` answers a relic / charm record's tier (0..3) and shards N; a
+// record it does not know (a unique) gets two empty cells. Null = every row's cells are empty.
+typedef bool (*UtRelicCellsFn)(const char* key, int* tier, unsigned* shards);
+void journalSetRelicCells(UtRelicCellsFn fn);
 long journalCsvWrites();
 
 }  // namespace ut

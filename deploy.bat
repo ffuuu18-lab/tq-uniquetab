@@ -32,9 +32,9 @@ rem letter and no user folder is written down anywhere in this file.
 set "GAME=%ARG%"
 if not defined GAME set "GAME=%TQ_GAME_DIR%"
 if not defined GAME (
-    for /f "usebackq tokens=2,*" %%A in (`reg query "HKCU\Software\Valve\Steam" /v SteamPath 2^>nul ^| find "SteamPath"`) do set "STEAM=%%B"
+    for /f "usebackq tokens=2,*" %%A in (`reg query "HKCU\Software\Valve\Steam" /v SteamPath 2^>nul ^| %SystemRoot%\System32\find.exe "SteamPath"`) do set "STEAM=%%B"
     if not defined STEAM (
-        for /f "usebackq tokens=2,*" %%A in (`reg query "HKCU\Software\Valve\Steam" /v InstallPath 2^>nul ^| find "InstallPath"`) do set "STEAM=%%B"
+        for /f "usebackq tokens=2,*" %%A in (`reg query "HKCU\Software\Valve\Steam" /v InstallPath 2^>nul ^| %SystemRoot%\System32\find.exe "InstallPath"`) do set "STEAM=%%B"
     )
     if defined STEAM (
         set "STEAM=!STEAM:/=\!"

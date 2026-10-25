@@ -1,4 +1,5 @@
 #include "layout.h"
+#include "../gen/ut_groups.h"   // the G line (GD's formatGLine / parseGLine)
 #include "../ut_rowmath.h"   // GD's row arithmetic, verbatim
 
 #include <algorithm>
@@ -458,22 +459,23 @@ bool toInt(const std::string& s, int* v) {
     return true;
 }
 
-// the G line's cols / rows / cellW / cellH must be the slot of its entries (a group with no
-// entry has no slot; its geometry is not checked).
-bool slotMatches(const GroupList& g) {
+// the G line's cols / rows / cellW / cellH must be the slot of its entries on the game's area
+// (a group with no entry has no slot; its geometry is not checked).
+bool slotMatches(const GroupList& g, int hostCols, int hostRows) {
     if (g.entries.empty()) return true;
     std::vector<PackItem> items;
     items.reserve(g.entries.size());
     for (const GroupEntry& e : g.entries) items.push_back(PackItem{0, e.w, e.h});
     SlotGeometry s;
-    if (!slotOf(items, kHostCols, kHostRows, &s)) return false;
+    if (!slotOf(items, hostCols, hostRows, &s)) return false;
     return g.cols == s.cols && g.rows == s.rows && g.cellW == s.w * kCellPx &&
            g.cellH == s.h * kCellPx;
 }
 
 }  // namespace
 
-bool parseGroupsText(const std::string& text, std::vector<GroupList>* out, std::string* error) {
+bool parseGroupsText(const std::string& text, std::vector<GroupList>* out, std::string* error,
+                     int hostCols, int hostRows) {
     out->clear();
     std::vector<std::string> f;
     std::size_t pos = 0;
@@ -495,17 +497,21 @@ bool parseGroupsText(const std::string& text, std::vector<GroupList>* out, std::
         if (f[0] == "G") {
             int n = 0;
             GroupList g;
-            if (f.size() != 8 || !toInt(f[7], &n) || f[2].empty() || !toInt(f[3], &g.cols) ||
-                !toInt(f[4], &g.rows) || !toInt(f[5], &g.cellW) || !toInt(f[6], &g.cellH))
+            utg::GLine gl;   // either form: 7 fields after G, or 9 with the id and the tag
+            if ((f.size() != 8 && f.size() != 10) || !toInt(f[7], &n) || f[2].empty() ||
+                !toInt(f[3], &g.cols) || !toInt(f[4], &g.rows) || !toInt(f[5], &g.cellW) ||
+                !toInt(f[6], &g.cellH) || !utg::parseGLine(line, gl))
                 return fail("bad G line");
             if (!out->empty()) {
                 if (static_cast<int>(out->back().entries.size()) != out->back().declared)
                     return fail("the previous group's E count differs from its G line");
-                if (!slotMatches(out->back()))
+                if (!slotMatches(out->back(), hostCols, hostRows))
                     return fail("the previous group's G geometry is not its entries' slot");
             }
             g.label = f[2];
             g.declared = n;
+            g.id = gl.id;
+            g.tag = gl.tag;
             out->push_back(g);
         } else if (f[0] == "E") {
             GroupEntry e;
@@ -526,8 +532,40 @@ bool parseGroupsText(const std::string& text, std::vector<GroupList>* out, std::
     }
     if (static_cast<int>(out->back().entries.size()) != out->back().declared)
         return fail("the last group's E count differs from its G line");
-    if (!slotMatches(out->back()))
+    if (!slotMatches(out->back(), hostCols, hostRows))
         return fail("the last group's G geometry is not its entries' slot");
+    return true;
+}
+
+bool readGameGroups(const std::string& text, int hostCols, int hostRows,
+                    std::vector<GroupList>* lists, std::vector<PackedGroup>* packed,
+                    std::string* error) {
+    packed->clear();
+    if (hostCols < 1 || hostRows < 1) {
+        if (error) *error = "the game's area is " + std::to_string(hostCols) + " x " +
+                            std::to_string(hostRows) + " cells";
+        lists->clear();
+        return false;
+    }
+    if (!parseGroupsText(text, lists, error, hostCols, hostRows)) return false;
+    packed->resize(lists->size());
+    std::vector<PackItem> items;
+    for (std::size_t i = 0; i < lists->size(); ++i) {
+        const GroupList& l = (*lists)[i];
+        items.clear();
+        for (std::size_t k = 0; k < l.entries.size(); ++k)
+            items.push_back(PackItem{static_cast<int>(k), l.entries[k].w, l.entries[k].h});
+        PackedGroup& p = (*packed)[i];
+        p.pages = packSlots(items, hostCols, hostRows, &p.placed, &p.slot);
+        if (p.pages < 1 && !(p.pages == 0 && items.empty())) {   // a group with no E line: no page
+            if (error)
+                *error = "group " + l.label + " cannot be packed into " + std::to_string(hostCols) +
+                         " x " + std::to_string(hostRows) + " pages";
+            lists->clear();
+            packed->clear();
+            return false;
+        }
+    }
     return true;
 }
 

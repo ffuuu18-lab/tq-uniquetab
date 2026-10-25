@@ -16,12 +16,16 @@
 
 #include "hooks.h"
 #include "tq_runtime.h"
+#include "ut_generate.h"
 #include "ut_live.h"
+#include "ut_mem.h"
 #include "ut_store.h"
+#include "ut_threads.h"
 #include "ut_tooltip.h"
 #include "ut_view.h"
 #include "ut_bindings.h"
 #include "ut_config.h"
+#include "ut_panel.h"
 #include "ut_generate.h"
 #include "ut_log.h"
 #include "ut_paths.h"
@@ -157,28 +161,45 @@ DWORD WINAPI workerMain(LPVOID) {
     // asks for debug is asking for exactly that start-up detail.
     ut::configReload(kIniPath);
     ut::logI("settings file = \"%S\" (re-read once a second)", kIniPath);
+    ut::memSay("the DLL is loaded", false);
     ut::logD("worker thread started");
+    ut::logI("threads: stack reserves - the worker %lu KB, the start-up builds %lu KB, the layout plates' "
+             "painter %lu KB, the log flusher %lu KB (a thread without its own size reserves TQ.exe's %lu KB)",
+             ut::kUtStackWorker / 1024, ut::kUtStackBuilds / 1024, ut::kUtStackPainter / 1024,
+             ut::kUtStackFlusher / 1024, ut::kUtStackDefault / 1024);
+    // The build arena, before the engine fills the address space: reserved only when a start-up
+    // build is due (ut_generate.h), released when the builds end or on the way out below.
+    ut::generateArenaReserve(g_selfModule);
 
     if (!ut::waitForGameModules(60000)) {
         ut::logE("the mod is OFF: Engine.dll and Game.dll never loaded");
+        ut::generateArenaRelease("the mod is off");
         return 1;
     }
     if (!ut::resolveExports()) {
         ut::logE("the mod is OFF: this build does not match the game - required exports missing");
+        ut::generateArenaRelease("the mod is off");
         return 2;
     }
 
     // The generated data files. Runs here, on the worker, before every loader reads them and
     // before any hook exists: a first launch or a game update costs a few seconds, once.
     ut::generateEnsure(g_selfModule);
+    // Every installed custom game's set, on a thread of its own from here on: the hooks below are
+    // installed meanwhile, so an entry into a custom game during those seconds waits for them.
+    ut::generateGamesStart(g_selfModule);
+    // the nine fonts of Resources\Fonts.arc: their code points and advances for the text measure,
+    // read once here, before any hook can draw (the file bytes are freed again)
+    ut::panelFontsRead();
 
     // The DECODED and SIGNATURE rows: the offsets out of the getters' own bytes, the vftable
     // slots found by address, the two counted TQ.exe signatures. Must run BEFORE the gate, which
     // treats an early row that never reported as a failure.
     ut::decodeBindings();
 
-    // the collection page's group table (uniq-groups.txt, just generated), packed into
-    // 16 x 15 pages of uniform slots. A failure only makes the view unavailable; the mod runs on.
+    // the collection page's group table (uniq-groups.txt, just generated), read and packed on
+    // the game's own area (its uniq-geometry.txt P line) into pages of uniform slots. A failure
+    // turns the tab off in this game only (viewInit says so); the mod runs on.
     ut::liveInit(g_selfModule);
     // the journal (ut_rescue, TQ-1) - the folder only; the save set is chosen at the first world.
     ut::storeInit(g_selfModule);
@@ -219,6 +240,7 @@ DWORD WINAPI workerMain(LPVOID) {
         const DWORD w = WaitForMultipleObjects(waitCount, waits, FALSE, 1000);
         if (w == WAIT_OBJECT_0) break;
         ut::configReload(kIniPath);
+        ut::panelButtonsPoll();   // uniquetab-buttons.ini of the game in force
         ut::hookLateLoadTick(false);
         ut::hookSayCounts();
         ut::storeWorkerTick();
@@ -297,7 +319,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             }
 
             g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-            g_worker = CreateThread(nullptr, 0, workerMain, nullptr, 0, nullptr);
+            g_worker = CreateThread(nullptr, ut::kUtStackWorker, workerMain, nullptr,
+                                    STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
             if (!g_worker) {
                 ut::logE("FATAL: CreateThread for the worker failed, err=%lu", GetLastError());
             }

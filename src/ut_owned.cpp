@@ -15,6 +15,8 @@
 #include <string.h>
 
 #include <algorithm>
+#include <string>
+#include <vector>
 
 #include "hooks.h"   // the cost meter (probeScan)
 #include "tq_runtime.h"
@@ -26,17 +28,34 @@
 #include "ut_padlayout.h"
 #include "ut_panel.h"
 #include "ut_proto.h"
+#include "ut_rescue.h"   // journalHeldKeys
 #include "ut_search.h"   // utSackMapWalk
 #include "ut_store.h"
 #include "ut_viewgate.h"   // utBackgroundSkip
+#include "ut_reliclook.h"   // utRelicProtoLit
+#include "ut_relicpage.h"   // utRelicHaveKey (the green slot's have-mark)
+#include "ut_tooltip.h"     // tooltipReplicaOffset
 
 namespace ut {
 namespace {
 
-const int kIdCap = 8192;       // item ids in the stores + the inventory
-const int kOwnedCap = 8192;    // distinct owned records (hashes)
+const int kIdCap = 32768;       // item ids in the stores + the inventory
+const int kOwnedCap = 32768;    // distinct owned records (hashes)
 const int kKeyCap = 300;       // a folded record path
-const int kGridCols = kUtGridCols, kGridRows = kUtGridRows;
+// The owned marks' cell table holds the grid in force's cells (16 x 15, or the player's grid_
+// rectangle's whenever its line is set - ut_live liveGridCells), at most kGridColsMax x
+// kGridRowsMax. The marks are drawn on the collection page only (the view ON).
+const int kGridColsMax = 64, kGridRowsMax = 64;
+int gridCols() {
+    int c = kUtGridCols, r = kUtGridRows;
+    liveGridCells(&c, &r);
+    return c < 1 ? 1 : c > kGridColsMax ? kGridColsMax : c;
+}
+int gridRows() {
+    int c = kUtGridCols, r = kUtGridRows;
+    liveGridCells(&c, &r);
+    return r < 1 ? 1 : r > kGridRowsMax ? kGridRowsMax : r;
+}
 
 unsigned g_ids[kIdCap];         // the store ids (Transfer, Stash, Relic Vault), sorted
 int g_idCount = 0;
@@ -68,6 +87,8 @@ int g_groupOwned = 0, g_groupTotal = 0;
 // its row total) or on a refresh, never per frame
 int g_allOwned = 0, g_allTotal = 0;
 bool g_allKnown = false, g_allSeen = false;
+int g_notShown = 0;   // collected records no page shows (the label's "+N not on these pages")
+int g_heldMi = -1;    // collected monster infrequents (the heartbeat's mi=), -1 = unknown
 unsigned g_allRows = 0;
 char g_allLeaf[272] = "";
 
@@ -86,7 +107,8 @@ int g_unveil = -1;             // the prototype whose slot the cursor is on (not
 // the marks are drawn from the Present detour, AFTER the engine's tooltip, so they
 // are hidden while a tooltip is likely open: the cursor is on the measured grid and either on a
 // cell a prototype covers (g_occ) or the last proven hover returned an item (g_hoverId).
-char g_occ[kGridRows][kGridCols];
+char g_occ[kGridRowsMax][kGridColsMax];
+char g_pageRelic[kUtProtoMax];   // prototype i is a relic page slot (its marks: utRelicProtoLit)
 volatile LONG g_hoverId = 0;
 
 char g_status[160] = "owned=unknown";
@@ -146,12 +168,38 @@ int inventoryIds() {
 bool sortedHas(const unsigned* a, int n, unsigned v) { return std::binary_search(a, a + n, v); }
 
 // the primary mark is the journal's ROW COUNT (GD's meaning: collected = bright).
-bool collected(const char* record) { return record && storeCount(record) > 0; }
+// A relic / charm gets no mark from its record's rows: its marks are keyed by (record, bonus).
+bool collected(const char* record) {
+    if (!record || storeCount(record) <= 0) return false;
+    char key[kKeyCap];
+    return !(utOwnedNormaliseKey(record, key, sizeof(key)) && liveRelicFind(key) >= 0);
+}
 
 bool ownsKey(const char* record) {
     char key[kKeyCap];
     if (!utOwnedNormaliseKey(record, key, sizeof(key))) return false;
     return std::binary_search(g_owned, g_owned + g_ownedCount, utOwnedRowHash(key, 1));
+}
+
+// A carried relic or charm: its (record, bonus) key from the item's own replica (the bonus string at
+// the decoded offset). PURE READS of engine memory only, inside the caller's frame; `out` stays ""
+// for a partial piece (no bonus) or a string that does not read.
+void relicHaveRead(const void* obj, unsigned rr, const char* key, char* out, size_t cap) {
+    char bonus[kUtRelicBonusMax];
+    const unsigned char* rep = (const unsigned char*)obj + rr;
+    if (!utVsStringGet(rep + kUtReplicaStr[kUtIdRelicBonus], bonus, (unsigned)sizeof(bonus))) return;
+    utRelicHaveKey(key, bonus, out, cap);
+}
+
+// The green slot's have-mark: the player carries a completed one of (record, bonus i).
+bool relicHave(const char* record, int bonus) {
+    const UtRelicList* l = liveRelicList();
+    const int r = l && record ? liveRelicFind(record) : -1;
+    if (r < 0 || bonus < 0 || bonus >= (int)l->rows[(size_t)r].bonuses.size()) return false;
+    char key[kKeyCap];
+    return utRelicHaveKey(l->rows[(size_t)r].folded.c_str(), l->rows[(size_t)r].bonuses[(size_t)bonus].c_str(),
+                          key, sizeof(key)) &&
+           ownsKey(key);
 }
 
 struct WalkOut {
@@ -165,6 +213,7 @@ struct WalkOut {
 bool walkObjects(TqPtrVector* v, const unsigned* protoIds, const int* protoIdx, int protoN,
                  WalkOut* o) {
     bool ok = false;
+    const unsigned rr = tooltipReplicaOffset();   // 0 = not decoded: no relic have key
     utGuardEnter();
     __try {
         void* om = g_tq.ObjectManagerGet();
@@ -186,6 +235,10 @@ bool walkObjects(TqPtrVector* v, const unsigned* protoIds, const int* protoIdx, 
                     char key[kKeyCap];
                     if (!utOwnedNormaliseKey(g_tq.ObjectGetObjectName(obj), key, sizeof(key)))
                         continue;
+                    char haveKey[kKeyCap];
+                    haveKey[0] = 0;
+                    if (want && rr && liveRelicFind(key) >= 0)
+                        relicHaveRead(obj, rr, key, haveKey, sizeof(haveKey));
                     if (proto) {
                         ++o->protoSeen;
                         const char* rec = nullptr;
@@ -203,9 +256,13 @@ bool walkObjects(TqPtrVector* v, const unsigned* protoIds, const int* protoIdx, 
                             g_invHash[g_invHashCount++] = utOwnedRowHash(key, 1);
                             ++o->invRecords;
                         }
+                        if (haveKey[0] && g_invHashCount < kOwnedCap)
+                            g_invHash[g_invHashCount++] = utOwnedRowHash(haveKey, 1);
                     } else if (want && g_ownedCount < kOwnedCap) {
                         g_owned[g_ownedCount++] = utOwnedRowHash(key, 1);
                         ++o->named;
+                        if (haveKey[0] && g_ownedCount < kOwnedCap)
+                            g_owned[g_ownedCount++] = utOwnedRowHash(haveKey, 1);
                     }
                 }
                 ok = true;
@@ -259,21 +316,37 @@ void computePage() {
     for (int i = 0; i < g_pageN && i < kUtProtoMax; ++i) {
         const char* rec = nullptr;
         const bool have = protoAt(i, &rec, nullptr, nullptr, nullptr);
-        g_pageOwned[i] = (char)(have && journalSetKnown() && collected(rec));
-        g_pageHave[i] = (char)(have && g_known && ownsKey(rec));
+        int slot = 0;
+        unsigned long long seq = 0;
+        const bool relic = have && protoSlotKindAt(i, &slot) && slot > 0 && protoAtSeq(i, &seq);
+        g_pageRelic[i] = (char)relic;
+        if (relic) {   // a relic slot that holds something is bright; its have-mark is keyed by bonus
+            g_pageOwned[i] = (char)(journalSetKnown() && utRelicProtoLit(slot, seq));
+            // the corner tick: a green slot (prototype slot 2 + bonus) whose (record, bonus) the
+            // player carries; the red slot (1) never
+            g_pageHave[i] = (char)(g_known && slot >= 2 && relicHave(rec, slot - 2));
+        } else {
+            g_pageOwned[i] = (char)(have && journalSetKnown() && collected(rec));
+            g_pageHave[i] = (char)(have && g_known && ownsKey(rec));
+        }
         int col = 0, row = 0, fw = 0, fh = 0;   // the cells a prototype's SLOT covers
         if (protoSlotAt(i, &col, &row, &fw, &fh)) {
             for (int r = row; r < row + fh; ++r)
                 for (int k = col; k < col + fw; ++k)
-                    if (r >= 0 && r < kGridRows && k >= 0 && k < kGridCols) g_occ[r][k] = 1;
+                    if (r >= 0 && r < gridRows() && k >= 0 && k < gridCols()) g_occ[r][k] = 1;
         }
     }
-    const int g = liveShownGroup();
-    g_groupTotal = liveGroupEntries(g) > 0 ? liveGroupEntries(g) : 0;
+    // the shown PAGE's numbers: its button's groups summed (one group without a union)
+    int members[64];
+    const int mn = liveShownMembers(members, 64);
+    g_groupTotal = 0;
     g_groupOwned = 0;
-    if (journalSetKnown()) {
-        for (int k = 0; k < g_groupTotal; ++k)
-            if (collected(liveGroupRecord(g, k))) ++g_groupOwned;
+    for (int i = 0; i < mn; ++i) {
+        const int n = liveGroupEntries(members[i]) > 0 ? liveGroupEntries(members[i]) : 0;
+        g_groupTotal += n;
+        if (journalSetKnown())
+            for (int k = 0; k < n; ++k)
+                if (collected(liveGroupRecord(members[i], k))) ++g_groupOwned;
     }
 }
 
@@ -291,16 +364,40 @@ void computeAll(bool force) {
     g_allRows = rows;
     _snprintf_s(g_allLeaf, sizeof(g_allLeaf), _TRUNCATE, "%s", leaf);
     int total = 0, owned = 0;
+    std::vector<unsigned long long> paged;   // every record a page shows, by its folded key
     const int groups = liveGroupCount();
     for (int g = 0; g < groups; ++g) {
         const int n = liveGroupEntries(g);
         for (int k = 0; k < n; ++k) {
             ++total;
-            if (known && collected(liveGroupRecord(g, k))) ++owned;
+            const char* rec = liveGroupRecord(g, k);
+            if (known && collected(rec)) ++owned;
+            char key[kKeyCap];
+            if (known && rec && utOwnedNormaliseKey(rec, key, sizeof(key)))
+                paged.push_back(utOwnedRowHash(key, 1));
         }
     }
     g_allTotal = total;
     g_allOwned = owned;
+    // The collected records no page shows (the label's "+N not on these pages") and the collected
+    // monster infrequents (the heartbeat's mi=): counted here, once per journal change, never per
+    // frame.
+    int notShown = 0, heldMi = 0;
+    if (known) {
+        std::sort(paged.begin(), paged.end());
+        std::vector<std::string> held;
+        journalHeldKeys(&held);
+        for (size_t i = 0; i < held.size(); ++i) {
+            char key[kKeyCap];
+            if (!utOwnedNormaliseKey(held[i].c_str(), key, sizeof(key))) continue;
+            if (utNotShownCounts(std::binary_search(paged.begin(), paged.end(), utOwnedRowHash(key, 1)),
+                                 liveRelicFind(key)))
+                ++notShown;
+            if (liveRecordKind(held[i].c_str()) == 1) ++heldMi;
+        }
+    }
+    g_notShown = notShown;
+    g_heldMi = known && liveMiCount() >= 0 ? heldMi : -1;
 }
 
 void refresh() {
@@ -486,8 +583,10 @@ void gridFeedFromFrame(const PlateGeometry& g) {
     b.winY = fr.y;
     b.winW = fr.w;
     b.winH = fr.h;
+    b.cols = gridCols();
+    b.rows = gridRows();
     // the frame's grid was measured with the REAL Transfer sack's cell: it must be the mod sack's
-    const float gw = (float)(kGridCols * (int)cw), gh = (float)(kGridRows * (int)ch);
+    const float gw = (float)(gridCols() * (int)cw), gh = (float)(gridRows() * (int)ch);
     int r = kUtGridFedNotUsable;
     if (utGridAbs(fg.w - gw) <= 1.0f && utGridAbs(fg.h - gh) <= 1.0f)
         r = utGridFeed(&g_grid, fg.x, fg.y, cw, ch, b);
@@ -597,13 +696,15 @@ void ownedNoteHover(float gridX, float gridY, float originX, float originY, floa
     b.winY = g.winY;
     b.winW = g.winW;
     b.winH = g.winH;
+    b.cols = gridCols();
+    b.rows = gridRows();
     const char* winWhat = liveFrame ? "the measured caravan frame" : "the records' window rect";
     g_geoW = g.canvasW;   // a later change of either asks again (ownedMarksBegin)
     g_geoH = g.canvasH;
     g_geoScale = g.scale;
     const int r = utGridStep(&g_grid, h, b);
     const int cx = utGridCell(x, h.cw), cy = utGridCell(y, h.ch);
-    const float gw = (float)(kGridCols * (int)h.cw), gh = (float)(kGridRows * (int)h.ch);
+    const float gw = (float)(gridCols() * (int)h.cw), gh = (float)(gridRows() * (int)h.ch);
     if (r == kUtGridCrossAdopted) {   // within the frame tolerance - follow it
         g_gridX = g_grid.gridX;
         g_gridY = g_grid.gridY;
@@ -698,7 +799,7 @@ void ownedUnveilRefresh(bool cursorOk, float cx, float cy) {
         // drawn over dim items.
         const int col = (int)((cx - g_gridX) / (float)g_cw);
         const int row = (int)((cy - g_gridY) / (float)g_ch);
-        if (col >= 0 && col < kGridCols && row >= 0 && row < kGridRows)
+        if (col >= 0 && col < gridCols() && row >= 0 && row < gridRows())
             g_unveil = protoSlotIndexAtCell(col, row);
     }
 }
@@ -738,12 +839,12 @@ bool ownedMarkRect(int i, float* x, float* y, float* w, float* h) {
     if (i == g_unveil) return false;   // the hovered slot shows bright
     int col = 0, row = 0, fw = 0, fh = 0;   // the veil covers the whole SLOT
     if (!protoSlotAt(i, &col, &row, &fw, &fh)) return false;
-    if (col < 0 || row < 0 || fw < 1 || fh < 1 || col + fw > kGridCols || row + fh > kGridRows)
+    if (col < 0 || row < 0 || fw < 1 || fh < 1 || col + fw > gridCols() || row + fh > gridRows())
         return false;
     // the one helper (g_cw = the mod sack's live cell = the drawn cell, fed or proven)
-    const UtRectF grid = {g_gridX, g_gridY, (float)(kGridCols * (int)g_cw),
-                          (float)(kGridRows * (int)g_ch)};
-    const UtRectF r = utSlotDrawnRect(grid, col, row, fw, fh);
+    const UtRectF grid = {g_gridX, g_gridY, (float)(gridCols() * (int)g_cw),
+                          (float)(gridRows() * (int)g_ch)};
+    const UtRectF r = utSlotDrawnRect(grid, gridCols(), gridRows(), col, row, fw, fh);
     *x = r.x;
     *y = r.y;
     *w = r.w;
@@ -751,18 +852,25 @@ bool ownedMarkRect(int i, float* x, float* y, float* w, float* h) {
     return true;
 }
 
+// the marks' style prototype i follows for its gray copy and background (ut_reliclook.h
+// utRelicMarksStyle: a relic slot needs only the journal set)
+static int marksStyleOf(int i) {
+    return utRelicMarksStyle(g_marksNow, g_pageRelic[i] != 0, g_cfg.ownedMarks, journalSetKnown());
+}
+
 bool ownedGrayWanted(int i) {
     if (i < 0 || i >= g_pageN || i >= kUtProtoMax) return false;
     // the rule is ut_viewgate.h utOwnedGray (the viewgate row runs it too)
-    return utOwnedGray(g_pageOwned[i] != 0, i == g_unveil, g_marksNow ? g_cfg.ownedMarks : 0);
+    return utOwnedGray(g_pageOwned[i] != 0, i == g_unveil, marksStyleOf(i));
 }
 
 bool ownedMarksNow() { return g_marksNow; }
 
+bool ownedRelicSlot(int i) { return i >= 0 && i < g_pageN && i < kUtProtoMax && g_pageRelic[i] != 0; }
+
 bool ownedBackgroundSkip(int i, bool routeLive) {
     if (i < 0 || i >= g_pageN || i >= kUtProtoMax) return false;
-    return utBackgroundSkip(g_pageOwned[i] != 0, i == g_unveil, g_marksNow ? g_cfg.ownedMarks : 0,
-                            routeLive);
+    return utBackgroundSkip(g_pageOwned[i] != 0, i == g_unveil, marksStyleOf(i), routeLive);
 }
 
 bool ownedHaveRect(int i, float* x, float* y, float* w, float* h) {
@@ -771,14 +879,14 @@ bool ownedHaveRect(int i, float* x, float* y, float* w, float* h) {
         return false;
     int col = 0, row = 0, fw = 0, fh = 0;
     if (!protoSlotAt(i, &col, &row, &fw, &fh)) return false;
-    if (col < 0 || row < 0 || fw < 1 || fh < 1 || col + fw > kGridCols || row + fh > kGridRows)
+    if (col < 0 || row < 0 || fw < 1 || fh < 1 || col + fw > gridCols() || row + fh > gridRows())
         return false;
     const float side = (float)((int)g_cw / 4 > 4 ? (int)g_cw / 4 : 4);   // 8 px on a 32 px cell
     // the one helper (slot -> drawn rect), and the 2 px inset is record px:
     // x the drawn cell / 32 (= the UI scale), GD's rounding
-    const UtRectF grid = {g_gridX, g_gridY, (float)(kGridCols * (int)g_cw),
-                          (float)(kGridRows * (int)g_ch)};
-    const UtRectF r = utSlotDrawnRect(grid, col, row, fw, fh);
+    const UtRectF grid = {g_gridX, g_gridY, (float)(gridCols() * (int)g_cw),
+                          (float)(gridRows() * (int)g_ch)};
+    const UtRectF r = utSlotDrawnRect(grid, gridCols(), gridRows(), col, row, fw, fh);
     const float k = utPadRound(2.0f * (float)(int)g_cw / 32.0f);
     *x = r.x + r.w - side - k;
     *y = r.y + k;
@@ -791,6 +899,14 @@ bool ownedLabelAll(int* owned, int* total) {
     if (owned) *owned = g_allOwned;
     if (total) *total = g_allTotal;
     return g_allKnown && journalSetKnown();
+}
+
+int ownedNotShown() { return g_allKnown && journalSetKnown() ? g_notShown : 0; }
+
+// -1 unless the count was taken on the open set: after a switch of character or mode the
+// count is unknown until the next recount (view ON, deposit, take or a page build).
+int ownedHeldMi() {
+    return g_allKnown && journalSetKnown() && !strcmp(journalSetLeaf(), g_allLeaf) ? g_heldMi : -1;
 }
 
 bool ownedLabel(int* owned, int* total) {

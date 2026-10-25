@@ -22,7 +22,8 @@
 //   row 2  Transfer (2 cells) | OWN (1 cell) | < | > (half a cell each): the four in 4 cells; then
 //          the search field (3 cells, its clear square at the right end; empty ground with
 //          search=0; with the view OFF only the toggle, the field and the label are shown);
-//          then the label (the remaining 8 cells - the same box whether the search is on or off)
+//          then EDIT (edit_button=1: one cell, the layout editor) and the label in the remaining
+//          cells (8 without EDIT, 7 with it) - the same box whether the search is on or off
 //   a 3 px margin round both rows, a pad_gap gutter between cells.
 // Placed centred under the grid (+ pad_x, clamped to the frame's edges -), pad_y
 // below its bottom row; a band too short is tried again with pad_y 0, then with 12 px rows. The band
@@ -35,6 +36,9 @@
 #pragma once
 
 #include <stdio.h>   // _snprintf_s: the label's line
+#include <string.h>  // strchr, strlen, strncmp: the label templates
+
+#include "ut_textmeasure.h"   // the width of a caption in the game's own fonts
 
 namespace ut {
 
@@ -168,23 +172,35 @@ inline void utFrameTrackDecided(UtFrameTrack* t, int verdict, float gridX, float
 }
 
 // ---- the pad -----------------------------------------------------------------------------------
+// The pad's rects (UtPadOut.btn), by role. Row 1's cells come last: kUtPadGroup0 + b is BUTTON b of
+// the buttons file (file order; one per group without a file), drawn while its page is shown.
+const int kUtPadCells = 64;   // buttons the pad can hold (ut_padpage.h kUtPadButtonsMax)
 enum {
     kUtPadToggle = 0,   // Collection: the view toggle (drawn whenever the Transfer tab is shown)
     kUtPadPrev = 1,     // <  (view ON)
     kUtPadNext = 2,     // >  (view ON)
-    kUtPadGroup0 = 3,   // 3..17: the 15 groups of uniq-groups.txt, in order (view ON)
-    kUtPadOwn = 18,     // OWN: GD's owned-only filter (view ON)
-    kUtPadSearch = 19,  // the search field (search=1; also with the view OFF): the 3 cells right of >
-    kUtPadClear = 20,   // the field's clear button: a square of the row's height at its right end
-    kUtPadMax = 21
+    kUtPadOwn = 3,      // OWN: GD's owned-only filter (view ON)
+    kUtPadSearch = 4,   // the search field (search=1; also with the view OFF): the 3 cells right of >
+    kUtPadClear = 5,    // the field's clear button: a square of the row's height at its right end
+    kUtPadPage = 6,     // NEXT: the first button of the next page, while the buttons are paged
+                        // (ut_layout.h utPadFitRect / utPadDerivedFit)
+    kUtPadGroup0 = 7,   // 7 .. 7 + kUtPadCells - 1: the buttons, in the buttons file's order
+    // EDIT (edit_button=1): opens the layout editor; row 2's cell 7, right of the field. Appended
+    // after the buttons so no index above moves.
+    kUtPadEdit = kUtPadGroup0 + kUtPadCells,
+    kUtPadMax = kUtPadEdit + 1
 };
-const int kUtPadGroups = 15;
+// Is pad rect `i` one of row 1's buttons?
+inline bool utPadIsCell(int i) { return i >= kUtPadGroup0 && i < kUtPadGroup0 + kUtPadCells; }
+// The derived pad's grid: 15 cells across (1.0.1's 15 group buttons). Row 2 keeps it whatever row 1
+// holds; row 1 cuts the same span into one cell per button (ut_layout.h utPadDerivedFit).
+const int kUtPadDefCells = 15;
 const int kUtPadMargin = 3;      // record px round the two rows (GD's design)
 const int kUtPadCellWMax = 34;   // GD's cell width
 const int kUtPadCellWMin = 20;   // below this the captions cannot be read: refused
 const int kUtPadTabRowBottom = 113;   // caravan record: the tab buttons at y 82, 31 high
 
-// pad_h / pad_gap, clamped on USE (GD: 12..20 and 0..4; the ini clamps them too).
+// a row's height / the gap, clamped on USE (GD's pad_h 12..20 and pad_gap 0..4).
 inline int utPadClampH(int h) { return h < 12 ? 12 : (h > 20 ? 20 : h); }
 inline int utPadClampGap(int g) { return g < 0 ? 0 : (g > 4 ? 4 : g); }
 
@@ -193,9 +209,10 @@ struct UtPadIn {
     UtRectF grid;            // the 16 x 15 grid (canvas px): the pad never meets it
     float scale;
     float canvasW, canvasH;
-    int dx, dy;              // pad_x / pad_y: record px right of the centred spot / off the grid
-    int cellH, gap;          // pad_h / pad_gap
+    int dx, dy;              // record px right of the centred spot / off the grid (0, 4)
+    int cellH, gap;          // a row's height and the gap, record px (14, 1)
     bool search = false;     // the search field is laid out (search=1); off = the label as before
+    bool edit = false;       // the EDIT button is laid out (edit_button=1): cell 7, the label after it
 };
 
 enum { kUtPadBadInput = -1, kUtPadNoRoom = 0, kUtPadBelow = 1, kUtPadAbove = 2, kUtPadBorder = 3 };
@@ -275,11 +292,11 @@ inline int utPadLayout(const UtPadIn& in, UtPadOut* out) {
     const int m = kUtPadMargin;
     const int gap = utPadClampGap(in.gap);
     const float gridWrec = in.grid.w / s;
-    int cw = (int)((gridWrec - 2.0f * (float)m - (float)((kUtPadGroups - 1) * gap)) /
-                   (float)kUtPadGroups);
+    int cw = (int)((gridWrec - 2.0f * (float)m - (float)((kUtPadDefCells - 1) * gap)) /
+                   (float)kUtPadDefCells);
     if (cw > kUtPadCellWMax) cw = kUtPadCellWMax;
     if (cw < kUtPadCellWMin) return kUtPadNoRoom;
-    const float wRec = (float)(2 * m + kUtPadGroups * cw + (kUtPadGroups - 1) * gap);
+    const float wRec = (float)(2 * m + kUtPadDefCells * cw + (kUtPadDefCells - 1) * gap);
     const float wPx = utPadRound(wRec * s);
     float ox = in.grid.x + utPadRound(((gridWrec - wRec) * 0.5f + (float)in.dx) * s);
     {   // pad_x moves the pad up to the frame's edges, never past them
@@ -357,7 +374,7 @@ inline int utPadLayout(const UtPadIn& in, UtPadOut* out) {
     out->ground = UtRectF{ox, oy, wPx, hPx};
     const float step = (float)(cw + gap);
     const float r1 = oy + mg, r2 = oy + mg + row + gp;
-    for (int i = 0; i < kUtPadGroups; ++i)
+    for (int i = 0; i < kUtPadDefCells; ++i)
         out->btn[kUtPadGroup0 + i] =
             utPadRectX(ox, s, (float)m + (float)i * step, (float)cw, r1, row);
     // row 2: the four buttons in 4 cells + 3 gaps - Transfer 2 steps, OWN 1 step, < and > half a
@@ -387,8 +404,16 @@ inline int utPadLayout(const UtPadIn& in, UtPadOut* out) {
         out->btn[kUtPadClear] = UtRectF{0.0f, 0.0f, 0.0f, 0.0f};
         out->fieldText = UtRectF{0.0f, 0.0f, 0.0f, 0.0f};
     }
-    // the label: from 7 cells + 3 record px to the pad's right margin, the box it always had
-    const float fx = (float)m + 7.0f * step;
+    for (int i = kUtPadDefCells; i < kUtPadCells; ++i)
+        out->btn[kUtPadGroup0 + i] = UtRectF{0.0f, 0.0f, 0.0f, 0.0f};
+    out->btn[kUtPadPage] = UtRectF{0.0f, 0.0f, 0.0f, 0.0f};   // 15 cells: no NEXT
+    // EDIT (edit_button=1): cell 7, right of the field, ending one gap before the label's cell
+    out->btn[kUtPadEdit] = in.edit ? utPadRectEdges(ox, s, (float)m + 7.0f * step,
+                                                    (float)m + 8.0f * step - gapF, r2, row)
+                                   : UtRectF{0.0f, 0.0f, 0.0f, 0.0f};
+    // the label: from 7 cells (8 with EDIT) + 3 record px to the pad's right margin - without EDIT
+    // the box it always had
+    const float fx = (float)m + (in.edit ? 8.0f : 7.0f) * step;
     const float lx = fx + 3.0f;
     out->label = utPadRectX(ox, s, lx, wRec - (float)m - lx, r2, row);
     return where;
@@ -445,13 +470,28 @@ inline UtRectF utRectInset(const UtRectF& r, float k) {
     return o;
 }
 
-// ONE helper: a slot (col, row, w, h in cells) -> its DRAWN rect on the grid (canvas px). Every
-// cells-to-px turn of the draw side (plates, slot art, grid cover, ring, veils) goes through it.
-inline UtRectF utSlotDrawnRect(const UtRectF& grid, int col, int row, int w, int h) {
-    const float cw = grid.w / (float)kUtPadGridCols, ch = grid.h / (float)kUtPadGridRows;
+// ONE helper: a slot (col, row, w, h in cells) -> its DRAWN rect on the grid in force (canvas px)
+// of `cols` x `rows` cells (16 x 15 on the derived grid, the player's cells on a grid_ rectangle).
+// Every cells-to-px turn of the draw side (plates, slot art, grid cover, ring, veils, marks) goes
+// through it.
+inline UtRectF utSlotDrawnRect(const UtRectF& grid, int cols, int rows, int col, int row, int w,
+                               int h) {
+    if (cols < 1) cols = 1;
+    if (rows < 1) rows = 1;
+    const float cw = grid.w / (float)cols, ch = grid.h / (float)rows;
     const UtRectF r = {grid.x + (float)col * cw, grid.y + (float)row * ch, (float)w * cw,
                        (float)h * ch};
     return r;
+}
+// The part of `r` inside `box` (both canvas px); false = nothing of it is inside. The mod's ground
+// over the grid in force is clipped to the caravan window with it.
+inline bool utRectClip(const UtRectF& r, const UtRectF& box, UtRectF* out) {
+    const float x0 = r.x > box.x ? r.x : box.x, y0 = r.y > box.y ? r.y : box.y;
+    const float x1 = r.x + r.w < box.x + box.w ? r.x + r.w : box.x + box.w;
+    const float y1 = r.y + r.h < box.y + box.h ? r.y + r.h : box.y + box.h;
+    if (!(x1 > x0) || !(y1 > y0)) return false;
+    if (out) *out = UtRectF{x0, y0, x1 - x0, y1 - y0};
+    return true;
 }
 // The search's highlight on one slot (drawn px). The frame lies on the slot's OUTERMOST pixel
 // ring (inset 0: clear of the engine's rarity art inside the slot, never in the next slot), 1 px
@@ -504,8 +544,8 @@ inline UtRectF utPadFallbackToggle(const UtRectF& recordFrame, float s, int cell
 }
 
 // ---- captions ------------------------------------------------------------------------------------
-// Fixed short names (one per group): TQ has no text-width export the mod can call, so GD's
-// ut_textfold / ut_fontmetrics fold is replaced by these and a conservative width estimate.
+// The built-in short names (one per group, 1.0.1's captions; the default buttons file writes them
+// as caption = lines). Every caption is measured in the game's own fonts (ut_textmeasure.h).
 inline const char* utPadShortName(const char* label) {
     static const char* const kMap[][2] = {
         {"Helms", "Helm"},  {"Torso", "Torso"}, {"Arms", "Arms"},     {"Legs", "Legs"},
@@ -520,7 +560,7 @@ inline const char* utPadShortName(const char* label) {
         while (*a && *a == *b) ++a, ++b;
         if (!*a && !*b) return kMap[i][1];
     }
-    return label;   // an unknown label is drawn as it is (the estimate below sizes it)
+    return label;   // an unknown label is drawn as it is (the measure below sizes it)
 }
 
 inline int utPadStrLen(const char* s) {
@@ -529,10 +569,11 @@ inline int utPadStrLen(const char* s) {
     return n;
 }
 
-// A generous width for the caption font (Albertus MT Light, mixed case): 0.55 em per character.
-const float kUtPadEmPerChar = 0.55f;
-inline float utPadTextWidth(const char* s, int size) {
-    return kUtPadEmPerChar * (float)size * (float)utPadStrLen(s);
+// The width of a caption (UTF-8) at `size` in the font that draws it: a button's own `font` (a
+// UtTmFontId) when >= 0, else the caption role's ([tab] font.caption, else the ini's font),
+// followed to the font its letters need (ut_textmeasure.h).
+inline float utPadTextWidth(const char* s, int size, int font = -1) {
+    return utTmWidth(kUtTmCaption, s, size, font);
 }
 
 // The Transfer toggle: a lamp (GD's LED, 0.4 of the row high) 4 record px in and its caption 4
@@ -549,18 +590,51 @@ inline const char* utPadToggleCaption(float wPx, float hPx, float s, int fs) {
     if (!(utPadTextWidth("Trans.", fs) > room)) return "Trans.";
     return "Tab";
 }
+// A caption at size `fs` in `room` px: whole when it fits, else cut into `buf` to the characters
+// that fit (at least one, never inside a UTF-8 sequence). `font` = a button's own (-1 = the role's).
+inline const char* utPadFitCaptionIn(const char* cap, float room, int fs, char* buf, size_t bufCap,
+                                     int font = -1) {
+    if (!cap) return "";
+    if (!buf || bufCap < 2) return cap;
+    if (!(utPadTextWidth(cap, fs, font) > room)) return cap;
+    utTmCutToWidth(cap, room, 1, buf, bufCap, [&](const char* t) { return utPadTextWidth(t, fs, font); });
+    return buf;
+}
+// A toggle caption of the buttons file's own (mat.caption): whole when it fits right of the lamp,
+// else cut into `buf` to the characters that fit (at least one, never inside a UTF-8 sequence).
+inline const char* utPadFitCaption(const char* cap, float wPx, float hPx, float s, int fs, char* buf,
+                                   size_t bufCap) {
+    return utPadFitCaptionIn(cap, wPx - utPadLampTextOffset(hPx, s) - 2.0f, fs, buf, bufCap);
+}
+// NEXT's caption (next.caption, ">>" by default) on its cell: whole when it fits the cell's width
+// less the caption rule's 2 px, else cut like mat.caption.
+inline const char* utPadNextCaption(const char* cap, float wPx, int fs, char* buf, size_t bufCap) {
+    return utPadFitCaptionIn(cap, wPx - 2.0f, fs, buf, bufCap);
+}
 
 // ---- the plate label's line while the view is ON ------------------------------------------
 // One line in the label's box, at the label's size `fs`: the first of these forms that fits -
-//   full:    "Torso  rows 3-7 / 22  owned 12 / 241  all 312 / 1588  found 9"
-//   compact: "Torso 3-7/22  12/241  all 312/1588  found 9"
-//   (i)   the search word's short form: "Torso 3-7/22  12/241  all 312/1588  =9" (a query only)
-//   (ii)  the rows dropped:             "Torso  12/241  all 312/1588  =9"
-//   (iii) the whole collection dropped: "Torso  12/241  =9"
+//   full:    "Torso  rows 3-7 / 58  owned 12 / 458  all 312 / 2678  found 9 - +6 not on these pages"
+//   compact: "Torso 3-7/58  12/458  all 312/2678  found 9 - +6 not on these pages"
+//   (i)   the search word's short form: "Torso 3-7/58  12/458  all 312/2678  =9 - +6 not on these
+//         pages" (a query only)
+//   (s)   the suffix dropped:           "Torso 3-7/58  12/458  all 312/2678  =9"
+// The suffix (utNotShownSuffix) is there only while the journal holds records no page shows; with
+// none, (s) is the form before it.
+//   (ii)  the rows dropped:             "Torso  12/458  all 312/2678  =9"
+//   (iii) the whole collection dropped: "Torso  12/458  =9"
 //   (iv)  the owned count dropped:      "Torso  =9" (a query only)
 // With no query the line ends after the `all` count, and (iii) is the last form. The last form
 // that is still too wide is drawn at the largest size down to 6 that fits, or at 6 when none does.
 // Returns the font size; `line` gets the text.
+// The label's last part while the journal holds records no page of this game shows (the catalogue
+// lacks them: collect_mi=0, collect_unobtainable=0): " - +N not on these pages"; empty for N <= 0
+// (none, or not counted yet). GD's utNotShownSuffix, into a buffer: the pad's draw allocates nothing.
+inline void utNotShownSuffix(long n, char* out, size_t cap) {
+    if (!out || !cap) return;
+    if (n > 0) _snprintf_s(out, cap, _TRUNCATE, " - +%ld not on these pages", n);
+    else out[0] = 0;
+}
 struct UtPadLabelWords {
     const char* group = "";   // the group's label (the compact forms use its short name)
     const char* span = "0";   // the window's rows, "3-7" ("0" for an empty group)
@@ -573,9 +647,12 @@ struct UtPadLabelWords {
     bool allKnown = false;    // the whole collection's owned count is known
     int allOwned = 0;
     int allTotal = 0;         // the catalogue's records; 0 = no `all` count at all
+    int notShown = 0;         // collected records no page shows (utNotShownSuffix); 0 = none
+    int first = 0, last = 0;  // the window's rows as numbers ({first} / {last}; 0 for an empty group)
 };
+// the label line is measured in the label role's font ([tab] font.label, else the ini's font)
 inline bool utPadLabelFits(const char* line, int size, float boxW) {
-    return !(utPadTextWidth(line, size) > boxW);
+    return !(utTmWidth(kUtTmLabel, line, size) > boxW);
 }
 inline int utPadLabelLine(const UtPadLabelWords& w, float boxW, int fs, char* line, size_t cap) {
     if (!line || cap == 0) return fs;
@@ -584,7 +661,8 @@ inline int utPadLabelLine(const UtPadLabelWords& w, float boxW, int fs, char* li
     const bool q = f[0] != 0;
     const char* sep = q ? "  " : "";
     const char* sn = utPadShortName(w.group);
-    char own[32], cnt[32], all[40], allC[40];
+    char own[32], cnt[32], all[40], allC[40], ns[48];
+    utNotShownSuffix(w.notShown, ns, sizeof(ns));
     if (w.known) _snprintf_s(own, sizeof(own), _TRUNCATE, "owned %d / %d", w.owned, w.total);
     else _snprintf_s(own, sizeof(own), _TRUNCATE, "owned ? / %d", w.total);
     if (w.known) _snprintf_s(cnt, sizeof(cnt), _TRUNCATE, "%d/%d", w.owned, w.total);
@@ -597,12 +675,18 @@ inline int utPadLabelLine(const UtPadLabelWords& w, float boxW, int fs, char* li
         _snprintf_s(all, sizeof(all), _TRUNCATE, "  all ? / %d", w.allTotal);
         _snprintf_s(allC, sizeof(allC), _TRUNCATE, "  all ?/%d", w.allTotal);
     }
-    _snprintf_s(line, cap, _TRUNCATE, "%s  rows %s / %d  %s%s%s%s", w.group, w.span, w.rows, own,
-                all, sep, f);
+    _snprintf_s(line, cap, _TRUNCATE, "%s  rows %s / %d  %s%s%s%s%s", w.group, w.span, w.rows, own,
+                all, sep, f, ns);
     if (utPadLabelFits(line, fs, boxW)) return fs;
-    _snprintf_s(line, cap, _TRUNCATE, "%s %s/%d  %s%s%s%s", sn, w.span, w.rows, cnt, allC, sep, f);
+    _snprintf_s(line, cap, _TRUNCATE, "%s %s/%d  %s%s%s%s%s", sn, w.span, w.rows, cnt, allC, sep, f,
+                ns);
     if (utPadLabelFits(line, fs, boxW)) return fs;
     if (q) {
+        _snprintf_s(line, cap, _TRUNCATE, "%s %s/%d  %s%s%s%s%s", sn, w.span, w.rows, cnt, allC,
+                    sep, b, ns);
+        if (utPadLabelFits(line, fs, boxW)) return fs;
+    }
+    if (ns[0]) {   // the suffix is the first part dropped after the search word's short form
         _snprintf_s(line, cap, _TRUNCATE, "%s %s/%d  %s%s%s%s", sn, w.span, w.rows, cnt, allC,
                     sep, b);
         if (utPadLabelFits(line, fs, boxW)) return fs;
@@ -616,6 +700,159 @@ inline int utPadLabelLine(const UtPadLabelWords& w, float boxW, int fs, char* li
         return lfs;
     }
     _snprintf_s(line, cap, _TRUNCATE, "%s  %s", sn, b);
+    int lfs = fs;
+    while (lfs > 6 && !utPadLabelFits(line, lfs, boxW)) --lfs;
+    return lfs;
+}
+
+// ---- the relic and charm page's label --------------------------------------------------------
+// Its own words, never the collection's, and no page name (the pressed Relic button names the
+// page): the window's BLOCKS {first}-{last}/{blocks} (as the collection pages' rows), the fixed
+// page of the first shown block, the green slots holding at least one item of every bonus slot
+// (k/N, as the collection pages' owned/entries) and the shards in every red slot ("pieces n", the
+// word of a partial piece's tooltip line). The relics and charms never count in the collection's
+// "all N / M". The forms, the first that fits at `fs`; a query standing ends the first with the
+// collection pages' "found N" / "indexing k/n" and every later one with the short "=N" / "k/n":
+//   0  "64-67/93  page 17/23  8/1971  pieces 50  found 9"
+//   1  "64-67/93  page 17/23  8/1971  pieces 50  =9"   (a query only)
+//   2  "64-67/93  8/1971  pieces 50  =9"               (the fixed page dropped)
+//   3  "8/1971  pieces 50  =9"                         (the blocks dropped)
+//   4  "8/1971  =9"                                    (the pieces dropped)
+// When none fits, the last at the largest size down to 6 that fits. No block laid out (OWN with
+// nothing held) reads "0/0". Nothing is allocated. Returns the size.
+const int kUtPadRelicForms = 5;
+struct UtPadRelicLabel {
+    int first = 0, last = 0, blocks = 0;   // 1-based blocks of the window; 0 = none
+    int page = 0, pages = 0;               // 1-based fixed page of the first shown block
+    int bonuses = 0, bonusSlots = 0;
+    unsigned pieces = 0;
+    const char* found = "";                // "indexing k/n" or "found N"; empty while no query stands
+    const char* brief = "";                // its short form, "k/n" or "=N"
+};
+inline void utPadRelicForm(const UtPadRelicLabel& r, int form, char* line, size_t cap) {
+    if (!line || cap == 0) return;
+    const char* f = r.found ? r.found : "";
+    const char* b = r.brief && r.brief[0] ? r.brief : f;
+    const char* s = form == 0 ? f : b;
+    const char* sep = s[0] ? "  " : "";
+    char span[48];
+    if (r.blocks > 0) _snprintf_s(span, sizeof(span), _TRUNCATE, "%d-%d/%d", r.first, r.last, r.blocks);
+    else _snprintf_s(span, sizeof(span), _TRUNCATE, "0/0");
+    if (form <= 1)
+        _snprintf_s(line, cap, _TRUNCATE, "%s  page %d/%d  %d/%d  pieces %u%s%s", span, r.page, r.pages,
+                    r.bonuses, r.bonusSlots, r.pieces, sep, s);
+    else if (form == 2)
+        _snprintf_s(line, cap, _TRUNCATE, "%s  %d/%d  pieces %u%s%s", span, r.bonuses, r.bonusSlots, r.pieces,
+                    sep, s);
+    else if (form == 3)
+        _snprintf_s(line, cap, _TRUNCATE, "%d/%d  pieces %u%s%s", r.bonuses, r.bonusSlots, r.pieces, sep, s);
+    else
+        _snprintf_s(line, cap, _TRUNCATE, "%d/%d%s%s", r.bonuses, r.bonusSlots, sep, s);
+}
+inline int utPadLabelRelic(const UtPadRelicLabel& r, float boxW, int fs, char* line, size_t cap) {
+    if (!line || cap == 0) return fs;
+    const bool q = r.found && r.found[0];
+    for (int k = 0; k < kUtPadRelicForms; ++k) {
+        if (k == 1 && !q) continue;   // the short search words: only with a query
+        utPadRelicForm(r, k, line, cap);
+        if (utPadLabelFits(line, fs, boxW)) return fs;
+    }
+    int lfs = fs;
+    while (lfs > 6 && !utPadLabelFits(line, lfs, boxW)) --lfs;
+    return lfs;
+}
+
+// ---- the label from templates (label.format.1..4 under [tab] of the buttons file) ------------
+// The same placeholders as ut_textcfg.h (utt::UtLabelSlot, in that order): {mode} {group} {owned}
+// {entries} {first} {last} {rows} {all} {coll} {found}; {{ and }} are literal braces. Expanded
+// into the caller's buffer - nothing is allocated (the pad's draw calls it every frame). The
+// templates were checked when the file was read; an unknown placeholder expands to nothing here.
+const int kUtPadLabelFormatsMax = 4;
+const int kUtPadLabelSlots = 10;
+struct UtPadLabelFormats {
+    int n = 0;                                      // 0 = TQ's built-in four (the caller's)
+    char f[kUtPadLabelFormatsMax][512];             // UTF-8, 1..160 UTF-16 units each
+    char unknown[32];                               // label.unknown, a count not known
+};
+inline int utPadLabelSlotOf(const char* name, size_t len) {
+    static const char* const kNames[kUtPadLabelSlots] = {"mode", "group", "owned", "entries", "first",
+                                                         "last", "rows", "all", "coll", "found"};
+    for (int i = 0; i < kUtPadLabelSlots; ++i)
+        if (strlen(kNames[i]) == len && !strncmp(kNames[i], name, len)) return i;
+    return -1;
+}
+// The template with every placeholder replaced, its trailing blanks trimmed; the length.
+inline size_t utPadExpand(const char* t, const char* const* v, char* out, size_t cap) {
+    size_t n = 0;
+    auto put = [&](char c) {
+        if (n + 1 < cap) out[n++] = c;
+    };
+    for (size_t i = 0; t && t[i]; ++i) {
+        const char c = t[i];
+        if ((c == '{' || c == '}') && t[i + 1] == c) {
+            put(c);
+            ++i;
+        } else if (c == '{') {
+            const char* close = strchr(t + i + 1, '}');
+            if (!close) break;
+            const int s = utPadLabelSlotOf(t + i + 1, (size_t)(close - t - i - 1));
+            for (const char* x = s >= 0 && v[s] ? v[s] : ""; *x; ++x) put(*x);
+            i = (size_t)(close - t);
+        } else {
+            put(c);
+        }
+    }
+    while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\t')) --n;
+    if (cap) out[n] = 0;
+    return n;
+}
+// The label line from templates, TQ 1.0.1's fit rule (utPadLabelLine's order, with the
+// templates as its forms): the first template with the search's words and the "+N not on these
+// pages" part; the second the same, then with the search's short words, then without that part;
+// every later template with the short words and no suffix. The first line that fits at `fs` is
+// drawn; when none does, the LAST template that way at the largest size down to 6 that fits.
+// Returns the size.
+inline int utPadLabelTemplated(const UtPadLabelFormats& fm, const UtPadLabelWords& w, float boxW,
+                               int fs, char* line, size_t cap) {
+    if (!line || cap == 0) return fs;
+    line[0] = 0;
+    if (fm.n <= 0) return fs;
+    char owned[16], entries[16], first[16], last[16], rows[16], all[16], coll[16], ns[48];
+    const char* unk = fm.unknown[0] ? fm.unknown : "?";
+    if (w.known) _snprintf_s(owned, sizeof(owned), _TRUNCATE, "%d", w.owned);
+    else _snprintf_s(owned, sizeof(owned), _TRUNCATE, "%s", unk);
+    _snprintf_s(entries, sizeof(entries), _TRUNCATE, "%d", w.total);
+    _snprintf_s(first, sizeof(first), _TRUNCATE, "%d", w.first);
+    _snprintf_s(last, sizeof(last), _TRUNCATE, "%d", w.last);
+    _snprintf_s(rows, sizeof(rows), _TRUNCATE, "%d", w.rows);
+    if (w.allKnown) _snprintf_s(all, sizeof(all), _TRUNCATE, "%d", w.allOwned);
+    else _snprintf_s(all, sizeof(all), _TRUNCATE, "%s", unk);
+    _snprintf_s(coll, sizeof(coll), _TRUNCATE, "%d", w.allTotal);
+    utNotShownSuffix(w.notShown, ns, sizeof(ns));
+    const char* f = w.found ? w.found : "";
+    const char* b = w.brief && w.brief[0] ? w.brief : f;
+    const bool q = f[0] != 0;
+    const char* v[kUtPadLabelSlots] = {"", w.group ? w.group : "", owned, entries, first, last, rows, all, coll, f};
+    struct Step {
+        int t;
+        bool shortWords, suffix;
+    };
+    Step steps[4 + kUtPadLabelFormatsMax];
+    int n = 0;
+    const int k = fm.n >= 2 ? 1 : 0;
+    steps[n++] = {0, false, true};
+    if (k == 1) steps[n++] = {1, false, true};
+    if (q) steps[n++] = {k, true, true};
+    if (ns[0]) steps[n++] = {k, true, false};
+    for (int i = k + 1; i < fm.n; ++i) steps[n++] = {i, true, false};
+    for (int i = 0; i < n; ++i) {
+        v[9] = steps[i].shortWords ? b : f;
+        const size_t len = utPadExpand(fm.f[steps[i].t], v, line, cap);
+        if (steps[i].suffix) _snprintf_s(line + len, cap - len, _TRUNCATE, "%s", ns);
+        if (utPadLabelFits(line, fs, boxW)) return fs;
+    }
+    v[9] = b;
+    utPadExpand(fm.f[fm.n - 1], v, line, cap);
     int lfs = fs;
     while (lfs > 6 && !utPadLabelFits(line, lfs, boxW)) --lfs;
     return lfs;
@@ -667,16 +904,105 @@ inline int utPadLabelFont(int labelPx, float rowHPx) {
 
 // GD's caption rule: three quarters of the cell height, capped at h - 2 and at 14, and the widest
 // caption must fit w - 2. 0 = not even size 6 fits (the caller draws the button unlabelled).
-// the cap of 14 is record px, scaled like everything else (s = the UI scale).
-inline int utPadCaptionSize(float wPx, float hPx, int widestChars, float s = 1.0f) {
+// the cap of 14 is record px, scaled like everything else (s = the UI scale); pad_caption_max of
+// uniquetab.ini sets it (6..36, default 14) and the buttons file's [tab] size.caption_max replaces
+// that (`capMax`, 6..36): utPadCaptionCeiling.
+constexpr int kUtPadCaptionMax = 14;
+// The pad's caption ceiling in GD's order (README: size.caption_max wins over pad_caption_max; a
+// button's own size wins over both, in utPadButtonCaption): `styleMax` = size.caption_max (under
+// 6 = not set), `iniMax` = pad_caption_max, clamped to 6..36.
+inline int utPadCaptionCeiling(int styleMax, int iniMax) {
+    if (styleMax >= 6) return styleMax > 36 ? 36 : styleMax;
+    return iniMax < 6 ? 6 : (iniMax > 36 ? 36 : iniMax);
+}
+inline int utPadCaptionTop(float hPx, float s, int capMax = kUtPadCaptionMax) {
     int top = (int)(hPx * 3.0f / 4.0f);
     if (top > (int)hPx - 2) top = (int)hPx - 2;
-    const int cap = (utPadFinite(s) && s > 0.3f && s < 4.0f) ? (int)utPadRound(14.0f * s) : 14;
-    if (top > cap) top = cap;
-    for (int size = top; size >= 6; --size) {
-        if (kUtPadEmPerChar * (float)size * (float)widestChars <= wPx - 2.0f) return size;
+    const float m = (float)capMax;
+    const int cap = (utPadFinite(s) && s > 0.3f && s < 4.0f) ? (int)utPadRound(m * s) : capMax;
+    return top > cap ? cap : top;
+}
+// [tab] size.caption > 0: ONE caption size for every button, `fixed` record px at the scale, still
+// bounded by the cell's height (the caption rule's three quarters and h - 2). 0 = not even size 6.
+inline int utPadCaptionFixed(float hPx, float s, int fixed) {
+    const int v = utPadCaptionTop(hPx, s, fixed);
+    return v >= 6 ? v : 0;
+}
+// Over a caption not known yet, `widestChars` characters long (the layout's fit): each character
+// at the caption font's mean advance (utTmCharsWidth).
+inline int utPadCaptionSize(float wPx, float hPx, int widestChars, float s = 1.0f) {
+    for (int size = utPadCaptionTop(hPx, s); size >= 6; --size) {
+        if (utTmCharsWidth(kUtTmCaption, widestChars, size) <= wPx - 2.0f) return size;
     }
     return 0;
+}
+// Over the widest caption itself, measured in the font that draws it (`font`: a button's own).
+inline int utPadCaptionSizeOf(float wPx, float hPx, const char* widest, float s = 1.0f, int font = -1,
+                              int capMax = kUtPadCaptionMax) {
+    for (int size = utPadCaptionTop(hPx, s, capMax); size >= 6; --size) {
+        if (!(utPadTextWidth(widest, size, font) > wPx - 2.0f)) return size;
+    }
+    return 0;
+}
+
+// The pad's caption size is fitted to captions of at most this many characters (the built-in
+// short names); a longer caption of the buttons file is fitted on its own button.
+constexpr int kUtPadCaptionFitChars = 5;
+inline int utPadFitChars(int n) { return n < kUtPadCaptionFitChars ? n : kUtPadCaptionFitChars; }
+
+// A group button's caption and its size: the pad's size `padFs` for a caption of at most
+// kUtPadCaptionFitChars characters whose measured width fits its cell there (the pad was fitted
+// to the widest); any other at the largest size up to `padFs` its own cell holds (the caption rule
+// over this caption alone), else cut, as the Transfer toggle's caption is, to the whole characters
+// the cell holds at size 6. `font` = the button's own font (-1 = the caption role's); `capMax` =
+// the ceiling in force (utPadCaptionCeiling: size.caption_max, else pad_caption_max). *out = the
+// text to draw (`cap` or `buf`); 0 = not one character fits (the button stays unlabelled).
+inline int utPadCellCaption(const char* cap, float wPx, float hPx, float s, int padFs, char* buf,
+                            size_t bufCap, const char** out, int font = -1,
+                            int capMax = kUtPadCaptionMax) {
+    if (!cap) cap = "";
+    if (out) *out = cap;
+    if (padFs < 6) return 0;
+    if (utTmCodePoints(cap) <= kUtPadCaptionFitChars && !(utPadTextWidth(cap, padFs, font) > wPx - 2.0f))
+        return padFs;
+    int own = utPadCaptionSizeOf(wPx, hPx, cap, s, font, capMax);
+    if (own > padFs) own = padFs;
+    if (own >= 6) return own;
+    if (!buf || bufCap < 2 || !out) return 0;
+    if (utTmCutToWidth(cap, wPx - 2.0f, 0, buf, bufCap,
+                       [&](const char* t) { return utPadTextWidth(t, 6, font); }) < 1)
+        return 0;
+    *out = buf;
+    return 6;
+}
+
+// One pad button's caption and its size, the [tab] sizes applied in their order:
+//   the buttons file's `size` of a GROUP button (6..36, -1 = none) is that button's own ceiling:
+//     its caption is drawn at the largest size up to it that its cell holds whole, above the pad's
+//     size `padFs` too and over size.caption; when not even 6 fits, the rules below apply;
+//   size.caption (`fixed` > 0): the pad's size `padFs` IS that size (utPadCaptionFixed) and every
+//     caption is drawn at it, cut to its own button (the caption rule's 2 px margin);
+//   else a GROUP button's caption is fitted on its cell (utPadCellCaption) under `capMax`, the
+//     ceiling in force (size.caption_max, else pad_caption_max), which already capped `padFs`;
+//   any other button (Transfer, OWN, <, >, NEXT: their captions already fitted) is drawn at `padFs`.
+// *out = the text to draw; a return under 6 = the button stays unlabelled.
+inline int utPadButtonCaption(const char* cap, float wPx, float hPx, float s, int padFs, bool group,
+                              int buttonSize, int fixed, char* buf, size_t bufCap, const char** out,
+                              int font = -1, int capMax = kUtPadCaptionMax) {
+    if (!cap) cap = "";
+    if (out) *out = cap;
+    if (padFs < 6) return 0;
+    if (group && buttonSize >= 6) {
+        const int own = utPadCaptionSizeOf(wPx, hPx, cap, s, font, buttonSize);
+        if (own >= 6) return own;
+    }
+    if (fixed > 0) {
+        if (out) *out = utPadFitCaptionIn(cap, wPx - 2.0f, padFs, buf, bufCap, font);
+        return padFs;
+    }
+    if (!group) return padFs;
+    const int own = utPadCellCaption(cap, wPx, hPx, s, padFs, buf, bufCap, out, font, capMax);
+    return own < 6 ? 0 : own;
 }
 
 // the caravan frame from the Transfer page DRAW (TQ.exe 0xC31A0), so the

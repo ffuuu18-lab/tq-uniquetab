@@ -48,6 +48,12 @@ const unsigned kUtSearchStageChars = 0x8000;     // the staged text of one recor
 const unsigned kUtSearchClsLore = 0x0E;
 const unsigned kUtSearchClsRequirements = 0x11;
 const unsigned kUtSearchClsDirections = 0x1C;
+// KEPT, and the one kept class whose presence depends on the character the rollover is built for:
+// ItemSet::GetUIDisplayText (Game.dll 0x1C6320) adds the set's bonus lines (AttributePak::
+// GetUIDisplayText with class 0x16, at 0x1C67F5) only when Character::GetItemsInSet (the main
+// player's worn pieces of that set) is not empty. A record whose text holds one is not written to
+// the saved index text (ut_searchsave.h): the next session reads it from its item again.
+const unsigned kUtSearchClsSetBonus = 0x16;
 
 inline bool utSearchKeepClass(unsigned cls, bool keepLore) {
     if (cls == kUtSearchClsRequirements || cls == kUtSearchClsDirections) return false;
@@ -147,6 +153,7 @@ struct UtSearchCounts {
     unsigned dropReq;     // 0x11
     unsigned dropLore;    // 0x0E
     unsigned dropDir;     // 0x1C
+    unsigned setBonus;    // 0x16 kept (kUtSearchClsSetBonus)
 };
 
 // The kept lines, folded and joined by '\n' onto `out`.
@@ -165,6 +172,7 @@ inline void utSearchFoldStage(const UtSearchStage* st, bool keepLore, std::strin
         if (!out->empty()) out->push_back('\n');
         utSearchFoldWide(st->text + st->start[i], st->len[i], out);
         if (c) ++c->kept;
+        if (c && cls == kUtSearchClsSetBonus) ++c->setBonus;
     }
 }
 
@@ -209,6 +217,12 @@ inline bool utSearchGroupMarked(const unsigned char* owned, const unsigned char*
     }
     return false;
 }
+
+// ---- the index's start across a game switch -----------------------------------------------------
+// The next game's index starts again only from a focus, a query or search_prebuild: a switch keeps
+// it started only while a query stands (the field holds a needle), which applies it over the new
+// index. So no game indexes in the background just because an earlier game was searched.
+inline bool utSearchStartedAfterSwitch(bool started, bool queryStands) { return started && queryStands; }
 
 // ---- the field: the key gate's decisions and the text edits (pure) ---------------------------
 const int kUtSearchFieldMax = 32;             // characters
@@ -435,12 +449,16 @@ inline void utSearchRealWords(bool query, bool ready, int done, int total, int f
 // (a change recomputes the highlight and the group marks; the page is never rebuilt for it), and
 // indexes the other groups in the background, 1.5 ms per Update at most. `worldUp` = a world with a main player may exist.
 void searchTick(bool worldUp);
+// The game in force switched: the index is dropped (rebuilt lazily). Game thread.
+void searchGameChanged();
+// The index's text in bytes (0 without an index), for the memory lines. Game thread.
+size_t searchIndexBytes();
 // The page build, just before it lays out `group`: a standing query (or search_prebuild=1 at the
 // first view-ON) starts the index, and a group that is not indexed yet is indexed now, whole.
 void searchBeforePage(int group);
 // Any thread (the pad draws them): the marked groups (bit i = group i), 0 while no query stands
-// or search_buttons=0; whether a query stands; and the label's words ("indexing k/1588",
-// "found N") with their short forms for a narrow box ("k/1588", "=N"), all empty while no query
+// or search_buttons=0; whether a query stands; and the label's words ("indexing k/2678",
+// "found N") with their short forms for a narrow box ("k/2678", "=N"), all empty while no query
 // stands.
 unsigned searchMarks();
 bool searchQueryStands();

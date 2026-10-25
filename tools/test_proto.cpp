@@ -9,6 +9,8 @@
 //   * every record of data\oracle\uniq-records.txt builds (the real catalogue paths).
 #define UT_PROTO_PURE_ONLY
 #include "../src/ut_proto.h"
+#include "../src/ut_layout.h"       // the grid in force (utGridInForce) and its slot rects
+#include "../src/ut_caravangeo.h"   // the collection sack on the inventory widget (utGridWidget)
 
 #include <stdio.h>
 #include <string.h>
@@ -126,7 +128,7 @@ int main(int argc, char** argv) {
         fclose(fh);
     }
     _snprintf_s(d, sizeof(d), _TRUNCATE, "%d records from %s, %d refused", n, records, bad);
-    ok(n == 1588 && bad == 0, "every catalogue record builds a replica", d);
+    ok(n == 2774 && bad == 0, "every catalogue record builds a replica", d);
 
 
     // ---- the identity round trip ------------------------------
@@ -555,7 +557,7 @@ int main(int argc, char** argv) {
         }
         snprintf(sd, sizeof(sd), "%d fault cases, %d bad", mixCases, mixBad);
         ok(mixBad == 0, "... a fault mid-shift there leaves no orphan", sd);
-        // (b) a 1x1 group with the full 240-place window (kUtProtoMax: the matcher's worst case)
+        // (b) a 1x1 group with the full 240-place window (the 16 x 15 sack's worst case)
         gPerRow = 16;
         gSlotW = 1;
         gSlotH = 1;
@@ -564,7 +566,7 @@ int main(int argc, char** argv) {
         gMixed = false;
         reset();
         fullBuild(0);
-        bool fullOk = count == ut::kUtProtoMax && exact(ut::kUtProtoMax, true);
+        bool fullOk = count == 16 * 15 && exact(16 * 15, true);
         sr = shift(1, &c);
         fullOk = fullOk && sr == ut::kUtShiftDone && c.moved == 224 && c.created == 16 &&
                  c.destroyed == 16 && exact(window(1), true);
@@ -658,6 +660,122 @@ int main(int argc, char** argv) {
         ok(!ut::utShiftAllowed(sfCell) && ut::utShiftAllowed(sfBase),
            "prototypes placed on a stale cell (a UI scale change re-celled the sack) "
            "refuse the shift - the fact cellStale; the full rebuild re-cells", nullptr);
+    }
+
+    {   // the collection sack and its slot rectangles on the grid in force: 16 x 12, 17 x 19, 20 x 20 and a
+        // moved grid. The sack's widget (utGridWidget: the engine's own place 37.1,0 + the shift, the
+        // live 44 px cell x the cells), every slot of the sack drawn inside the drawn grid and the
+        // caravan window, and the last slot ending at the grid's corner (UI scale 1.375).
+        struct Case {
+            const char* name;
+            int coverW, coverH;
+            ut::UtRect rect;
+            int cols, rows;
+            float sackX, sackY;   // the widget's place written (the log's numbers for the base window)
+        };
+        const Case cases[] = {
+            {"16 x 12 (27,126,512,384)", 565, 637, {27, 126, 512, 384}, 16, 12, 37.0f, -0.2f},
+            {"17 x 19 (0,0,544,608)", 565, 637, {0, 0, 544, 608}, 17, 19, 0.0f, -173.2f},
+            {"20 x 20 (11,57,640,640 in 660 x 699)", 660, 699, {11, 57, 640, 640}, 20, 20, 15.0f, -95.2f},
+            {"moved 17 x 12 (0,253,544,384)", 565, 637, {0, 253, 544, 384}, 17, 12, 0.0f, 174.8f},
+        };
+        for (const Case& k : cases) {
+            ut::UtGridForceIn in = {};
+            in.on = 1;
+            in.userSet = 1;
+            in.userRect = k.rect;
+            in.coverW = k.coverW;
+            in.coverH = k.coverH;
+            // the measured frame: the window at the UI scale, each size rounded (777 x 876 for 565 x 637)
+            in.frame = ut::UtRectF{873.0f, 282.0f, (float)(int)((float)k.coverW * 1.375f + 0.5f),
+                                   (float)(int)((float)k.coverH * 1.375f + 0.5f)};
+            in.frameGrid = ut::UtRectF{910.1f, 455.2f, 704.0f, 660.0f};
+            in.scale = 1.375f;
+            in.cell = 44.0f;
+            in.derivedCols = 16;
+            in.derivedRows = 15;
+            const ut::UtGridForce f = ut::utGridInForce(in);
+            const float none[2] = {0.0f, 0.0f}, place[2] = {37.1f, 0.0f};
+            float own[2], v[4];
+            ut::utGridWidget(0, place, none, none, f.dx, f.dy, 44, 44, f.packCols, f.packRows, own, v);
+            const bool sack = f.packCols == k.cols && f.packRows == k.rows &&
+                              v[0] - k.sackX < 0.06f && k.sackX - v[0] < 0.06f &&
+                              v[1] - k.sackY < 0.06f && k.sackY - v[1] < 0.06f &&
+                              v[2] == 44.0f * (float)k.cols && v[3] == 44.0f * (float)k.rows &&
+                              f.drawn.w == v[2] && f.drawn.h == v[3];
+            bool slots = true;
+            for (int gr = 0; gr < f.drawnRows; ++gr)
+                for (int c = 0; c < f.drawnCols; ++c) {
+                    const ut::UtRectF s = ut::utSlotDrawnRect(f.drawn, f.drawnCols, f.drawnRows, c, gr, 1, 1);
+                    slots = slots && s.w == 44.0f && s.h == 44.0f && s.x >= f.drawn.x && s.y >= f.drawn.y &&
+                            s.x + s.w <= f.drawn.x + f.drawn.w && s.y + s.h <= f.drawn.y + f.drawn.h &&
+                            s.x >= in.frame.x && s.y >= in.frame.y &&
+                            s.x + s.w <= in.frame.x + in.frame.w && s.y + s.h <= in.frame.y + in.frame.h;
+                }
+            const ut::UtRectF last = ut::utSlotDrawnRect(f.drawn, f.drawnCols, f.drawnRows, f.drawnCols - 1,
+                                                         f.drawnRows - 1, 1, 1);
+            const bool corner = last.x + last.w == f.drawn.x + f.drawn.w && last.y + last.h == f.drawn.y + f.drawn.h;
+            char sd[160];
+            _snprintf_s(sd, sizeof(sd), _TRUNCATE, "sack %.1f,%.1f %.0fx%.0f, drawn (%.0f,%.0f) %.0fx%.0f", v[0],
+                        v[1], v[2], v[3], f.drawn.x, f.drawn.y, f.drawn.w, f.drawn.h);
+            char what[96];
+            _snprintf_s(what, sizeof(what), _TRUNCATE, "grid in force %s: the sack and its slots", k.name);
+            ok(sack && slots && corner, what, sd);
+        }
+    }
+
+    {   // the synthetic relic / charm replicas (utReplicaBuildRelic): var1 at +0x80, relicBonus at +0x64
+        const char* relRec = "records/xpack/item/relics/01_act4_x.dbr";
+        const char* relBase = "records\\xpack\\item\\relics\\01_act4_x.dbr";
+        const char* shortBonus = "records/a/b1.dbr";   // 16 chars: the heap form
+        const char* tinyBonus = "records/b.dbr";        // 13 chars: in place
+        const char* longBonus = "Records\\XPack\\Item\\Relics\\Bonus\\X_Bonus_01.DBR";
+        ut::UtReplica rr;
+        memset(&rr, 0xCD, sizeof(rr));
+        const bool red = ut::utReplicaBuildRelic(&rr, relRec, 1u, "");
+        std::string b;
+        ok(red && u32(rr.bytes + ut::kUtReplicaVar1) == 1u && u32(rr.bytes + 0x64 + 0x10) == 0u &&
+               u32(rr.bytes + 0x64 + 0x14) == 15u && rr.bytes[0x64] == 0 && vsRead(rr, 0x04, &b) &&
+               b == relBase && u32(rr.bytes + ut::kUtReplicaSeed) == 0u,
+           "relic replica, red: var1 1, relicBonus empty", "seed 0, base with backslashes");
+        memset(&rr, 0xCD, sizeof(rr));
+        const bool tiny = ut::utReplicaBuildRelic(&rr, relRec, 3u, tinyBonus);
+        ok(tiny && u32(rr.bytes + 0x80) == 3u && u32(rr.bytes + 0x64 + 0x10) == 13u &&
+               u32(rr.bytes + 0x64 + 0x14) == 15u && memcmp(rr.bytes + 0x64, tinyBonus, 14) == 0,
+           "relic replica, green: a short bonus in place", "+0x64 size 13 cap 15");
+        memset(&rr, 0xCD, sizeof(rr));
+        const bool lng = ut::utReplicaBuildRelic(&rr, relRec, 3u, longBonus);
+        const char* lp = nullptr;
+        memcpy(&lp, rr.bytes + 0x64, sizeof(lp));
+        const unsigned ln = (unsigned)strlen(longBonus);
+        ok(lng && u32(rr.bytes + 0x64 + 0x10) == ln && u32(rr.bytes + 0x64 + 0x14) == ln &&
+               lp == rr.longStr[ut::kUtIdRelicBonus] && strcmp(lp, longBonus) == 0,
+           "relic replica, green: a long bonus in the replica's buffer", "spelling kept byte-exact");
+        ut::UtReplicaCapture id;
+        const bool back = ut::utReplicaReadIdentity(rr.bytes, &id);
+        bool othersEmpty = true;
+        for (int k = 1; k < ut::kUtIdStrCount; ++k)
+            if (k != ut::kUtIdRelicBonus && id.str[k][0]) othersEmpty = false;
+        ok(back && id.var1 == 3u && strcmp(id.str[ut::kUtIdRelicBonus], longBonus) == 0 &&
+               strcmp(id.str[ut::kUtIdBase], relBase) == 0 && strcmp(id.record, relRec) == 0 &&
+               othersEmpty && id.seed == 0u && id.var2 == 0u && id.b8 == 0u,
+           "relic replica: its identity reads back", "var1 3, the bonus, the folded record");
+        ut::UtReplica r2;
+        memset(&r2, 0, sizeof(r2));
+        ut::UtReplicaCapture id2;
+        const bool trip = ut::utReplicaFromIdentity(&r2, id) && ut::utReplicaReadIdentity(r2.bytes, &id2) &&
+                          ut::utReplicaSame(id, id2);
+        ok(trip, "relic replica: identity -> replica -> identity", "the row a take would build");
+        memset(&rr, 0, sizeof(rr));
+        const bool shortHeap = ut::utReplicaBuildRelic(&rr, relRec, 2u, shortBonus);
+        memcpy(&lp, rr.bytes + 0x64, sizeof(lp));
+        ok(shortHeap && lp == rr.longStr[ut::kUtIdRelicBonus] && u32(rr.bytes + 0x64 + 0x14) == 16u,
+           "relic replica: a 16-byte bonus takes the heap form", nullptr);
+        std::string bonusTooLong(261, 'a');
+        ok(!ut::utReplicaBuildRelic(&rr, relRec, 3u, "records/\x01.dbr") &&
+               !ut::utReplicaBuildRelic(&rr, relRec, 3u, bonusTooLong.c_str()) &&
+               !ut::utReplicaBuildRelic(&rr, "", 1u, "") && !ut::utReplicaBuildRelic(&rr, nullptr, 1u, ""),
+           "relic replica: refused", "a control byte, a bonus over 259, no record");
     }
 
     printf(g_fail ? "[proto]  FAILED: %d of %d\n" : "[proto]  ALL PASS (%d checks)\n",

@@ -13,17 +13,41 @@
 
 #include <windows.h>
 
+#include "ut_caravangeo.h"
 #include "ut_proto.h"
+#include "ut_relicpage.h"   // UtRelicList, UtRelicPlace, UtRelicPlaceState
 
 namespace ut {
 
 // Reads uniq-groups.txt (the mod folder, as generates it) and packs every group. Worker
 // thread, once, before the hooks. False = the view is unavailable (said by viewInit).
 bool liveInit(HMODULE selfModule);
+// The game in force switched: the group, KIND and union tables re-read from the game's files
+// (the old ones never freed). Game thread, no world loaded.
+bool liveReloadGame(HMODULE selfModule);
+// The retired tables still held (ut_retire.h), in bytes, for the memory lines. Any thread.
+size_t liveRetiredBytes();
+// The caravan geometry of the game in force (its uniq-geometry.txt, read by liveInit; the base
+// game's when the file is missing). False before liveInit has run for the game.
+bool liveCaravanGeometry(UtCaravanGeo* out);
+// The caravan window's size and the Transfer page's place in it (record px) in force: the game's
+// derived W line, or an [advanced] caravan_w / caravan_h / page_y the player set. True = derived.
+bool liveCaravanWindow(int* w, int* h, int* pageX, int* pageY);
 bool liveActive();
+// The grid in force: every group (and every several-group button's page) packed again on cols x
+// rows cells, the page rebuilt on the next tick. GAME THREAD (ut_panel's layout). False = nothing
+// changed (the same cells, or a group that cannot be packed on them: one WARN, the grid stays).
+bool liveSetGrid(int cols, int rows);
+// The cells every group is packed on now (16 x 15 until liveSetGrid changes them).
+void liveGridCells(int* cols, int* rows);
+// The largest slot of any group, in cells (a grid of the player's must hold it). False before
+// liveInit.
+bool liveMaxSlot(int* w, int* h);
 
 int liveGroupCount();
 const char* liveGroupLabel(int group);   // never null
+const char* liveGroupId(int group);      // the G line's id (head, chest ...); "" out of range
+const char* liveGroupTag(int group);     // the G line's tag (HEL, TOR ...); "" out of range
 int liveGroupEntries(int group);         // -1 out of range
 int livePageCount(int group);            // 0 out of range; the OWN filter's count when active
 const char* liveGroupRecord(int group, int k);   // the k-th record of a group, null out of range
@@ -58,14 +82,17 @@ int liveLeftover(UtCellRect* out, int cap);
 // only its OWNED records (.x: "owned somewhere" = ut_owned's store + inventory set;
 // the journal's rows > 0), packed into the group's same uniform slots in catalogue order
 // (gdut::placePage); the page count follows (at least one page, which may be empty). The start
-// state is the ini's owned_only; the OWN button flips it and the new value is written back into
-// the file (GD's rule) on the next game tick. While the owned set is UNKNOWN the filter cannot be
+// state is the game's uniquetab.state (owned_only); the OWN button flips it and the new value is
+// written back there (GD's rule) on the next game tick. While the owned set is UNKNOWN the filter cannot be
 // applied: the page shows every record (the owned self-checks need prototypes to run on) and the
 // label says "owned ?" - the lamp still shows what was asked.
 bool liveOwnedOnly();              // asked for (the lamp)
 bool liveOwnedOnlyActive();        // asked for AND the owned set is known (the page is filtered)
 bool liveToggleOwnedOnly();        // the OWN button (game thread): flips, rebuilds the page
-void livePersistOwnedOnly();       // the view tick: writes owned_only back after a flip
+void livePersistOwnedOnly();       // the view tick: writes owned_only, the group and the row back
+// The world load, after the save set chose the game (game thread): the game's uniquetab.state -
+// its group, row and OWN switch - comes into force when the game changed.
+void liveFollowGame();
 // ut_owned, after every refresh of the owned set (game thread): re-reads every record's owned
 // flag (ownedRecordState); a change while the filter is active rebuilds the page.
 void liveOwnedChanged();
@@ -83,6 +110,12 @@ void liveSearchApply(bool active, unsigned indexedMask);
 // Prototype i of the last built page shows `record`: is it highlighted now (a query stands and
 // the record matches)? Read every frame by the page draw.
 bool liveSearchHighlight(int i, const char* record);
+// The relic page's search: one text per (record, bonus). The states of the relic list (red, then each
+// bonus, per row; liveRelicStateIndex = the row's first state + slot, -1 = none) and the match of
+// one of them (a green slot's; the search sets it). Game thread.
+int liveRelicStateCount();
+int liveRelicStateIndex(int row, int slot);
+void liveSearchSetRelicMatch(int stateIndex, bool match);
 // Any thread: the marks of the last apply (0 while no query stands).
 unsigned liveSearchMarks();
 // Any thread: the groups fully indexed at the last apply (0 while no query stands).
@@ -107,10 +140,61 @@ bool liveRebuildInput(int* wheelTicks, long long* firstQpc);
 void liveMarkDirty();
 // is `folded` (lower case, '/') one of the catalogue's records? Game thread; no allocation.
 bool liveHasRecord(const char* folded);
+struct UtMiTable;   // ut_mikind.h
+// The catalogue's KIND of a record (any spelling): 1 = a monster infrequent, 0 = not (or not a
+// catalogue record), -1 = unknown (catalogue.bin could not be read). Lock-free: the table is built
+// once by liveInit and never changes.
+int liveRecordKind(const char* record);
+// A monster infrequent's catalogue name and item level (the refusal's words); false = not one.
+bool liveRecordFacts(const char* record, char* name, size_t nameCap, int* level);
+// The monster infrequent records the KIND table holds; -1 = catalogue.bin was not read.
+int liveMiCount();
+// The KIND table itself (null = catalogue.bin not read): utMiRollWhy's input.
+const UtMiTable* liveMiTable();
 // Fills the WANTED page's places (catalogue record + top-left cell) and makes it the shown one.
 int livePagePlaces(UtProtoPlace* out, int cap);
 
+// ONE PAGE PER BUTTON (game thread, ut_panel's resolve of the buttons file): `buttonOf[g]` = group
+// g's button in the buttons file (-1 = on no button). A button holding several groups shows them as
+// one page - their records in group order, the largest member's slot, one row window, one OWN
+// filter, one label - keyed by its FIRST group (the rep); liveSelectGroup selects the rep.
+void liveSetButtons(const int* buttonOf, int n);
+int liveUnionRep(int group);                 // the group whose page shows `group`
+int liveShownMembers(int* out, int cap);     // the groups the shown page holds (group order)
+int liveMembersOf(int group, int* out, int cap);   // the groups the page of `group` holds
+int liveShownCellGroup();                    // the group whose slot the shown page takes (-1 none)
+bool liveShownSlot(int* w, int* h);          // that slot, in sack cells (false = none shown)
+
 // "groups=15 pages=38 shown=0/0 wanted=0/0"
 const char* liveStatus();
+
+// ---- the relic and charm page (uniq-relics.txt; the group whose G line id is "relics") ----------
+// Its window starts at a BLOCK (liveShownPage = the first shown block); the wheel moves one block,
+// < > / PageUp / PageDown a fixed page (ut_relicpage.h). Game thread unless said otherwise.
+bool liveIsRelicGroup(int group);      // `group` is the relic page's group (and the list is read)
+// The relic layout's area (whole cells) and its two gaps, from the panel's layout pass while a
+// relic page is shown; laid out again and the page rebuilt only when one of them changes.
+bool liveSetRelicGeometry(int cols, int rows, int blockGap, int bonusGap);
+int liveRelicGroup();                  // that group, -1 = none
+const UtRelicList* liveRelicList();    // the list of the game in force (null = none)
+int liveRelicFind(const char* folded); // a record's row in that list, -1 = not a relic / charm
+// A relic or charm record's facts for the deposit: its shards N, its tier, its bonus table as the
+// table spells it (`*tableN` entries). False = not on the relic list. No allocation.
+bool liveRelicFacts(const char* folded, unsigned* shards, int* tier, const char* const** table,
+                    int* tableN);
+// The shown relic window's places, dead cells included, in reading order, with what each shows
+// (count, empty, the row its prototype is built from): the page draw reads these every frame -
+// they change only when the page is built (no journal read here). 0 / false off the relic page.
+int liveRelicPlaceCount();
+bool liveRelicPlaceAt(int i, UtRelicPlace* place, UtRelicPlaceState* state);
+// The shown window: its first block, one past its last, the block count, the fixed page of its
+// first block (0-based) and the page count. False off the relic page.
+bool liveRelicWindow(int* firstBlock, int* endBlock, int* blocks, int* page, int* pages);
+// The label's numbers from the last relist: green slots holding at least one item, every bonus
+// slot, and the shards stored in every red slot.
+bool liveRelicTotals(int* bonusesHeld, int* bonusSlots, unsigned* pieces);
+// The relic page is shown and the journal moved since its facts were taken (one counter read):
+// the view's tick rebuilds the page.
+bool liveRelicStale();
 
 }  // namespace ut

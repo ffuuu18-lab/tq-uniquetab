@@ -17,6 +17,7 @@
 #include "../src/model/catalogue.h"
 #include "../src/model/collection.h"
 #include "../src/model/layout.h"
+#include "../src/gen/ut_groups.h"
 
 using namespace gdut;
 
@@ -97,7 +98,8 @@ int main(int argc, char** argv) {
                 path, cat.formatVersion(), cat.byteSize(), cat.itemCount(), cat.setCount());
     CHECK_EQ(cat.formatVersion(), Catalogue::kFormatVersion, "format version");
     CHECK(cat.loaded(), "catalogue reports loaded");
-    CHECK_EQ(cat.itemCount(), 1588, "item count");   // TQ AE 2.10: 1,602 - 14 EXCLUDE
+    CHECK_EQ(cat.itemCount(), 2774, "item count");   // TQ AE 2.10: 1,582 uniques + 1,099 MIs + 93 arcane formulae
+                                                      // (after EXCLUDE) = 2,774
 
     // -------------------------------------------------------- group breakdown
     rule("items per slot group");
@@ -117,11 +119,11 @@ int main(int argc, char** argv) {
                     g, slotGroupName(group), r.count, r.first, epic, r.count - epic);
     }
     CHECK_EQ(groupTotal, cat.itemCount(), "sum of group ranges");
-    CHECK_EQ(equipmentGroups, 1498, "equipment items (groups Helm..Medal)");
+    CHECK_EQ(equipmentGroups, 2591, "equipment items (groups Helm..Medal)");
     CHECK_EQ(cat.groupRange(SlotGroup::Relic).count, 90, "relic items (TQ artifacts)");
-    CHECK_EQ(cat.equipmentCount(), 1498, "header equipment count");
+    CHECK_EQ(cat.equipmentCount(), 2591, "header equipment count");
     CHECK_EQ(cat.relicCount(), 90, "header relic count");
-    CHECK_EQ(cat.defaultVisibleCount(), 1588, "header default-visible count");
+    CHECK_EQ(cat.defaultVisibleCount(), 2681, "header default-visible count");
 
     std::size_t defaultVisible = 0, legendaryDefault = 0, setPieces = 0, withBitmap = 0;
     for (const ItemView& it : cat.items()) {
@@ -134,8 +136,13 @@ int main(int argc, char** argv) {
     }
     std::printf("  default visible %zu (legendary %zu), set pieces %zu, with bitmap %zu\n",
                 defaultVisible, legendaryDefault, setPieces, withBitmap);
-    CHECK_EQ(defaultVisible, 1588, "items flagged DefaultVisible");
-    CHECK_EQ(setPieces, 464, "items flagged SetPiece");
+    CHECK_EQ(defaultVisible, 2681, "items flagged DefaultVisible");
+    CHECK_EQ(setPieces, 462, "items flagged SetPiece");
+    {
+        int mi = 0;
+        for (std::size_t i = 0; i < cat.itemCount(); ++i) mi += catIsMi(cat.item(i)) ? 1 : 0;
+        CHECK_EQ(mi, 1099, "items flagged MonsterInfrequent (the KIND mark, collect_mi=1)");
+    }
 
     // --------------------------------------------------------- record lookup
     rule("record -> index map");
@@ -186,17 +193,20 @@ int main(int argc, char** argv) {
                 cat.setCount(), memberLinks,
                 static_cast<int>(cat.sets()[0].name.size()), cat.sets()[0].name.data(),
                 cat.sets()[0].memberCount);
-    CHECK_EQ(cat.setCount(), 110, "set count (TQ: set records folded; 2 sets are spelled two ways)");
+    CHECK_EQ(cat.setCount(), 109, "set count (TQ: set records folded; 2 sets are spelled two ways)");
     {
-        int trailing = 0, order = 0;
+        int trailing = 0, order = 0, kind = 0;
         for (std::size_t i = 0; i < cat.itemCount(); ++i) {
             const ItemView& it = cat.item(i);
             if (!it.name.empty() && (it.name.back() == ' ' || it.name.back() == '\t')) ++trailing;
-            if (i > 0 && cat.item(i - 1).group == it.group && cat.item(i - 1).itemLevel > it.itemLevel)
-                ++order;
+            if (i == 0 || cat.item(i - 1).group != it.group) continue;
+            const ItemView& prev = cat.item(i - 1);
+            if (catIsMi(prev) && !catIsMi(it)) ++kind;
+            if (catIsMi(prev) == catIsMi(it) && prev.itemLevel > it.itemLevel) ++order;
         }
+        CHECK_EQ(kind, 0, "the uniques before the monster infrequents inside each group");
         CHECK_EQ(trailing, 0, "no display name ends in a blank");
-        CHECK_EQ(order, 0, "items ascend by item level inside each group (the TQ sort key)");
+        CHECK_EQ(order, 0, "items ascend by item level inside each group and KIND (the TQ sort key)");
     }
     CHECK_EQ(memberLinks, setPieces, "set member links == set pieces");
 
@@ -283,9 +293,9 @@ int main(int argc, char** argv) {
     std::printf("  visible items %d, columns %d, rows %d, contentHeight %d, maxScroll %d\n",
                 grid.visibleItemCount(), grid.columns(), grid.rows(),
                 grid.contentHeight(), grid.maxScroll());
-    CHECK_EQ(grid.visibleItemCount(), 1588, "default filter shows equipment + relics");
+    CHECK_EQ(grid.visibleItemCount(), 2681, "default filter shows equipment + relics");
     CHECK_EQ(grid.columns(), 7, "columns in a 320 px wide grid");
-    CHECK_EQ(grid.rows(), (1588 + 6) / 7, "rows");
+    CHECK_EQ(grid.rows(), (2681 + 6) / 7, "rows");
     CHECK_EQ(grid.contentHeight(), grid.rows() * 42 - 2, "content height");
     CHECK_EQ(grid.maxScroll(), grid.contentHeight() - 608, "max scroll");
     CHECK_EQ(grid.scrollOffset(), 0, "initial scroll");
@@ -482,7 +492,7 @@ int main(int argc, char** argv) {
     // ------------------------------------------------------- owned filtering
     rule("filters");
     // four marked through the real event path, one through the test helper
-    const int marked[5] = {0, 100, 500, 1000, 1587};
+    const int marked[5] = {0, 100, 500, 1000, 2677};
     for (int i = 0; i < 4; ++i) {
         owned.onItemAdded(static_cast<std::uint32_t>(4000 + i), cat.item(marked[i]).record);
         CHECK_EQ(owned.owned(marked[i]), 1, "onItemAdded marks the record owned");
@@ -508,7 +518,7 @@ int main(int argc, char** argv) {
     missingOnly.owned = OwnedFilter::MissingOnly;
     grid.relayout(transferGrid, missingOnly, &owned);
     std::printf("  missing-only: %d items\n", grid.visibleItemCount());
-    CHECK_EQ(grid.visibleItemCount(), 1588 - 5, "missing-only filter");
+    CHECK_EQ(grid.visibleItemCount(), 2681 - 5, "missing-only filter");
 
     Filters legendaryOnly = filters;
     legendaryOnly.classificationMask = 1u << static_cast<int>(Classification::Legendary);
@@ -586,7 +596,9 @@ int main(int argc, char** argv) {
         std::vector<GroupList> groups;
         std::string gerr;
         CHECK(parseGroupsText(text, &groups, &gerr), gerr.c_str());
-        CHECK_EQ(groups.size(), 15, "15 groups");
+        // the generated set ends with the relic page's G line; the older 7-field fixture has none
+        const bool wantRelic = argc <= 2;
+        CHECK_EQ(groups.size(), wantRelic ? 17u : 16u, "16 groups, then the relic page's when generated");
         std::vector<GroupList> junk;
         CHECK(!parseGroupsText("E\trecords/x.dbr\t1\t1\r\n", &junk, &gerr), "E before G refused");
         CHECK(!parseGroupsText("G\t0\tX\t16\t15\t32\t32\t2\r\nE\ta\t1\t1\r\n", &junk, &gerr),
@@ -602,18 +614,127 @@ int main(int argc, char** argv) {
         CHECK(!parseGroupsText("G\t0\tX\t8\t3\t64\t128\t1\r\nE\ta\t2\t3\r\nG\t1\tY\t16\t15\t32\t32"
                                "\t1\r\nE\tb\t1\t1\r\n", &junk, &gerr),
               "a wrong G geometry is refused before the next group too");
+        // the game's own area (its uniq-geometry.txt P line): a G line the generator wrote on a
+        // 20 x 20 caravan area is read on 20 x 20, and refused on the base game's 16 x 15
+        const char* wideArea = "G\t0\tSouls\t20\t20\t32\t32\t2\tsouls\tSOU\r\nE\ta\t1\t1\r\nE\tb\t1\t1\r\n"
+                           "G\t1\tSpears\t20\t4\t32\t160\t1\tspear2h\tSPR\r\nE\tc\t1\t5\r\n";
+        CHECK(parseGroupsText(wideArea, &junk, &gerr, 20, 20) && junk.size() == 2,
+              "G lines written on a 20 x 20 area are read on the game's 20 x 20");
+        CHECK(!parseGroupsText(wideArea, &junk, &gerr) &&
+                  gerr.find("line 4: the previous group's G geometry is not its entries' slot") !=
+                      std::string::npos,
+              "the same G lines are refused on 16 x 15 (a compile-time area refuses a larger game)");
+        {
+            std::vector<GroupList> lists;
+            std::vector<PackedGroup> packed;
+            CHECK(readGameGroups(wideArea, 20, 20, &lists, &packed, &gerr) && packed.size() == 2 &&
+                      packed[0].slot.cols == 20 && packed[0].slot.rows == 20 &&
+                      packed[0].pages == 1 && packed[1].slot.cols == 20 &&
+                      packed[1].slot.rows == 4 && packed[1].placed.size() == 1,
+                  "readGameGroups packs every group on the game's area: the slot is the G line's");
+            CHECK(!readGameGroups(wideArea, 16, 15, &lists, &packed, &gerr) && lists.empty() &&
+                      packed.empty(),
+                  "readGameGroups refuses the set on another area and keeps nothing");
+            CHECK(!readGameGroups(wideArea, 0, 20, &lists, &packed, &gerr), "an empty area is refused");
+            CHECK(readGameGroups(text, kHostCols, kHostRows, &lists, &packed, &gerr) &&
+                      packed.size() == groups.size(),
+                  "the base game's set reads on 16 x 15 through readGameGroups");
+            // the MI tiers: within one display name the page order follows the item level (TQ's
+            // level requirement comes from it: levelRequirement is 0 on the monster infrequents),
+            // then the record; catalogue.bin orders the same records the same way
+            int runs = 0, wrong = 0, binWrong = 0;
+            std::string firstWrong;
+            for (const GroupList& g : groups) {
+                for (std::size_t k = 1; k < g.entries.size(); ++k) {
+                    const int a = cat.indexOfRecord(g.entries[k - 1].record);
+                    const int b = cat.indexOfRecord(g.entries[k].record);
+                    if (a < 0 || b < 0) continue;
+                    const ItemView& ia = cat.item((std::size_t)a);
+                    const ItemView& ib = cat.item((std::size_t)b);
+                    if (ia.name != ib.name || ia.classification != ib.classification) continue;
+                    ++runs;
+                    if (ia.itemLevel > ib.itemLevel ||
+                        (ia.itemLevel == ib.itemLevel && ia.record >= ib.record)) {
+                        if (!wrong++) firstWrong = std::string(ia.record) + " before " + std::string(ib.record);
+                    }
+                    if (a > b) ++binWrong;
+                }
+            }
+            std::printf("  MI tiers: %d same-name neighbours, %d out of item-level order, %d against "
+                        "catalogue.bin's order\n", runs, wrong, binWrong);
+            if (argc > 2) {   // a groups file of an older install keeps the order it was written in
+                std::printf("  MI tiers: not asked of %s (an older install's file)%c", gpath, 10);
+            } else {
+                CHECK(runs > 600 && wrong == 0,
+                      firstWrong.empty() ? "same-name neighbours in item-level order" : firstWrong.c_str());
+                CHECK(binWrong == 0, "catalogue.bin orders every same-name pair as the page does");
+            }
+        }
+        // the G line's id and tag (GD's formatGLine, ut_groups.h): the data's own match the
+        // built-in table; the older 7-field line takes them from the table by its label
+        for (const GroupList& g : groups) {
+            if (g.id == utg::kRelicGroupId) continue;
+            const utg::BuiltinGroup* b = utg::builtinByLabel(g.label);
+            CHECK(b && g.id == b->id && g.tag == b->tag, g.label.c_str());
+        }
+        CHECK(groups.size() == (wantRelic ? 17u : 16u) && groups[0].id == "head" && groups[0].tag == "HEL" &&
+                  groups[14].id == "artifact" && groups[14].tag == "ART" &&
+                  groups[15].id == "blueprint" && groups[15].tag == "BLU" &&
+                  (!wantRelic || (groups[16].id == utg::kRelicGroupId && groups[16].tag == utg::kRelicGroupTag &&
+                  groups[16].label == utg::kRelicGroupLabel && groups[16].declared == 0 &&
+                  groups[16].entries.empty())),
+              "the data's first group is head / HEL; artifact / ART, then blueprint / BLU; the relic "
+              "page's relics / REL last, with no entry");
+        CHECK(utg::builtinBySlot("relic") && std::string(utg::builtinBySlot("relic")->id) == "artifact" &&
+                  !utg::builtinById("relic"),
+              "the Artifacts' slot word is relic and their id artifact; no group has the id relic");
+        CHECK(parseGroupsText("G\t1\tTorso\t8\t5\t64\t96\t1\r\nE\ta\t2\t3\r\n", &junk, &gerr) &&
+                  junk[0].id == "chest" && junk[0].tag == "TOR",
+              "a 7-field G line takes the table's id and tag by its label");
+        CHECK(parseGroupsText("G\t3\tMy pick\t16\t15\t32\t32\t1\r\nE\ta\t1\t1\r\n", &junk, &gerr) &&
+                  junk[0].id == "group3" && junk[0].tag == "MYP",
+              "a 7-field G line with a label the table lacks gets group<n> and the label's tagFrom");
+        CHECK(parseGroupsText("G\t0\tX\t16\t15\t32\t32\t1\tmine\tMIN\r\nE\ta\t1\t1\r\n", &junk,
+                              &gerr) && junk[0].id == "mine" && junk[0].tag == "MIN",
+              "a 9-field G line carries its own id and tag");
+        CHECK(!parseGroupsText("G\t0\tX\t16\t15\t32\t32\t1\tmine\r\nE\ta\t1\t1\r\n", &junk, &gerr),
+              "an 8-field G line (an id without a tag) is refused");
+        CHECK(!parseGroupsText("G\t0\tX\t16\t15\t32\t32\t1\tMine\tMIN\r\nE\ta\t1\t1\r\n", &junk,
+                               &gerr), "an id outside a-z 0-9 _ . - is refused");
+        CHECK(!parseGroupsText("G\t0\tX\t16\t15\t32\t32\t1\tmine\tMINE\r\nE\ta\t1\t1\r\n", &junk,
+                               &gerr), "a tag that is not 3 characters is refused");
+        {
+            utg::GLine gl;
+            gl.index = 0; gl.label = "Helms"; gl.cols = 8; gl.rows = 7; gl.cellW = 64; gl.cellH = 64;
+            gl.count = 167; gl.id = "head"; gl.tag = "HEL";
+            utg::GLine back;
+            CHECK(utg::formatGLine(gl) == "G\t0\tHelms\t8\t7\t64\t64\t167\thead\tHEL" &&
+                      utg::parseGLine(utg::formatGLine(gl), back) && back.nineFields && back.id == "head" &&
+                      back.tag == "HEL" && back.count == 167,
+                  "formatGLine writes GD's 9 fields after G and parseGLine reads them back");
+        }
         // the page table (section 1), from the data's own footprints
         struct Expect { const char* label; int w, h, per, pages; };
-        static const Expect kTable[15] = {
-            {"Helms", 2, 2, 56, 3},  {"Torso", 2, 3, 40, 7},    {"Arms", 2, 2, 56, 3},
-            {"Legs", 2, 2, 56, 3},   {"Amulets", 2, 1, 120, 1}, {"Rings", 1, 1, 240, 1},
-            {"Shields", 2, 3, 40, 3}, {"Axes", 2, 3, 40, 2},    {"Maces", 2, 4, 24, 4},
-            {"Staves", 2, 4, 24, 4}, {"Swords", 2, 4, 24, 4},   {"Throwing", 2, 3, 40, 2},
-            {"Spears", 1, 5, 48, 2}, {"Bows", 1, 4, 48, 2},     {"Artifacts", 2, 2, 56, 2}};
+        static const Expect kTable[16] = {
+            {"Helms", 2, 2, 56, 7},  {"Torso", 2, 3, 40, 12},   {"Arms", 2, 2, 56, 6},
+            {"Legs", 2, 2, 56, 5},   {"Amulets", 2, 1, 120, 1}, {"Rings", 1, 1, 240, 1},
+            {"Shields", 2, 3, 40, 4}, {"Axes", 2, 3, 40, 4},    {"Maces", 2, 4, 24, 6},
+            {"Staves", 2, 4, 24, 8}, {"Swords", 2, 4, 24, 6},   {"Throwing", 2, 3, 40, 2},
+            {"Spears", 1, 5, 48, 3}, {"Bows", 1, 4, 48, 3},     {"Artifacts", 2, 2, 56, 2},
+            {"Arcane Formulae", 2, 1, 120, 1}};
         int totalPages = 0, totalRecords = 0;
         std::unordered_map<std::string, int> seen;
         for (std::size_t g = 0; g < groups.size(); ++g) {
             const GroupList& gl = groups[g];
+            if (gl.id == utg::kRelicGroupId) {   // the relic page's group: no entry, so no page
+                std::vector<PackItem> none;
+                std::vector<PackPlacement> pl;
+                SlotGeometry sg;
+                CHECK(g + 1 == groups.size() && gl.entries.empty() &&
+                          packSlots(none, kHostCols, kHostRows, &pl, &sg) == 0 && pl.empty(),
+                      "the relic group is the last, has no entry and packs into no page");
+                continue;
+            }
             std::vector<PackItem> items;
             for (std::size_t k = 0; k < gl.entries.size(); ++k)
                 items.push_back(PackItem{static_cast<int>(k), gl.entries[k].w, gl.entries[k].h});
@@ -633,7 +754,7 @@ int main(int argc, char** argv) {
             CHECK(sg.w == maxW && sg.h == maxH, "slot = the group's largest footprint");
             CHECK_EQ(pages, (static_cast<int>(items.size()) + sg.perPage() - 1) / sg.perPage(),
                      "pages = ceil(records / slots per page)");
-            CHECK(g < 15 && gl.label == kTable[g].label && sg.w == kTable[g].w &&
+            CHECK(g < 16 && gl.label == kTable[g].label && sg.w == kTable[g].w &&
                       sg.h == kTable[g].h && sg.perPage() == kTable[g].per &&
                       pages == kTable[g].pages,
                   "the design notes' page table row");
@@ -682,9 +803,9 @@ int main(int argc, char** argv) {
             totalRecords += static_cast<int>(items.size());
         }
         std::printf("  total: %d records on %d pages\n", totalRecords, totalPages);
-        CHECK_EQ(totalRecords, 1588, "every catalogue record is on a page");
-        CHECK_EQ(seen.size(), 1588, "each record exactly once");
-        CHECK_EQ(totalPages, 43, "43 pages in total (the design notes' table)");
+        CHECK_EQ(totalRecords, 2774, "every catalogue record is on a page");
+        CHECK_EQ(seen.size(), 2774, "each record exactly once");
+        CHECK_EQ(totalPages, 71, "71 pages in total (the uniques' 42, the monster infrequents, the formulae's 1)");
         for (const auto& kv : seen)
             CHECK(cat.indexOfRecord(kv.first) >= 0, "every paged record is in the catalogue");
 
@@ -726,6 +847,7 @@ int main(int argc, char** argv) {
             int masks = 0, placedTotal = 0;
             for (std::size_t gi = 0; gi < groups.size(); ++gi) {
                 const GroupList& gl = groups[gi];
+                if (gl.id == utg::kRelicGroupId) continue;   // no entry: nothing to filter
                 const int n = static_cast<int>(gl.entries.size());
                 std::vector<PackItem> items;
                 std::vector<unsigned char> fw(static_cast<std::size_t>(n)), fh(static_cast<std::size_t>(n));
@@ -945,6 +1067,7 @@ int main(int argc, char** argv) {
             long long checked = 0;
             for (std::size_t gi = 0; gi < groups.size(); ++gi) {
                 const GroupList& gl = groups[gi];
+                if (gl.id == utg::kRelicGroupId) continue;   // no entry: nothing to filter
                 const int n = static_cast<int>(gl.entries.size());
                 std::vector<PackItem> items;
                 std::vector<unsigned char> fw(static_cast<std::size_t>(n)), fh(static_cast<std::size_t>(n));
@@ -983,6 +1106,7 @@ int main(int argc, char** argv) {
             long long masked = 0;
             for (std::size_t gi = 0; gi < groups.size(); ++gi) {
                 const GroupList& gl = groups[gi];
+                if (gl.id == utg::kRelicGroupId) continue;   // no entry: nothing to filter
                 const int n = static_cast<int>(gl.entries.size());
                 std::vector<PackItem> items;
                 std::vector<unsigned char> fw(static_cast<std::size_t>(n)), fh(static_cast<std::size_t>(n));

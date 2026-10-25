@@ -54,6 +54,8 @@
 #include "ut_log.h"
 #include "ut_ownedfold.h"
 #include "ut_proto.h"
+#include "ut_relicpage.h"   // utRelicTipOf / utRelicTipLine (a relic or charm's line)
+#include "ut_rescue.h"      // journalRowsOf
 #include "ut_rescue.h"
 #include "ut_store.h"
 
@@ -197,6 +199,8 @@ static_assert(TQ_TIP_ITEMARTIFACT_GETUIDISPLAYTEXT_CC == TQCC_THISCALL, "ItemArt
 static_assert(TQ_TIP_ITEMRELIC_GETUIDISPLAYTEXT_CC == TQCC_THISCALL, "ItemRelic");
 static_assert(TQ_TIP_GAMETEXTLINETOSTRING_CC == TQCC_CDECL, "GameTextLineToString");
 static_assert(TQ_TIP_GAMETEXTLINE_CTOR_CC == TQCC_THISCALL, "GameTextLine ctor");
+static_assert(TQ_ITEM_GETPREFIXNAME_CC == TQCC_THISCALL, "Item::GetPrefixName");
+static_assert(TQ_ITEM_GETSUFFIXNAME_CC == TQCC_THISCALL, "Item::GetSuffixName");
 
 // The raw addresses GetProcAddress handed back, kept as void* so the alias check and MinHook see
 // exactly what the export table holds and no function-pointer cast is ever needed on that path.
@@ -204,6 +208,7 @@ void* r_ItemText = nullptr;
 void* r_EquipText = nullptr;
 void* r_ArtifactText = nullptr;
 void* r_RelicText = nullptr;
+void* r_FormulaText = nullptr;
 void* r_ToString = nullptr;
 void* r_LineCtor = nullptr;
 
@@ -213,6 +218,7 @@ PfnItem_GetUIDisplayText o_ItemText = nullptr;
 PfnItem_GetUIDisplayText o_EquipText = nullptr;
 PfnItem_GetUIDisplayText o_ArtifactText = nullptr;
 PfnItem_GetUIDisplayText o_RelicText = nullptr;
+PfnItem_GetUIDisplayText o_FormulaText = nullptr;
 PfnGameTextLineToString o_ToString = nullptr;
 
 // ---- session state ----------------------------------------------------------------------------
@@ -229,6 +235,7 @@ volatile LONG g_latches = 0;      // collectible items whose tooltip was latched
 volatile LONG g_allocBalance = 0; // borrowed arrays alive right now; 0 at rest, always
 volatile LONG g_faults = 0;
 volatile LONG g_refusedShape = 0; // vectors the swap refused because their shape made no sense
+volatile LONG g_innerSuppressed = 0; // inner (crafted-artifact) latches an arcane formula's tooltip suppressed
 char g_offWhy[192] = "";
 
 // The two prepared lines. Built ONCE per process by the engine's own exported constructor, never
@@ -241,6 +248,19 @@ char g_textYes[96] = "";
 char g_textNo[96] = "";
 
 char g_status[320] = "tooltip: not initialised";
+
+// THE THIRD LINE: "In your collection (another roll)" (GD's). A monster infrequent whose record
+// the collection holds, hovered with a DIFFERENT roll - prefix, suffix or seed - than the stored
+// one. Same class as the collected line; its text is the collected line's text plus GD's default
+// words. Not ready, or off = such an item reads the plain collected line, never nothing.
+const char* const kRollSuffix = " (another roll)";
+unsigned char g_lineRoll[kLineSize];
+volatile LONG g_rollReady = 0;
+volatile LONG g_rollOff = 0;     // 1 = off for the session: a missing binding or a fault
+volatile LONG g_rollLines = 0;   // tooltips that got the "(another roll)" line
+volatile LONG g_rollReplica = 0;  // the replica's offset in an Item (rollInit decodes it), 0 = none
+char g_textRoll[200] = "";       // g_textYes + g_rollWords
+char g_rollWords[96] = " (another roll)";   // [tab] tooltip.roll of the buttons file
 
 // ---- little helpers ---------------------------------------------------------------------------
 void* proc(HMODULE m, const char* name, const char* pretty) {
@@ -413,31 +433,52 @@ bool classAt(const unsigned char* first, unsigned int index, unsigned int* out) 
 //   (a) the fingerprint is always asked - stack addresses repeat, so a bare pointer is no proof.
 //   (b) the latch is CONSUMED BY THE FIRST GameTextLineToString after it, match or no match.
 //       A latch that survived a non-match would go stale, and latches are routinely left
-//       unclaimed: GetUIDisplayText has non-tooltip callers, and the OneShot_* / QuestItem /
-//       ItemArtifactFormula overrides are NOT hooked (OneShot_Dye/Potion/Scroll and QuestItem
-//       call Item's base, which IS hooked; they are never catalogue records, so the latch is
-//       never set for them).
+//       unclaimed: GetUIDisplayText has non-tooltip callers, and the OneShot_* / QuestItem
+//       overrides are NOT hooked (OneShot_Dye/Potion/Scroll and QuestItem call Item's base,
+//       which IS hooked; they are never catalogue records, so the latch is never set for them).
+//       ItemArtifactFormula's override IS hooked (hk_FormulaGetUIDisplayText): an arcane formula
+//       is a catalogue record and latches its OWN line, never its crafted artifact's
+//       (t_formulaDepth).
 struct Latch {
     unsigned int count;
     unsigned int firstClass;
     unsigned int lastClass;
-    int state;  // 0 = none / consumed, 1 = COLLECTED, 2 = NOT COLLECTED
+    int state;  // 0 = none / consumed, 1 = COLLECTED, 2 = NOT COLLECTED, 3 = ANOTHER ROLL
     DWORD tick;
 };
 __declspec(thread) Latch t_latch;
 // Set by the property search around its own GetUIDisplayText call (tooltipSearchCapture).
 __declspec(thread) bool t_searchCapture = false;
 
+// THE FORMULA LATCH. `ItemArtifactFormula::GetUIDisplayText` (Game.dll 0x1BC1A0) builds an arcane
+// formula's rollover and, part-way through, CREATES the crafted artifact (Item::CreateItem in its
+// helpers at 0x1BB280 / 0x1BB4A0) and asks it for its texts. Any of the artifact's hooked text
+// builders running inside the formula's would latch the ARTIFACT's collection state, which the
+// prefix tier would then put under the formula. The formula detour raises this per-thread depth
+// around its trampoline; while it is above zero `latchBody` latches NOTHING (and clears what it
+// finds), and on the way out - the depth back at zero - the formula detour latches the FORMULA'S
+// own record over the complete vector. Lowered in a `__finally`, so an engine C++ exception
+// unwinding through the trampoline cannot leave it raised.
+__declspec(thread) int t_formulaDepth;
+
 void clearLatch() {
     t_latch.state = 0;
 }
 
-const unsigned char* pendingLine(const void* vec) {
+// A partial relic piece's line (latch state 4): the collected words and its record's stored shards,
+// "In your collection (pieces 15)". Built on this thread by the latch and read by the swap of the
+// same thread's next GameTextLineToString.
+const int kRelicLineChars = 160;
+__declspec(thread) unsigned char t_relicLine[kLineSize];
+__declspec(thread) unsigned short t_relicText[kRelicLineChars];
+
+const unsigned char* pendingLine(const void* vec, unsigned* lineCount) {
+    *lineCount = 1;
     if (!vec) return nullptr;
     if (InterlockedCompareExchange(&g_tooltipOff, 0, 0)) return nullptr;
     if (!InterlockedCompareExchange(&g_linesReady, 0, 0)) return nullptr;
     if (!g_cfg.tooltipMark) return nullptr;
-    if (t_latch.state != 1 && t_latch.state != 2) return nullptr;
+    if (t_latch.state < 1 || t_latch.state > 4) return nullptr;
     const Latch cur = t_latch;   // POD copy
     clearLatch();                // ONE-SHOT: consumed here whether it matches below or not
     if (GetTickCount() - cur.tick > kLatchMaxAgeMs) return nullptr;
@@ -453,6 +494,12 @@ const unsigned char* pendingLine(const void* vec) {
     if (!tooltipLatchMatch(cur.count, cur.firstClass, cur.lastClass, count, firstCls, lastCls,
                            prefixRead, atPrefixEnd)) {
         return nullptr;
+    }
+    if (cur.state == 4) return t_relicLine;   // a partial relic piece: its one built line
+    if (cur.state == 3) {
+        if (!InterlockedCompareExchange(&g_rollReady, 0, 0)) return g_lineYes;
+        InterlockedIncrement(&g_rollLines);
+        return g_lineRoll;
     }
     return cur.state == 1 ? g_lineYes : g_lineNo;
 }
@@ -486,8 +533,13 @@ int tooltipLatchMatch(unsigned latchCount, unsigned latchFirst, unsigned latchLa
 // is not a plausible tooltip.
 bool tooltipSwapBuild(const void* vec, const unsigned char* extraLine, unsigned char** ownedOut,
                       UtTooltipSwap* out) {
+    return tooltipSwapBuildN(vec, extraLine, 1, ownedOut, out);
+}
+
+bool tooltipSwapBuildN(const void* vec, const unsigned char* extraLine, unsigned k,
+                       unsigned char** ownedOut, UtTooltipSwap* out) {
     if (ownedOut) *ownedOut = nullptr;
-    if (!vec || !extraLine || !ownedOut || !out) return false;
+    if (!vec || !extraLine || !ownedOut || !out || k < 1 || k > 64) return false;
     const unsigned char* begin = nullptr;
     const unsigned char* end = nullptr;
     utGuardEnter();
@@ -507,7 +559,7 @@ bool tooltipSwapBuild(const void* vec, const unsigned char* extraLine, unsigned 
         InterlockedIncrement(&g_refusedShape);
         return false;
     }
-    unsigned char* buf = (unsigned char*)malloc((n + 1) * kLineSize);
+    unsigned char* buf = (unsigned char*)malloc((n + k) * kLineSize);
     if (!buf) return false;
     utGuardEnter();
     const bool copied = copyLinesSeh(buf, begin, bytes);
@@ -516,9 +568,9 @@ bool tooltipSwapBuild(const void* vec, const unsigned char* extraLine, unsigned 
         free(buf);
         return false;
     }
-    memcpy(buf + bytes, extraLine, kLineSize);
+    memcpy(buf + bytes, extraLine, k * kLineSize);
     out->begin = buf;
-    out->end = buf + bytes + kLineSize;
+    out->end = buf + bytes + k * kLineSize;
     out->cap = out->end;
     *ownedOut = buf;
     InterlockedIncrement(&g_allocBalance);
@@ -530,6 +582,8 @@ void tooltipSwapFree(unsigned char* owned) {
     free(owned);
     InterlockedDecrement(&g_allocBalance);
 }
+
+unsigned tooltipReplicaOffset() { return (unsigned)InterlockedCompareExchange(&g_rollReplica, 0, 0); }
 
 long tooltipSwapAllocBalance() {
     return InterlockedCompareExchange(&g_allocBalance, 0, 0);
@@ -593,6 +647,86 @@ int collectedState(const char* record, bool* fromMemo) {
     return state;
 }
 
+// ---- "is it the SAME ROLL?" (a held monster infrequent) -------------------------------------------
+// The roll line turns itself off for the session, ONE line, never retried.
+void rollDisable(const char* why) {
+    if (InterlockedExchange(&g_rollOff, 1)) return;
+    logE("tooltip: the \"%s\" line is OFF for this session - %s; a monster infrequent of another "
+         "roll reads the plain collected line", g_textRoll, why ? why : "?");
+}
+
+// The HOVERED item's roll, a PURE READ: the prefix and the suffix through Item::GetPrefixName /
+// GetSuffixName (each returns the c_str of the item's own replica string: no allocation, no lock),
+// the seed as the DWORD at item + rr + 0x7C (rr = the replica's offset in an Item, decoded by
+// rollInit from Item::GetItemReplicaInfo's own code). MOD-SIDE READS ONLY - no engine call that
+// allocates, no mod lock, no log, no C++ object - so the frame may swallow. 1 = read, -1 = faulted.
+int readRollSeh(void* item, unsigned rr, UtRollKey* out) {
+    __try {
+        const char* p = g_tq.ItemGetPrefixName((TqItem*)item);
+        const char* s = g_tq.ItemGetSuffixName((TqItem*)item);
+        size_t i = 0;
+        if (p) {
+            for (; i + 1 < sizeof(out->prefix) && p[i]; ++i) out->prefix[i] = p[i];
+        }
+        out->prefix[i] = 0;
+        i = 0;
+        if (s) {
+            for (; i + 1 < sizeof(out->suffix) && s[i]; ++i) out->suffix[i] = s[i];
+        }
+        out->suffix[i] = 0;
+        memcpy(&out->seed, (const unsigned char*)item + rr + kUtReplicaSeed, 4);
+        out->known = true;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out->known = false;
+        return -1;
+    }
+}
+
+// The STORED roll, memoised like collectedState (GD's journalRollOf memo): the KIND (a lock-free
+// lookup) and the newest row's roll (storeRollOf, the journal lock) are asked at most four times a
+// second per record.
+struct StoredRoll {
+    char record[256];
+    int kind;      // liveRecordKind: 1 = a monster infrequent
+    bool have;     // the row's roll was read
+    UtRollKey roll;
+    DWORD tick;
+    bool valid;
+};
+__declspec(thread) StoredRoll t_stored;
+
+// 1 = the plain collected line, 3 = "(another roll)". Called OUTSIDE every SEH frame; the hovered
+// roll's own frame is left before anything here logs.
+int rollState(void* item, const char* record) {
+    if (InterlockedCompareExchange(&g_rollOff, 0, 0) ||
+        !InterlockedCompareExchange(&g_rollReady, 0, 0))
+        return 1;
+    const DWORD now = GetTickCount();
+    if (!(t_stored.valid && (now - t_stored.tick) <= kMemoMaxAgeMs &&
+          _stricmp(t_stored.record, record) == 0)) {
+        _snprintf_s(t_stored.record, sizeof(t_stored.record), _TRUNCATE, "%s", record);
+        t_stored.kind = liveRecordKind(record);
+        t_stored.have = t_stored.kind == 1 && storeRollOf(record, &t_stored.roll);
+        t_stored.tick = now;
+        t_stored.valid = true;
+    }
+    if (t_stored.kind != 1 || !t_stored.have || !t_stored.roll.known) return 1;   // a unique
+    if (!protoIsItem(item)) return 1;   // an Item only: its replica sits at the decoded offset
+    const unsigned rr = (unsigned)InterlockedCompareExchange(&g_rollReplica, 0, 0);
+    if (!rr) return 1;
+    UtRollKey hovered;
+    utRollClear(&hovered);
+    utGuardEnter();
+    const int r = readRollSeh(item, rr, &hovered);
+    utGuardLeave();
+    if (r < 0) {
+        rollDisable("the hovered item's roll read faulted");
+        return 1;
+    }
+    return utRollSame(hovered, t_stored.roll) ? 1 : 3;
+}
+
 // ---- the detour bodies -------------------------------------------------------------------------
 struct LatchPrep {
     char record[256];
@@ -600,6 +734,102 @@ struct LatchPrep {
     unsigned int firstClass;
     unsigned int lastClass;
 };
+
+// ---- a relic or charm of the relic page: the line speaks of its slot ---------------------------
+// A partial piece speaks of its record's RED slot in one line - the collected words and the slot's
+// shard count - a completed one of its (record, bonus) GREEN slot (ut_relicpage.h utRelicTipOf).
+// The piece's shard count and bonus are read from its own replica at the decoded offset (pure
+// reads); the journal's facts are asked at most four times a second per (record, shard count,
+// bonus), as collectedState.
+struct RelicMemo {
+    char record[256];
+    char bonus[kUtRelicBonusMax];
+    unsigned var1;
+    DWORD tick;
+    bool valid;
+    UtRelicTip tip;
+};
+__declspec(thread) RelicMemo t_relicMemo;
+
+// MOD-SIDE READS of the hovered item's replica: its var1 and its relicBonus. 1 = read, 0 = the
+// string does not read as one, -1 = faulted.
+int readRelicSeh(const void* item, unsigned rr, unsigned* var1, char* bonus, unsigned cap) {
+    __try {
+        const unsigned char* rep = (const unsigned char*)item + rr;
+        memcpy(var1, rep + kUtReplicaVar1, 4);
+        return utVsStringGet(rep + kUtReplicaStr[kUtIdRelicBonus], bonus, cap) ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// One mod-owned GameTextLine over the UTF-8 `text`: the shape the engine's ctor builds (class
+// +0x00, the VS2012 wstring +0x04 over `storage`, the bool +0x1C false). GameTextLineToString only
+// reads it; nothing the engine owns ever points at it.
+void makeWide(MsvcWString* s, const char* ascii, unsigned short* storage, size_t storageChars);
+void handLine(unsigned char* line, unsigned cls, const char* text, unsigned short* storage,
+              size_t chars) {
+    memset(line, 0, kLineSize);
+    memcpy(line, &cls, 4);
+    makeWide((MsvcWString*)(line + 0x04), text, storage, chars);
+}
+
+// true = the record is one of the relic list's: `*state` is its latch (0 = no line, 1..3 the
+// static lines, 4 the relic line built here). Called OUTSIDE every SEH frame (it takes the
+// journal lock and may log); each read of engine memory sits in its own guarded frame.
+bool relicState(void* item, const LatchPrep& prep, int* state) {
+    *state = 0;
+    const UtRelicList* list = liveRelicList();
+    const int r = list ? liveRelicFind(prep.record) : -1;
+    if (r < 0) return false;
+    const UtRelicRow& row = list->rows[(size_t)r];
+    if (!journalSetKnown()) return true;   // collectedState's rule: no line until the set is open
+    const unsigned rr = (unsigned)InterlockedCompareExchange(&g_rollReplica, 0, 0);
+    if (!rr || !protoIsItem(item)) return true;
+    unsigned var1 = 0;
+    char bonus[kUtRelicBonusMax];
+    bonus[0] = 0;
+    utGuardEnter();
+    const int rd = readRelicSeh(item, rr, &var1, bonus, (unsigned)sizeof(bonus));
+    utGuardLeave();
+    if (rd < 0) {
+        faulted("the relic piece's replica read");
+        return true;
+    }
+    if (rd == 0) return true;
+    RelicMemo& m = t_relicMemo;
+    const DWORD now = GetTickCount();
+    if (!(m.valid && (now - m.tick) <= kMemoMaxAgeMs && m.var1 == var1 &&
+          strcmp(m.record, prep.record) == 0 && _stricmp(m.bonus, bonus) == 0)) {
+        // the facts' buffer is one (the rollover runs on the game thread); a second thread finds
+        // it busy and gets no line this time
+        static UtRelicRowFacts s_facts[512];
+        static volatile LONG s_busy = 0;
+        if (InterlockedExchange(&s_busy, 1)) return true;
+        char key[256];
+        size_t n = 0;
+        if (utJournalKey(prep.record, key, sizeof(key))) n = journalRowsOf(key, s_facts, 512);
+        utRelicTipOf(row, var1, bonus, s_facts, (int)(n < 512 ? n : 512), &m.tip);
+        InterlockedExchange(&s_busy, 0);
+        _snprintf_s(m.record, sizeof(m.record), _TRUNCATE, "%s", prep.record);
+        _snprintf_s(m.bonus, sizeof(m.bonus), _TRUNCATE, "%s", bonus);
+        m.var1 = var1;
+        m.tick = now;
+        m.valid = true;
+    }
+    const UtRelicTip& tip = m.tip;
+    if (tip.state < 1 || tip.state > 3) return true;
+    *state = tip.state;
+    if (tip.state != 1 || tip.pieces < 1) return true;   // a completed piece: the static lines
+    char yes[sizeof(g_textYes)];   // the words in force, copied whole and ended here
+    memcpy(yes, g_textYes, sizeof(yes));
+    yes[sizeof(yes) - 1] = 0;
+    char text[kRelicLineChars];
+    utRelicTipLine(yes, tip.pieces, text, sizeof(text));
+    handLine(t_relicLine, g_classYes, text, t_relicText, kRelicLineChars);
+    *state = 4;
+    return true;
+}
 
 // MOD-SIDE READS OF ENGINE MEMORY, and NOTHING ELSE: no lock, no allocation, no logging. That is
 // what lets the caller wrap this - and only this - in a swallowing frame. TQ: the catalogue test
@@ -636,6 +866,12 @@ void latchBody(void* item, void* lines) {
     // clearLatch below), take the journal lock (collectedState) or leave a latch of its own.
     if (t_searchCapture) return;
     if (InterlockedCompareExchange(&g_tooltipOff, 0, 0)) return;
+    if (t_formulaDepth > 0) {
+        // the crafted artifact's text inside an arcane formula's tooltip: never its line there
+        clearLatch();
+        InterlockedIncrement(&g_innerSuppressed);
+        return;
+    }
     if (!g_cfg.tooltipMark) {
         clearLatch();
         return;
@@ -653,8 +889,14 @@ void latchBody(void* item, void* lines) {
     }
     // ---- from here on nothing is inside an SEH frame and every read is mod-owned ---------------
     try {
-        const int state = collectedState(prep.record, nullptr);   // the journal lock, <= 4 Hz/record
-        if (state != 1 && state != 2) return;                     // not a catalogue record: no line
+        int state = 0;
+        if (relicState(item, prep, &state)) {   // a relic or charm: its slot's line
+            if (state == 0) return;
+        } else {
+            state = collectedState(prep.record, nullptr);   // the journal lock, <= 4 Hz/record
+            if (state != 1 && state != 2) return;               // not a catalogue record: no line
+            if (state == 1) state = rollState(item, prep.record);   // a held MI of another roll: 3
+        }
         Latch fresh;
         fresh.count = prep.count;
         fresh.firstClass = prep.firstClass;
@@ -718,13 +960,35 @@ void __fastcall hk_RelicGetUIDisplayText(void* item, void* /*edx*/, const void* 
     probePresentAdd(probeNow() - t0);
 }
 
+// AN ARCANE FORMULA. The crafted artifact is created inside this one (see t_formulaDepth): any
+// latch of its text builders is suppressed for the duration, and the formula's own record is
+// latched on the way out, over the complete vector - the same "on the way out" shape as
+// ItemEquipment's. Any latch left from before is dropped first, so nothing older can be claimed by
+// a GameTextLineToString the engine might run in between (a property search capture keeps its
+// pending latch, as latchBody does). No C++ object and no swallowing frame here: the `__finally`
+// is cleanup, so an engine C++ exception keeps unwinding.
+void __fastcall hk_FormulaGetUIDisplayText(void* item, void* /*edx*/, const void* character,
+                                           void* lines) {
+    if (!t_searchCapture) clearLatch();
+    ++t_formulaDepth;
+    __try {
+        if (o_FormulaText) o_FormulaText(item, character, lines);  // ENGINE CALL
+    } __finally {
+        --t_formulaDepth;
+    }
+    const long long t0 = probeNow();
+    latchBody(item, lines);
+    probePresentAdd(probeNow() - t0);
+}
+
 // No C++ object and no swallowing frame lives in this function: the `__finally` is CLEANUP, so an
 // engine C++ exception out of the trampoline keeps unwinding to the engine's own handler.
 void __cdecl hk_GameTextLineToString(const void* lines, void* out) {
     const long long t0 = probeNow();   // the match and the swap build, never the engine's
     const unsigned char* extra = nullptr;
+    unsigned extraN = 1;
     __try {
-        extra = pendingLine(lines);
+        extra = pendingLine(lines, &extraN);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         extra = nullptr;
         faulted("the GameTextLineToString match");
@@ -739,7 +1003,7 @@ void __cdecl hk_GameTextLineToString(const void* lines, void* out) {
     borrowed.begin = nullptr;
     borrowed.end = nullptr;
     borrowed.cap = nullptr;
-    if (!tooltipSwapBuild(lines, extra, &owned, &borrowed)) {
+    if (!tooltipSwapBuildN(lines, extra, extraN, &owned, &borrowed)) {
         probePresentAdd(probeNow() - t0);
         if (o_ToString) o_ToString(lines, out);
         return;
@@ -754,11 +1018,29 @@ void __cdecl hk_GameTextLineToString(const void* lines, void* out) {
 }
 
 // ---- building the two static lines --------------------------------------------------------------
+// The words are UTF-8 (the buttons file's); a byte that does not start a valid sequence is taken
+// as one latin-1 character, and a code point above U+FFFF as '?'. ASCII is copied as it is.
 void makeWide(MsvcWString* s, const char* ascii, unsigned short* storage, size_t storageChars) {
     memset(s, 0, sizeof(*s));
-    size_t n = strlen(ascii);
-    if (n > storageChars - 1) n = storageChars - 1;
-    for (size_t i = 0; i < n; ++i) storage[i] = (unsigned short)(unsigned char)ascii[i];
+    const size_t len = strlen(ascii);
+    size_t n = 0;
+    for (size_t i = 0; i < len && n < storageChars - 1;) {
+        const unsigned char c = (unsigned char)ascii[i];
+        unsigned cp = c;
+        size_t k = 1;
+        if (c >= 0xC2 && c <= 0xDF) k = 2, cp = c & 0x1Fu;
+        else if (c >= 0xE0 && c <= 0xEF) k = 3, cp = c & 0x0Fu;
+        else if (c >= 0xF0 && c <= 0xF4) k = 4, cp = c & 0x07u;
+        bool ok = k > 1 && i + k <= len;
+        for (size_t j = 1; ok && j < k; ++j) {
+            const unsigned char d = (unsigned char)ascii[i + j];
+            ok = (d & 0xC0) == 0x80;
+            cp = (cp << 6) | (d & 0x3Fu);
+        }
+        if (k > 1 && !ok) k = 1, cp = c;
+        storage[n++] = (unsigned short)(cp > 0xFFFF ? '?' : cp);
+        i += k;
+    }
     storage[n] = 0;
     s->size = n;
     if (n < 8) {
@@ -818,6 +1100,59 @@ const char* textFor(const char* fromIni, const char* fallback) {
     return fallback;
 }
 
+bool readCodeSeh(const void* fn, unsigned char* out, size_t n) {
+    __try {
+        memcpy(out, fn, n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The "(another roll)" line, after the other two: ADVISORY. A missing binding, getters that do not
+// read the replica's prefix / suffix string, or a line that does not verify turn THIS line off
+// (one line in the log), never the other two.
+void rollInit() {
+    _snprintf_s(g_textRoll, sizeof(g_textRoll), _TRUNCATE, "%s%s", g_textYes, g_rollWords);
+    const char* miss = !g_tq.ItemGetPrefixName        ? "Item::GetPrefixName"
+                       : !g_tq.ItemGetSuffixName      ? "Item::GetSuffixName"
+                       : !g_tq.ItemGetItemReplicaInfo ? "Item::GetItemReplicaInfo"
+                                                      : nullptr;
+    if (miss) {
+        InterlockedExchange(&g_rollOff, 1);
+        logW("tooltip: the \"%s\" line is off - %s is not bound; a monster infrequent of another "
+             "roll reads the plain collected line", g_textRoll, miss);
+        return;
+    }
+    unsigned char bp[18], bs[18], br[6];
+    utGuardEnter();
+    const bool read = readCodeSeh((const void*)g_tq.ItemGetPrefixName, bp, sizeof(bp)) &&
+                      readCodeSeh((const void*)g_tq.ItemGetSuffixName, bs, sizeof(bs)) &&
+                      readCodeSeh((const void*)g_tq.ItemGetItemReplicaInfo, br, sizeof(br));
+    utGuardLeave();
+    const unsigned rp = read ? utRollGetterOffset(bp) : 0;
+    const unsigned rs = read ? utRollGetterOffset(bs) : 0;
+    const unsigned rr = read ? utReplicaGetterOffset(br) : 0;
+    if (!rr || rp != rr + kUtReplicaStr[1] || rs != rr + kUtReplicaStr[2]) {
+        InterlockedExchange(&g_rollOff, 1);
+        logW("tooltip: the \"%s\" line is off - Item::GetPrefixName / GetSuffixName do not read "
+             "the replica's prefix / suffix (this+0x%X / this+0x%X, the replica at this+0x%X)",
+             g_textRoll, rp, rs, rr);
+        return;
+    }
+    if (!buildLine(g_lineRoll, g_classYes, g_textRoll)) {
+        InterlockedExchange(&g_rollOff, 1);
+        logW("tooltip: the \"%s\" line did not verify - a monster infrequent of another roll "
+             "reads the plain collected line", g_textRoll);
+        return;
+    }
+    InterlockedExchange(&g_rollReplica, (LONG)rr);
+    InterlockedExchange(&g_rollReady, 1);
+    logD("tooltip: the \"%s\" line is ready - Item::GetPrefixName / GetSuffixName read the "
+         "replica at this+0x%X (+0x%X / +0x%X), the seed is the DWORD at this+0x%X",
+         g_textRoll, rr, kUtReplicaStr[1], kUtReplicaStr[2], rr + kUtReplicaSeed);
+}
+
 }  // namespace
 
 // An UNREGISTERED class is neither a crash nor a refusal by the engine: GetGameTextStyleName's
@@ -842,6 +1177,51 @@ int tooltipCollectedState(const char* record, bool* fromMemo) {
 }
 
 const char* tooltipTextYes() { return g_textYes; }
+const char* tooltipTextRoll() { return g_rollWords; }
+unsigned tooltipClassYes() { return g_classYes; }
+unsigned tooltipClassNo() { return g_classNo; }
+
+void tooltipTextRefresh(const char* yes, const char* no, const char* roll, int classYes, int classNo) {
+    char ty[96], tn[96], tr[96];
+    _snprintf_s(ty, sizeof(ty), _TRUNCATE, "%s", yes && yes[0] ? yes : kDefaultTextYes);
+    _snprintf_s(tn, sizeof(tn), _TRUNCATE, "%s", no && no[0] ? no : kDefaultTextNo);
+    _snprintf_s(tr, sizeof(tr), _TRUNCATE, "%s", roll && roll[0] ? roll : kRollSuffix);
+    const unsigned cy = classYes < 0 ? kClassCollectedDefault
+                                     : tooltipPickClass(classYes, kClassCollectedDefault, "tooltip.class_yes");
+    const unsigned cn = classNo < 0 ? kClassNotCollectedDefault
+                                    : tooltipPickClass(classNo, kClassNotCollectedDefault, "tooltip.class_no");
+    const bool yesMoved = strcmp(ty, g_textYes) != 0 || cy != g_classYes;
+    const bool noMoved = strcmp(tn, g_textNo) != 0 || cn != g_classNo;
+    const bool rollMoved = yesMoved || strcmp(tr, g_rollWords) != 0;
+    if (!yesMoved && !noMoved && !rollMoved) return;
+    memcpy(g_textYes, ty, sizeof(ty));
+    memcpy(g_textNo, tn, sizeof(tn));
+    memcpy(g_rollWords, tr, sizeof(tr));
+    g_classYes = cy;
+    g_classNo = cn;
+    _snprintf_s(g_textRoll, sizeof(g_textRoll), _TRUNCATE, "%s%s", g_textYes, g_rollWords);
+    if (!InterlockedCompareExchange(&g_linesReady, 0, 0) || tooltipIsOff()) {
+        logD("tooltip: the rollover words are \"%s\" / \"%s\" (the lines are not built)", g_textYes, g_textNo);
+        return;
+    }
+    // The detours run on this thread too, so no line is read while it is rebuilt. The string a
+    // replaced line held stays allocated (a few bytes per change of the words).
+    bool ok = true;
+    if (yesMoved) ok = buildLine(g_lineYes, g_classYes, g_textYes) && ok;
+    if (noMoved) ok = buildLine(g_lineNo, g_classNo, g_textNo) && ok;
+    if (!ok) {
+        disable("a rebuilt GameTextLine did not verify after the engine's ctor ran");
+        return;
+    }
+    if (rollMoved && InterlockedCompareExchange(&g_rollReady, 0, 0) &&
+        !InterlockedCompareExchange(&g_rollOff, 0, 0) && !buildLine(g_lineRoll, g_classYes, g_textRoll)) {
+        InterlockedExchange(&g_rollOff, 1);
+        logW("tooltip: the \"%s\" line did not verify - a monster infrequent of another roll "
+             "reads the plain collected line", g_textRoll);
+    }
+    logI("tooltip: the rollover words from the buttons file - \"%s\" (style 0x%02X), \"%s\" (style "
+         "0x%02X), another roll \"%s\"", g_textYes, g_classYes, g_textNo, g_classNo, g_textRoll);
+}
 const char* tooltipTextNo() { return g_textNo; }
 
 bool tooltipVerifyLine(const unsigned char* line, unsigned cls, size_t wantLen) {
@@ -861,6 +1241,7 @@ int tooltipTextBuilderIndex(const void* fn) {
     if (fn == r_EquipText) return 1;
     if (fn == r_ArtifactText) return 2;
     if (fn == r_RelicText) return 3;
+    if (fn == r_FormulaText) return 4;
     return -1;
 }
 
@@ -872,13 +1253,12 @@ bool tooltipInit(HMODULE selfModule) {
     if (done) return InterlockedCompareExchange(&g_tooltipOff, 0, 0) == 0;
     done = true;
 
-    _snprintf_s(g_textYes, sizeof(g_textYes), _TRUNCATE, "%s",
-                textFor(g_cfg.tooltipTextYes, kDefaultTextYes));
-    _snprintf_s(g_textNo, sizeof(g_textNo), _TRUNCATE, "%s",
-                textFor(g_cfg.tooltipTextNo, kDefaultTextNo));
+    // the built-in words, unless the buttons file's [tab] set them already (tooltipTextRefresh)
+    _snprintf_s(g_textYes, sizeof(g_textYes), _TRUNCATE, "%s", textFor(g_textYes, kDefaultTextYes));
+    _snprintf_s(g_textNo, sizeof(g_textNo), _TRUNCATE, "%s", textFor(g_textNo, kDefaultTextNo));
 
     // The policy line - printed whatever the keys say, so the menu test can always see it.
-    logD("tooltip: tooltip_mark=%d - the mark is five exported Game.dll detours that append one "
+    logD("tooltip: tooltip_mark=%d - the mark is six exported Game.dll detours that append one "
          "GameTextLine and never draw a pixel. collected=\"%s\" notCollected=\"%s\"",
          g_cfg.tooltipMark, g_textYes, g_textNo);
 
@@ -893,11 +1273,13 @@ bool tooltipInit(HMODULE selfModule) {
     r_ArtifactText = proc(game, TQ_TIP_ITEMARTIFACT_GETUIDISPLAYTEXT,
                           "ItemArtifact::GetUIDisplayText");
     r_RelicText = proc(game, TQ_TIP_ITEMRELIC_GETUIDISPLAYTEXT, "ItemRelic::GetUIDisplayText");
+    r_FormulaText = proc(game, TQ_TIP_ITEMARTIFACTFORMULA_GETUIDISPLAYTEXT,
+                         "ItemArtifactFormula::GetUIDisplayText");
     r_ToString = proc(game, TQ_TIP_GAMETEXTLINETOSTRING, "GameTextLineToString");
     r_LineCtor = proc(game, TQ_TIP_GAMETEXTLINE_CTOR, "GameTextLine::GameTextLine");
 
-    if (!r_ItemText || !r_EquipText || !r_ArtifactText || !r_RelicText || !r_ToString ||
-        !r_LineCtor) {
+    if (!r_ItemText || !r_EquipText || !r_ArtifactText || !r_RelicText || !r_FormulaText ||
+        !r_ToString || !r_LineCtor) {
         disable("at least one tooltip export is MISSING");
         return false;
     }
@@ -907,23 +1289,22 @@ bool tooltipInit(HMODULE selfModule) {
     const int a4 = exportAliasCount(game, r_RelicText);
     const int a5 = exportAliasCount(game, r_ToString);
     const int a6 = exportAliasCount(game, r_LineCtor);
+    const int a7 = exportAliasCount(game, r_FormulaText);
     logD("tooltip: export-alias check - Item %p x%d, ItemEquipment %p x%d, ItemArtifact %p x%d, "
-         "ItemRelic %p x%d, GameTextLineToString %p x%d, GameTextLine ctor %p x%d (1 = not folded)",
-         r_ItemText, a1, r_EquipText, a2, r_ArtifactText, a3, r_RelicText, a4, r_ToString, a5,
-         r_LineCtor, a6);
-    if (a1 != 1 || a2 != 1 || a3 != 1 || a4 != 1 || a5 != 1 || a6 != 1) {
+         "ItemRelic %p x%d, ItemArtifactFormula %p x%d, GameTextLineToString %p x%d, "
+         "GameTextLine ctor %p x%d (1 = not folded)",
+         r_ItemText, a1, r_EquipText, a2, r_ArtifactText, a3, r_RelicText, a4, r_FormulaText, a7,
+         r_ToString, a5, r_LineCtor, a6);
+    if (a1 != 1 || a2 != 1 || a3 != 1 || a4 != 1 || a5 != 1 || a6 != 1 || a7 != 1) {
         disable("a tooltip export is FOLDED across several names - detouring it would change "
                 "every one of them");
         return false;
     }
     p_LineCtor = (PfnGameTextLine_Ctor)r_LineCtor;
 
-    // The two classes are ini-selectable, and both are validated against the
-    // measured registration table before a single GameTextLine is built.
-    g_classYes = tooltipPickClass(g_cfg.tooltipClassYes, kClassCollectedDefault,
-                                  "tooltip_class_yes");
-    g_classNo = tooltipPickClass(g_cfg.tooltipClassNo, kClassNotCollectedDefault,
-                                 "tooltip_class_no");
+    // The two classes come from [tab] of the buttons file (tooltip.class_yes / _no; the built-in
+    // ones until it is read), validated against the measured registration table before a single
+    // GameTextLine is built.
     const bool okYes = buildLine(g_lineYes, g_classYes, g_textYes);
     const bool okNo = buildLine(g_lineNo, g_classNo, g_textNo);
     if (!okYes || !okNo) {
@@ -931,6 +1312,7 @@ bool tooltipInit(HMODULE selfModule) {
         return false;
     }
     InterlockedExchange(&g_linesReady, 1);
+    rollInit();
     const TextClassInfo* iy = classInfo(g_classYes);
     const TextClassInfo* in = classInfo(g_classNo);
     logD("tooltip: both lines ready - COLLECTED is class 0x%02X \"%s\" RGB (%d,%d,%d) and NOT "
@@ -942,7 +1324,7 @@ bool tooltipInit(HMODULE selfModule) {
     return true;
 }
 
-const int kJobs = 5;
+const int kJobs = 6;
 
 int tooltipInstall(int* total) {
     if (total) *total = kJobs;
@@ -950,10 +1332,10 @@ int tooltipInstall(int* total) {
         logE("tooltip: no detour is installed - %s", g_offWhy);
         return 0;
     }
-    // ALL-OR-NOTHING. Every hook is CREATED first; only when all five exist are they enabled.
-    // Why FIVE: `ItemEquipment` calls the base and then appends, so the base hook alone latches a
+    // ALL-OR-NOTHING. Every hook is CREATED first; only when all six exist are they enabled.
+    // Why SIX: `ItemEquipment` calls the base and then appends, so the base hook alone latches a
     // partial vector for the whole catalogue; `ItemArtifact` and `ItemRelic` do not call the base
-    // at all, so they need their own.
+    // at all, so they need their own; the sixth is the arcane formula's own (see t_formulaDepth).
     struct {
         const char* pretty;
         void* target;
@@ -968,6 +1350,8 @@ int tooltipInstall(int* total) {
          (void**)&o_ArtifactText},
         {"ItemRelic::GetUIDisplayText", r_RelicText, (void*)&hk_RelicGetUIDisplayText,
          (void**)&o_RelicText},
+        {"ItemArtifactFormula::GetUIDisplayText", r_FormulaText,
+         (void*)&hk_FormulaGetUIDisplayText, (void**)&o_FormulaText},
         {"GameTextLineToString", r_ToString, (void*)&hk_GameTextLineToString,
          (void**)&o_ToString},
     };
@@ -1011,10 +1395,12 @@ int tooltipInstall(int* total) {
     return kJobs;
 }
 
+long tooltipInnerSuppressed() { return InterlockedCompareExchange(&g_innerSuppressed, 0, 0); }
+
 const char* tooltipStatus() {
     _snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
                 "tooltip: %s hooks=%ld lines=%ld latches=%ld swaps=%ld refusedShape=%ld "
-                "faults=%ld alloc=%ld",
+                "faults=%ld alloc=%ld innerSuppressed=%ld anotherRoll=%ld",
                 InterlockedCompareExchange(&g_tooltipOff, 0, 0) ? "OFF" : "armed",
                 InterlockedCompareExchange(&g_hooksOn, 0, 0),
                 InterlockedCompareExchange(&g_linesReady, 0, 0),
@@ -1022,7 +1408,9 @@ const char* tooltipStatus() {
                 InterlockedCompareExchange(&g_swaps, 0, 0),
                 InterlockedCompareExchange(&g_refusedShape, 0, 0),
                 InterlockedCompareExchange(&g_faults, 0, 0),
-                InterlockedCompareExchange(&g_allocBalance, 0, 0));
+                InterlockedCompareExchange(&g_allocBalance, 0, 0),
+                InterlockedCompareExchange(&g_innerSuppressed, 0, 0),
+                InterlockedCompareExchange(&g_rollLines, 0, 0));
     return g_status;
 }
 
@@ -1042,11 +1430,22 @@ void tooltipTestArm(void* baseText, void* equipText, void* artifactText, void* r
     memset(g_lineNo, 0xB2, kLineSize);
     *(unsigned int*)g_lineYes = yesClass;
     *(unsigned int*)g_lineNo = noClass;
+    g_classYes = yesClass;   // the words and class the built lines stand for (a relic piece's line)
+    _snprintf_s(g_textYes, sizeof(g_textYes), _TRUNCATE, "%s", kDefaultTextYes);
     InterlockedExchange(&g_linesReady, 1);
     InterlockedExchange(&g_tooltipOff, 0);
     g_offWhy[0] = 0;
     clearLatch();
     t_collected.state = 0;
+    memset(g_lineRoll, 0xC3, kLineSize);
+    *(unsigned int*)g_lineRoll = yesClass;
+    _snprintf_s(g_textRoll, sizeof(g_textRoll), _TRUNCATE, "%s%s", kDefaultTextYes, kRollSuffix);
+    InterlockedExchange(&g_rollReady, 1);
+    InterlockedExchange(&g_rollOff, 0);
+    t_stored.valid = false;
+}
+void tooltipTestRollReplica(unsigned rr) {
+    InterlockedExchange(&g_rollReplica, (LONG)rr);
 }
 void tooltipTestBaseText(void* item, const void* character, void* lines) {
     hk_ItemGetUIDisplayText(item, nullptr, character, lines);
@@ -1060,11 +1459,21 @@ void tooltipTestArtifactText(void* item, const void* character, void* lines) {
 void tooltipTestRelicText(void* item, const void* character, void* lines) {
     hk_RelicGetUIDisplayText(item, nullptr, character, lines);
 }
+void tooltipTestArmFormula(void* formulaText) {
+    o_FormulaText = reinterpret_cast<PfnItem_GetUIDisplayText>(formulaText);
+    r_FormulaText = formulaText;   // the resolved address the property search compares with
+    t_formulaDepth = 0;
+}
+void tooltipTestFormulaText(void* item, const void* character, void* lines) {
+    hk_FormulaGetUIDisplayText(item, nullptr, character, lines);
+}
+int tooltipTestFormulaDepth() { return t_formulaDepth; }
 void tooltipTestToString(const void* lines, void* out) { hk_GameTextLineToString(lines, out); }
 unsigned tooltipTestLatchCount() {
-    return (t_latch.state == 1 || t_latch.state == 2) ? t_latch.count : 0;
+    return (t_latch.state >= 1 && t_latch.state <= 3) ? t_latch.count : 0;
 }
 const unsigned char* tooltipTestLine(bool yes) { return yes ? g_lineYes : g_lineNo; }
+const unsigned char* tooltipTestRollLine() { return g_lineRoll; }
 #endif  // UT_TOOLTIP_TEST_SEAM
 
 }  // namespace ut

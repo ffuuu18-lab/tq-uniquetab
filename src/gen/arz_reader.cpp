@@ -99,6 +99,41 @@ std::int32_t ArzRecord::i32(const char* name) const {
 }
 
 // ---------------------------------------------------------------- ArzArchive
+namespace {
+
+const std::uint32_t kEmpty = 0xFFFFFFFFu;   // a free slot of an index table
+const std::uint32_t kFnvBasis = 2166136261u, kFnvPrime = 16777619u;
+
+std::uint32_t fnvStep(std::uint32_t h, char c) { return (h ^ std::uint8_t(c)) * kFnvPrime; }
+
+// The slots of an index table for n keys: a power of two, at least twice n (half full at most).
+std::size_t slotCountFor(std::size_t n) {
+    std::size_t c = 16;
+    while (c < 2 * n) c <<= 1;
+    return c;
+}
+
+// Hands f each byte of the UTF-8 form of the latin-1 bytes p[0..n), '\\' given as '/' and, with
+// lower, A-Z lower-cased: the bytes of a record's path (lower false) or of its key (lower true).
+// f returns false to stop.
+template <class F>
+void forPathBytes(const char* p, std::size_t n, bool lower, F f) {
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::uint8_t c = std::uint8_t(p[i]);
+        if (c < 0x80) {
+            char o = char(c);
+            if (o == '\\') o = '/';
+            else if (lower && o >= 'A' && o <= 'Z') o = char(o - 'A' + 'a');
+            if (!f(o)) return;
+        } else {
+            if (!f(char(0xC0 | (c >> 6)))) return;
+            if (!f(char(0x80 | (c & 0x3F)))) return;
+        }
+    }
+}
+
+} // namespace
+
 std::string ArzArchive::normKey(const std::string& name) {
     std::string k = name;
     for (char& c : k) {
@@ -106,6 +141,65 @@ std::string ArzArchive::normKey(const std::string& name) {
         else if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
     }
     return k;
+}
+
+std::uint32_t ArzArchive::keyHash(const std::string& key) {
+    std::uint32_t h = kFnvBasis;
+    for (char c : key) h = fnvStep(h, c);
+    return h;
+}
+
+const char* ArzArchive::raw(std::size_t i, std::size_t* len) const {
+    if (i >= m_strOff.size()) { *len = 0; return nullptr; }
+    const std::uint32_t at = m_strOff[i];
+    *len = rd32((const std::uint8_t*)m_table.data() + at - 4);
+    return m_table.data() + at;
+}
+
+std::string ArzArchive::str(std::size_t i) const {
+    std::size_t n = 0;
+    const char* p = raw(i, &n);
+    return p ? latin1ToUtf8((const std::uint8_t*)p, n) : std::string();
+}
+
+std::string ArzArchive::name(const ArzEntry& e) const {
+    std::size_t n = 0;
+    const char* p = raw(e.nameIdx, &n);
+    std::string out;
+    out.reserve(n);
+    forPathBytes(p, n, false, [&](char c) { out.push_back(c); return true; });
+    return out;
+}
+
+void ArzArchive::key(const ArzEntry& e, std::string& out) const {
+    std::size_t n = 0;
+    const char* p = raw(e.nameIdx, &n);
+    out.clear();
+    forPathBytes(p, n, true, [&](char c) { out.push_back(c); return true; });
+}
+
+std::string ArzArchive::key(const ArzEntry& e) const {
+    std::string out;
+    key(e, out);
+    return out;
+}
+
+bool ArzArchive::keyIs(const ArzEntry& e, const std::string& k) const {
+    std::size_t n = 0;
+    const char* p = raw(e.nameIdx, &n);
+    std::size_t at = 0;
+    bool same = true;
+    forPathBytes(p, n, true, [&](char c) {
+        if (at >= k.size() || k[at] != c) { same = false; return false; }
+        ++at;
+        return true;
+    });
+    return same && at == k.size();
+}
+
+std::size_t ArzArchive::indexBytes() const {
+    return m_table.capacity() + m_strOff.capacity() * sizeof(std::uint32_t) +
+           m_entries.capacity() * sizeof(ArzEntry) + m_slots.capacity() * sizeof(std::uint32_t);
 }
 
 bool ArzArchive::load(const std::string& path, std::string* error) {
@@ -130,41 +224,37 @@ bool ArzArchive::load(const std::string& path, std::string* error) {
         if (error) *error = path + ": table offsets outside the file";
         return false;
     }
-    // the two tables are the index and stay; they are read one at a time, not both at once
-    std::vector<std::uint8_t> table;
-    // string table
+    // the string table stays as the file stores it; each string is found by its offset
     {
-        table.resize(strSize);
-        if (!m_file.readAt(strStart, strSize, table.data())) {
+        m_table.resize(strSize);
+        if (!m_file.readAt(strStart, strSize, (std::uint8_t*)m_table.data())) {
             if (error) *error = path + ": cannot read the string table";
             return false;
         }
-        const std::uint8_t* b = table.data();
+        const std::uint8_t* b = (const std::uint8_t*)m_table.data();
         std::size_t p = 0, end = strSize;
         std::uint32_t count = rd32(b);
         p += 4;
-        m_strings.reserve(count);
+        m_strOff.reserve(count < (end - p) / 4 ? count : (end - p) / 4);
         for (std::uint32_t i = 0; i < count; ++i) {
             if (p + 4 > end) { if (error) *error = path + ": string table truncated"; return false; }
             std::uint32_t len = rd32(b + p);
             p += 4;
             if (len > end - p) { if (error) *error = path + ": string table truncated"; return false; }
-            m_strings.push_back(latin1ToUtf8(b + p, len));
+            m_strOff.push_back(std::uint32_t(p));
             p += len;
         }
     }
-    // record table
+    // the record table: read whole, kept as one compact entry per record
     {
-        table.clear();
-        table.shrink_to_fit();
-        table.resize(recSize);
+        std::vector<std::uint8_t> table(recSize);
         if (!m_file.readAt(recStart, recSize, table.data())) {
             if (error) *error = path + ": cannot read the record table";
             return false;
         }
         const std::uint8_t* b = table.data();
         std::size_t p = 0, end = recSize;
-        m_entries.reserve(recCount);
+        m_entries.reserve(recCount < recSize / 24 ? recCount : recSize / 24);
         for (std::uint32_t i = 0; i < recCount; ++i) {
             if (p + 8 > end) { if (error) *error = path + ": record table truncated"; return false; }
             std::uint32_t nameIdx = rd32(b + p), typeLen = rd32(b + p + 4);
@@ -174,30 +264,52 @@ bool ArzArchive::load(const std::string& path, std::string* error) {
                 return false;
             }
             ArzEntry e;
-            e.rtype = latin1ToUtf8(b + p, typeLen);
-            p += typeLen;
+            p += typeLen;                  // the record's type: not kept
             e.offset = rd32(b + p);
             e.csize = rd32(b + p + 4);
-            e.mtime = rd64(b + p + 8);     // TQ: no dsize between csize and the time
-            p += 16;
-            if (nameIdx >= m_strings.size()) { if (error) *error = path + ": record name index"; return false; }
+            p += 16;                       // TQ: no dsize between csize and the time
+            if (nameIdx >= m_strOff.size()) { if (error) *error = path + ": record name index"; return false; }
             if (std::uint64_t(24) + e.offset + e.csize > n) {
                 if (error) *error = path + ": record data outside the file";
                 return false;
             }
-            e.name = m_strings[nameIdx];
-            for (char& c : e.name) if (c == '\\') c = '/';
-            e.key = normKey(e.name);
-            m_index[e.key] = m_entries.size();
-            m_entries.push_back(std::move(e));
+            e.nameIdx = nameIdx;
+            std::size_t len = 0;
+            const char* s = raw(nameIdx, &len);
+            std::uint32_t h = kFnvBasis;
+            forPathBytes(s, len, true, [&](char c) { h = fnvStep(h, c); return true; });
+            e.hash = h;
+            m_entries.push_back(e);
+        }
+    }
+    // the lookup: of two entries with one key, the later one
+    m_slots.assign(slotCountFor(m_entries.size()), kEmpty);
+    const std::size_t mask = m_slots.size() - 1;
+    std::string k;
+    for (std::size_t i = 0; i < m_entries.size(); ++i) {
+        const ArzEntry& e = m_entries[i];
+        key(e, k);
+        for (std::size_t at = e.hash & mask;; at = (at + 1) & mask) {
+            const std::uint32_t s = m_slots[at];
+            if (s == kEmpty || (m_entries[s].hash == e.hash && keyIs(m_entries[s], k))) {
+                m_slots[at] = std::uint32_t(i);
+                break;
+            }
         }
     }
     return true;
 }
 
 const ArzEntry* ArzArchive::entry(const std::string& name) const {
-    auto it = m_index.find(normKey(name));
-    return it == m_index.end() ? nullptr : &m_entries[it->second];
+    if (m_slots.empty()) return nullptr;
+    const std::string k = normKey(name);
+    const std::uint32_t h = keyHash(k);
+    const std::size_t mask = m_slots.size() - 1;
+    for (std::size_t at = h & mask;; at = (at + 1) & mask) {
+        const std::uint32_t s = m_slots[at];
+        if (s == kEmpty) return nullptr;
+        if (m_entries[s].hash == h && keyIs(m_entries[s], k)) return &m_entries[s];
+    }
 }
 
 bool ArzArchive::decode(const ArzEntry& e, ArzRecord& out, std::string* why) const {
@@ -228,13 +340,13 @@ bool ArzArchive::decode(const ArzEntry& e, ArzRecord& out, std::string* why) con
             if (why) *why = "a field runs past the end of the body";
             return false;
         }
-        f.name = nameIdx < m_strings.size() ? m_strings[nameIdx] : "?" + std::to_string(nameIdx);
+        f.name = nameIdx < m_strOff.size() ? str(nameIdx) : "?" + std::to_string(nameIdx);
         f.raw.reserve(count);
         for (std::uint16_t i = 0; i < count; ++i) f.raw.push_back(rd32(raw.data() + p + i * 4));
         if (f.type == kFtString) {
             f.strs.reserve(count);
             for (std::uint32_t idx : f.raw)
-                f.strs.push_back(idx < m_strings.size() ? m_strings[idx] : std::string());
+                f.strs.push_back(str(idx));
         }
         p = end;
         out.fields.push_back(std::move(f));
@@ -249,12 +361,13 @@ std::vector<std::pair<std::string, std::string>> ArzDatabase::loadOrder() {
     };
 }
 
-bool ArzDatabase::loadGame(const std::string& gameDir, std::string* error) {
+bool ArzDatabase::loadGame(const std::string& gameDir, std::string* error,
+                           const std::string& gameArz) {
     m_archives.clear();
-    m_index.clear();
     m_winners.clear();
+    m_slots.clear();
     std::vector<ArzArchive> loaded;
-    loaded.reserve(1);
+    loaded.reserve(2);
     for (const auto& lo : loadOrder()) {
         std::string full = gameDir + "\\" + lo.second;
         FILE* f = std::fopen(full.c_str(), "rb");
@@ -266,15 +379,43 @@ bool ArzDatabase::loadGame(const std::string& gameDir, std::string* error) {
         loaded.push_back(std::move(a));
     }
     if (loaded.empty()) { if (error) *error = "no .arz archive under " + gameDir; return false; }
+    if (!gameArz.empty()) {   // a custom game's own layer, over the main database
+        ArzArchive a;
+        a.setTag("game");
+        if (!a.load(gameArz, error)) return false;
+        loaded.push_back(std::move(a));
+    }
     m_archives = std::move(loaded);
+    std::size_t most = 0;
+    for (const ArzArchive& a : m_archives) most = a.recordCount() > most ? a.recordCount() : most;
+    m_slots.assign(slotCountFor(most), kEmpty);
+    std::string k;
     for (std::size_t ai = 0; ai < m_archives.size(); ++ai) {
-        for (const ArzEntry& e : m_archives[ai].entries()) {
-            auto it = m_index.find(e.key);
-            if (it == m_index.end()) {
-                m_index[e.key] = m_winners.size();
-                m_winners.emplace_back(ai, &e);
-            } else {
-                m_winners[it->second] = {ai, &e};
+        const ArzArchive& a = m_archives[ai];
+        for (const ArzEntry& e : a.entries()) {
+            if (2 * (m_winners.size() + 1) > m_slots.size()) {   // half full: twice the slots
+                m_slots.assign(m_slots.size() * 2, kEmpty);
+                const std::size_t m = m_slots.size() - 1;
+                for (std::size_t w = 0; w < m_winners.size(); ++w) {
+                    std::size_t at = m_winners[w].second->hash & m;
+                    while (m_slots[at] != kEmpty) at = (at + 1) & m;
+                    m_slots[at] = std::uint32_t(w);
+                }
+            }
+            a.key(e, k);
+            const std::size_t mask = m_slots.size() - 1;
+            for (std::size_t at = e.hash & mask;; at = (at + 1) & mask) {
+                const std::uint32_t w = m_slots[at];
+                if (w == kEmpty) {
+                    m_slots[at] = std::uint32_t(m_winners.size());
+                    m_winners.emplace_back(ai, &e);
+                    break;
+                }
+                const std::pair<std::size_t, const ArzEntry*>& was = m_winners[w];
+                if (was.second->hash == e.hash && m_archives[was.first].keyIs(*was.second, k)) {
+                    m_winners[w] = {ai, &e};
+                    break;
+                }
             }
         }
     }
@@ -282,11 +423,20 @@ bool ArzDatabase::loadGame(const std::string& gameDir, std::string* error) {
 }
 
 bool ArzDatabase::lookup(const std::string& name, std::size_t* archive, const ArzEntry** entry) const {
-    auto it = m_index.find(ArzArchive::normKey(name));
-    if (it == m_index.end()) return false;
-    if (archive) *archive = m_winners[it->second].first;
-    if (entry) *entry = m_winners[it->second].second;
-    return true;
+    if (m_slots.empty()) return false;
+    const std::string k = ArzArchive::normKey(name);
+    const std::uint32_t h = ArzArchive::keyHash(k);
+    const std::size_t mask = m_slots.size() - 1;
+    for (std::size_t at = h & mask;; at = (at + 1) & mask) {
+        const std::uint32_t w = m_slots[at];
+        if (w == kEmpty) return false;
+        const std::pair<std::size_t, const ArzEntry*>& win = m_winners[w];
+        if (win.second->hash == h && m_archives[win.first].keyIs(*win.second, k)) {
+            if (archive) *archive = win.first;
+            if (entry) *entry = win.second;
+            return true;
+        }
+    }
 }
 
 bool ArzDatabase::get(const std::string& name, ArzRecord& out) const {
@@ -294,6 +444,12 @@ bool ArzDatabase::get(const std::string& name, ArzRecord& out) const {
     const ArzEntry* e;
     if (!lookup(name, &ai, &e)) return false;
     return m_archives[ai].decode(*e, out);
+}
+
+std::size_t ArzDatabase::indexBytes() const {
+    std::size_t n = m_winners.capacity() * sizeof(m_winners[0]) + m_slots.capacity() * sizeof(std::uint32_t);
+    for (const ArzArchive& a : m_archives) n += a.indexBytes();
+    return n;
 }
 
 } // namespace gen
