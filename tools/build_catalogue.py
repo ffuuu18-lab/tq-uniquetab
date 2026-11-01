@@ -1014,7 +1014,7 @@ def view_keys(game_name: str):
 # basename that starts x4_, after its 0N_ when it has one, is Eternal Embers wherever its folder
 # is), then the first row's levelRequirement, then the block id. A block's rows go in tier order.
 # The file, CRLF, tab-separated, in page order:
-#   B <block no. from 1> <block id: folder/stem, folded> <R relic | C charm> <rows>
+#   B <block no. from 1> <block id: folder/stem, folded> <R relic | C charm> <rows> <first tier's name> <last tier's name>
 #   R <record> <tier 0..3> <shards to complete> <relicBitmap> <shardBitmap> <bonus count> <bonus>...
 #   X <record> <reason, the words of uniq-excluded.txt>   by record, after every block
 # The bonuses are the table's records as the table spells them, in table order, an entry of weight
@@ -1100,7 +1100,8 @@ def relics_text(relics, rexcluded) -> bytes:
     """uniq-relics.txt (relics_gen.cpp relicsListText)."""
     lines = []
     for n, (cls, bid, rows) in enumerate(relic_order(relics), 1):
-        lines.append("B\t%d\t%s\t%s\t%d" % (n, bid, "R" if cls == "ItemRelic" else "C", len(rows)))
+        lines.append("B\t%d\t%s\t%s\t%d\t%s\t%s" % (n, bid, "R" if cls == "ItemRelic" else "C", len(rows),
+                                                 rows[0][2]["name"], rows[-1][2]["name"]))
         for tier, _key, r in rows:
             lines.append("\t".join(["R", r["record"], str(tier), str(r["shards"]), r["bitmap"],
                                     r["shardBitmap"], str(len(r["bonuses"]))] + r["bonuses"]))

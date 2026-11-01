@@ -1513,9 +1513,12 @@ int main() {
            "a relic slot built from a row is lit (its own colours); the synthetic one is empty (gray)", "");
         ok(ut::utRelicMarksStyle(true, false, 3, true) == 3 && ut::utRelicMarksStyle(false, false, 3, true) == 0 &&
                ut::utRelicMarksStyle(false, true, 3, true) == 3 && ut::utRelicMarksStyle(false, true, 3, false) == 0 &&
-               ut::utRelicMarksStyle(false, true, 0, true) == 0,
+               ut::utRelicMarksStyle(false, true, 0, true) == 3 && ut::utRelicMarksStyle(true, true, 1, true) == 3 &&
+               ut::utRelicMarksStyle(true, true, 2, true) == 3 && ut::utRelicMarksStyle(true, false, 0, true) == 0 &&
+               ut::utRelicMarksStyle(true, false, 1, true) == 1 && ut::utRelicMarksStyle(true, false, 2, true) == 2,
            "a relic slot keeps its gray copy with only the journal set known (no frame of colour before "
-           "the owned recount); an item slot waits for the trusted marks; never with owned_marks 0", "");
+           "the owned recount) and at ANY owned_marks; an item slot waits for the trusted marks and follows "
+           "owned_marks", "");
         // OWN: the marks are not trusted (marksNow false) - a held block's slots still follow
         // owned_marks 3, so the empty one (the synthetic item) is gray, the stored one lit
         const int own = ut::utRelicMarksStyle(false, true, 3, true);
@@ -1559,6 +1562,8 @@ int main() {
                pn[1].lines == 1 && pn[2].block == 2 && pn[2].line == 7 && pn[2].cols == 4 && pn[2].lines == 1,
            "one panel a block: column 0 to its widest line, its first line to its last (a wrapped row's "
            "two lines, a dead red cell inside)", "");
+        ok(ut::utRelicPartChange(pn, n) == 1 && ut::utRelicPartChange(pn, 1) == -1,
+           "relic_split: the line goes before the panel that starts another part; one panel, no line", "");
         np = ut::utRelicWindowPlaces(l, y, 1, pl, 64);
         n = ut::utRelicPanelsOf(l, pl, np, 1, pn, 8);
         ok(n == 2 && pn[0].block == 1 && pn[0].pos == 1 && pn[0].line == 0 && pn[1].block == 2 &&

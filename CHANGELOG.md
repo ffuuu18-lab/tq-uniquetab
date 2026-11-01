@@ -3,6 +3,31 @@
 What changed in each release, newest first. `README.md` says how everything works; this file says
 when it arrived.
 
+## 1.1.1 - 1 November 2026
+
+Requires Titan Quest Anniversary Edition 2.10 (the 32-bit `TQ.exe`) with the x86 build of
+Ultimate ASI Loader, as 1.1.0.
+
+### New
+
+- Relic page: each relic's and charm's name above its block (`relic_names`).
+- Relic page: blocks sorted by name, relics before charms (`relic_sort`).
+- Relic page: a coloured line between the relics and the charms (`relic_split`).
+- Arcane formulae: a slot keeps any number of single copies and shows their count (`formula_copies`).
+- Transfer tab: the collection comes back on its group and row after a tab change or closing the caravan (`view_resume`).
+- Each group keeps its row until you flip OWN or switch to another game (`view_resume`).
+
+All are on by default; set one to 0 under `[advanced]` in `uniquetab.ini` to turn it off.
+
+### Fixed
+
+- Relic page: empty slots are gray at every `owned_marks` (they showed in colour at 0, 1 and 2).
+
+### Upgrading
+
+Replace `scripts\uniquetab.asi`. The first start rebuilds every game's files once and keeps your
+settings and your collection.
+
 ## 1.1.0 - 25 October 2026
 
 Requires Titan Quest Anniversary Edition 2.10 (the 32-bit `TQ.exe`) with the x86 build of

@@ -259,6 +259,12 @@ int main(int argc, char** argv) {
         f.relicKind = false;
         f.rowsNow = 1;
         check(utDepositDecide(f) == kUtDepRefuseHave, "a unique with a row: still refused (once)");
+        f.manyKind = true;
+        check(utDepositDecide(f) == kUtDepTable, "formula_copies: a formula with a row is accepted");
+        f.stack = 2;
+        check(utDepositDecide(f) == kUtDepRefuseStack, "formula_copies: a stack of two formulas is still refused");
+        f.stack = 0;
+        f.manyKind = false;
         f.rowsNow = 0;
         f.relicRoute = 0;
         check(utDepositDecide(f) == kUtDepTable, "a unique: relicRoute is not read");

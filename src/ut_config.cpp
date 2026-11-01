@@ -126,6 +126,16 @@ const UtCfgKey kUtCfgKeys[] = {
            "the relic pages: empty columns between the shard slot and the first bonus (0..1)"),
     UT_BOOL("advanced", "relic_panels", relicPanels, 1, UT_H,
             "the relic pages: 1 = every block stands on its own framed panel; 0 = no panels"),
+    UT_BOOL("advanced", "relic_names", relicNames, 1, UT_H,
+            "the relic pages: 1 = each block's name on the line above it (a page holds fewer blocks); 0 = no names"),
+    UT_INT("advanced", "relic_sort", relicSort, 1, 0, 1, UT_H,
+           "the relic pages: the blocks of each part, 0 in game order (expansion, level), 1 by name; from the next page you open"),
+    UT_BOOL("advanced", "relic_split", relicSplit, 1, UT_H,
+            "the relic pages: 1 = a coloured line between the relics and the charms (no space taken); 0 = none"),
+    UT_BOOL("advanced", "view_resume", viewResume, 1, UT_H,
+            "the Transfer tab: 1 = the collection comes back on its group and row if a tab change or closing the caravan took it away, and each group keeps its row; 0 = the real page until you click, and a group starts at its top"),
+    UT_BOOL("advanced", "formula_copies", formulaCopies, 1, UT_H,
+            "arcane formulae: 1 = a slot keeps any number of copies, its count on the slot; 0 = one copy of each"),
     // A screen key of [layout] (pad_screen, label_screen): text checked by utScreenRectParse, written
     // only while set.
     UT_STR("layout", "pad_screen", padScreen, "", nullptr, kUtCfgWhenSet,
@@ -1178,7 +1188,12 @@ int keySince(const char* name) {
                   {"relic_block_gap", 25},
                   {"relic_bonus_gap", 25},
                   {"relic_panels", 26},
-                  {"collect_relics", 27}};
+                  {"collect_relics", 27},
+                  {"relic_names", 28},
+                  {"relic_sort", 28},
+                  {"relic_split", 28},
+                  {"formula_copies", 28},
+                  {"view_resume", 29}};
     for (const auto& s : kSince)
         if (!_stricmp(name, s.name)) return s.ver;
     return 0;

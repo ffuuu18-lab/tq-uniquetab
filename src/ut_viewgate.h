@@ -133,6 +133,17 @@ inline int utViewRefusal(const UtViewState& s) {
     return kUtViewWhyOk;
 }
 
+// view_resume. An OFF that only the tab or the caravan caused leaves the wish to show the collection
+// again; the player's own OFF and every fault clear it.
+inline bool utViewResumeWish(int offWhy) {
+    return offWhy == kUtViewWhyTabChange || offWhy == kUtViewWhyGoodbye || offWhy == kUtViewWhyOpen;
+}
+// The wish becomes the request a click makes, on the Transfer tab, once the page is proven live in
+// this open and nothing else is queued.
+inline bool utViewResumeNow(const UtViewState& s, bool wish, bool setting, bool memberVerified, bool queued) {
+    return wish && setting && !s.on && s.open && s.mode == 1 && memberVerified && !queued;
+}
+
 // NpcCaravan::OnPlayerInteract around its original, from the open flag before the call and the
 // GameEngine::CaravanGoodbye calls counted before and after it. A click on the caravan driver
 // while the window is up runs the goodbye INSIDE the original: the engine closes the window and

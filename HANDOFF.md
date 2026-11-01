@@ -12,7 +12,7 @@ it means.
 
 The mod is C++17, MSVC, built by `build.bat` into `bin\uniquetab.asi` - a plain 32-bit DLL with the
 extension Ultimate ASI Loader looks for. It exports nothing. `README.md` is the player's document;
-this one is the code's. This text describes version 1.1.0 (the item search is section 4b; the
+this one is the code's. This text describes version 1.1.1 (the item search is section 4b; the
 custom games, the relic and charm page and the collection rule are in sections 6 and 7); the
 version is written in one place, `src\ut_version.h`, which the start-up banner and
 `tools\package.ps1` both read.
@@ -538,7 +538,7 @@ journal set is not the one it was counted on; never per frame. It reads `?` whil
 not known. On the real Transfer page the label is `the real Transfer page` (or `Transfer`), and with
 a query `... found N` (`reading k/n` while its items are read), shortened the same way
 (`utPadLabelRealLine`). The Relic page's label is short and names no page (the pressed button does):
-`64-67/93  page 17/23  8/1971  pieces 50`, then without the fixed page, without the blocks,
+`61-63/93  page 18/27  8/1971  pieces 50`, then without the fixed page, without the blocks,
 without the pieces (`utPadLabelRelic`, five forms); a query adds `found N` / `indexing k/n` to
 the first form and the short `=N` / `k/n` to every later one.
 
@@ -884,6 +884,35 @@ Eternal Embers formulae, Alcyoneus' Breastplate x3, the Lupine Necklace Design x
 `uniq-excluded.txt`); every custom game keeps every record it had (TQ Retold +917, SVAERA +156,
 the others +12). The upgrade: every set regenerates once at the next start; on a page that gained
 an item the boxes after it move one place along; the collection file is untouched.
+
+**The names, the order, the line** (1.1.1, ini_version 28 and 29, all under `[advanced]`). A B line
+of `uniq-relics.txt` carries the first and the last tier's name (`GDUT-STAMP 14`);
+`utRelicBlockName` keeps the whole words they share at the end, so a block of two or more tiers
+needs no list of tier words; words are cut at blanks, and with no blank before the shared end the
+first tier's whole name stays. Translated tags carry `[ms]`-style markers (up to 14% of the names in
+the stock languages), so the reader cleans them
+(`utRelicNameClean`). A name with a tab costs that block its name, not the page. `relic_names` adds the top line and keeps the
+gap at one line at least (`utRelicTopLines`, `utRelicGapLines`), and every page and window count
+goes through those two. `relic_split` is only a line drawn at the panel where the part changes
+(`utRelicPartChange`, `drawRelicSplit`): no layout, one button, one group. A page break was tried and
+cost space; a second button would touch search marks, totals, the union guard and the buttons file. `relic_sort` reorders
+`UtRelicList::blocks` at a page build when the value in force differs (`relicFollowSort`: a game's list
+is read before its own settings come in force); rows stay where they are, a row's `block` follows.
+
+**The collection comes back** (`view_resume`, 1.1.1, in memory). `event()` keeps a wish when the
+tab or the caravan took the view OFF (`utViewResumeWish`); the player's OFF, every fault and a world
+change clear it, and it waits while the layout editor is open.
+`viewTick` turns the wish into the ordinary ON request once, on the Transfer tab, after
+`g_memberVerified` (`utViewResumeNow`), so it passes every refusal a click passes. The group and row
+were already kept (`g_wantGroup`, `g_wantPage`). `liveSelectGroup` also keeps each page's row
+(`g_groupRow`, `utGroupRowPicked`): memory only, forgotten when a game's state comes in force and at an
+OWN flip. The page build clamps a row that no longer fits.
+
+**Several copies of a formula** (`formula_copies`, 1.1.1). `UtDepositFacts::manyKind` (a record of
+the group id `blueprint`) lets the have-gate pass like `relicKind`; the stack gate right after it
+still refuses a stack. Nothing else changed: the journal already counts by rows and the page's
+prototype is the newest row. `drawFormulaCounts` needs no group test, because only these records
+can hold two rows. A 1.1.0 build reads such a file and takes from it.
 
 **The relic page on or off** (`collect_relics`, `[general]`, default 1, ini_version 27; a stamp
 input as `collect_mi`: `collect_relics=1` is a stamp line while on, a flip regenerates every set

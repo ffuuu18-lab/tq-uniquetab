@@ -409,6 +409,102 @@ int main(int argc, char** argv) {
            "rollover: a partial's ONE line - the collected words in force and the red slot's shards");
     }
 
+    // ---- 1.1.1: the block names, relic_sort ----
+    printf("the block names, relic_sort\n");
+    {
+        ok(ut::utRelicBlockName("Essence of Hecate's Crescent", "Incarnation of Hecate's Crescent") ==
+                   "Hecate's Crescent" &&
+               ut::utRelicBlockName("Peng Claw", "Legendary Peng Claw") == "Peng Claw" &&
+               ut::utRelicBlockName("Essence of the Aegis of Athena", "Incarnation of the Aegis of Athena") ==
+                   "Aegis of Athena" &&
+               ut::utRelicBlockName("Incarnation of the Power of Nerthus", "Incarnation of the Power of Nerthus") ==
+                   "Power of Nerthus",
+           "a block's name: the words its first and last tier share at the end, tier words off");
+        ok(ut::utRelicBlockName("[ms]Bat Fang", "[ms]Legendary Bat Fang") == "Bat Fang" &&
+               ut::utRelicBlockName("{^y}Eitr", "{^y}Eitr") == "Eitr" &&
+               ut::utRelicBlockName("^yEitr", "^yEitr") == "Eitr" &&
+               ut::utRelicBlockName("[fs]Eine [ms]Einer", "[fs]Eine [ms]Einer") == "Eine",
+           "a block's name: no colour codes, the first gender alternative without its marker");
+        ok(ut::utRelicBlockName("", "Legendary Foo") == "Foo" && ut::utRelicBlockName("Foo", "") == "Foo" &&
+               ut::utRelicBlockName("", "").empty(),
+           "a block's name: a tier without a name takes the other tier's");
+        ok(l.blocks[(size_t)arch].name == "Archimedes' Mirror" && l.blocks[(size_t)nerthus].name == "Power of Nerthus",
+           "the oracle's blocks are named (three tiers, and one tier alone)");
+        int unnamed = 0;
+        for (const ut::UtRelicBlock& b : l.blocks)
+            if (b.name.empty()) ++unnamed;
+        ok(unnamed == 0, "every block of the list has a name");
+
+        // a list of the 1.1.0 form (B lines of 5 fields) still reads: its blocks have no name
+        std::string old;
+        std::stringstream in(text);
+        for (std::string ln; std::getline(in, ln);) {
+            if (ln.compare(0, 2, "B\t") == 0) {
+                size_t at = 0;
+                for (int k = 0; k < 5 && at != std::string::npos; ++k) at = ln.find('\t', at + 1);
+                if (at != std::string::npos) ln = ln.substr(0, at);
+            }
+            old += ln + "\n";
+        }
+        ut::UtRelicList o;
+        ok(ut::utRelicListRead(old, &o, &err) && o.blocks.size() == l.blocks.size() && o.blocks[0].name.empty(),
+           "a list without the names reads, its blocks unnamed", err.c_str());
+
+        // a tab inside a name adds a field: the list still reads, that block has no name
+        std::string tabbed = text;
+        tabbed.insert(tabbed.find("Essence of the Aegis") + 7, "\t");
+        ut::UtRelicList tb;
+        ok(ut::utRelicListRead(tabbed, &tb, &err) && tb.blocks.size() == l.blocks.size() && tb.blocks[0].name.empty() &&
+               tb.blocks[1].name == l.blocks[1].name,
+           "a tab inside a tier's name costs that block its name, not the page", err.c_str());
+
+        // relic_sort=1
+        ut::UtRelicList so = l;
+        ut::utRelicListSort(&so, true);
+        bool partsKept = true, sorted = true, rowsFollow = true;
+        for (size_t b = 1; b < so.blocks.size(); ++b) {
+            if (so.blocks[b - 1].part == 'C' && so.blocks[b].part == 'R') partsKept = false;
+            if (so.blocks[b - 1].part == so.blocks[b].part && so.blocks[b].name < so.blocks[b - 1].name) sorted = false;
+        }
+        for (size_t b = 0; b < so.blocks.size(); ++b)
+            for (int k = 0; k < so.blocks[b].rows; ++k)
+                if (so.rows[(size_t)(so.blocks[b].firstRow + k)].block != (int)b) rowsFollow = false;
+        ok(partsKept && sorted && so.blocks.size() == l.blocks.size() && so.blocks[0].name == "Aegis of Athena" &&
+               so.blocks[(size_t)so.relicBlocks].name == "Albino Spider Web",
+           "relic_sort=1: each part by name, the relics first", so.blocks[(size_t)so.relicBlocks].name.c_str());
+        ok(rowsFollow, "relic_sort=1: every row's block follows its block");
+        ut::UtRelicList back = so;
+        ut::utRelicListSort(&back, false);
+        bool sameOrder = back.blocks.size() == l.blocks.size();
+        for (size_t b = 0; sameOrder && b < l.blocks.size(); ++b)
+            sameOrder = back.blocks[b].id == l.blocks[b].id && back.rows[(size_t)back.blocks[b].firstRow].block == (int)b;
+        ok(sameOrder, "relic_sort=0 after 1: back in the game's order, every row's block with it");
+        ut::UtRelicLayout sn, sb;
+        ok(ut::utRelicLayoutBuild(so, ut::utRelicGeometryOf(16, 15, 1, 1, 1), &sn) && ut::utRelicPageCount(sn) == 27 &&
+               ut::utRelicLayoutBuild(so, ut::utRelicGeometryOf(16, 15, 1, 1), &sb) && ut::utRelicPageCount(sb) == 24,
+           "the defaults at 16 x 15, sorted: 27 pages with names, 24 without");
+        const int fr = ut::utRelicFind(so, "records/item/relics/02_act1_archimedesmirror.dbr");
+        ok(fr >= 0 && so.blocks[(size_t)so.rows[(size_t)fr].block].name == "Archimedes' Mirror",
+           "relic_sort=1: a record still finds its row and its block");
+
+        // relic_names=1: one line above each block, the gap at least that line
+        ut::UtRelicLayout yn, yn0, yn20;
+        const ut::UtRelicGeometry gn = ut::utRelicGeometryOf(16, 15, 1, 1, 1);
+        ok(!ut::utRelicGeometrySame(gn, ut::utRelicGeometryOf(16, 15, 1, 1)), "the names are a change of the layout");
+        ok(ut::utRelicLayoutBuild(l, gn, &yn) && ut::utRelicLayoutBuild(l, ut::utRelicGeometryOf(16, 15, 0, 1, 1), &yn0) &&
+               ut::utRelicLayoutBuild(l, ut::utRelicGeometryOf(20, 19, 1, 1, 1), &yn20) && yn.tallBlocks == 0,
+           "16 x 15 with names: nothing cut");
+        snprintf(d, sizeof(d), "%d pages at 16 x 15, %d with relic_block_gap=0, %d at 20 x 19", ut::utRelicPageCount(yn),
+                 ut::utRelicPageCount(yn0), ut::utRelicPageCount(yn20));
+        ok(ut::utRelicPageCount(yn) == ut::utRelicPageCount(yn0), "with names relic_block_gap=0 is the same as 1", d);
+        std::vector<ut::UtRelicPlace> first(4096);
+        const int pn = ut::utRelicWindowPlaces(l, yn, 0, first.data(), (int)first.size());
+        int lineMax = 0;
+        for (int i = 0; i < pn; ++i)
+            if (first[(size_t)i].line > lineMax) lineMax = first[(size_t)i].line;
+        ok(pn > 0 && first[0].line == 1 && lineMax < 15, "the window's first block starts on line 1, its name on line 0");
+    }
+
     printf("%s: %d passed, %d failed\n", g_fail ? "RELICPAGE TESTS FAILED" : "RELICPAGE TESTS PASSED",
            g_pass, g_fail);
     return g_fail ? 1 : 0;

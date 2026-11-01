@@ -510,6 +510,35 @@ int main() {
                refusals[5] == ut::kUtViewWhyRefusedNotTransfer && allowed == ut::kUtViewWhyOk,
            "G8 every refusal names itself, in order", ut::utViewWhyText(refusals[5]));
     }
+    {   // view_resume
+        ok(ut::utViewResumeWish(ut::kUtViewWhyTabChange) && ut::utViewResumeWish(ut::kUtViewWhyGoodbye) &&
+               ut::utViewResumeWish(ut::kUtViewWhyOpen) && !ut::utViewResumeWish(ut::kUtViewWhyToggleOff) &&
+               !ut::utViewResumeWish(ut::kUtViewWhyMp) && !ut::utViewResumeWish(ut::kUtViewWhyFault) &&
+               !ut::utViewResumeWish(ut::kUtViewWhyStreamOut) && !ut::utViewResumeWish(ut::kUtViewWhyDataFault),
+           "view_resume: a tab change or a close leaves the wish; the player's OFF and a fault clear it", "");
+        ut::UtViewState s;
+        memset(&s, 0, sizeof(s));
+        s.open = true;
+        s.mode = 1;
+        const bool now = ut::utViewResumeNow(s, true, true, true, false);
+        s.mode = 0;
+        const bool otherTab = ut::utViewResumeNow(s, true, true, true, false);
+        s.mode = 1;
+        s.on = true;
+        const bool alreadyOn = ut::utViewResumeNow(s, true, true, true, false);
+        s.on = false;
+        s.open = false;
+        const bool closed = ut::utViewResumeNow(s, true, true, true, false);
+        s.open = true;
+        ok(now && !otherTab && !alreadyOn && !closed && !ut::utViewResumeNow(s, false, true, true, false) &&
+               !ut::utViewResumeNow(s, true, false, true, false) && !ut::utViewResumeNow(s, true, true, false, false) &&
+               !ut::utViewResumeNow(s, true, true, true, true),
+           "view_resume: asked only on the Transfer tab of an open caravan, proven live, nothing queued, setting on", "");
+        ok(ut::utGroupRowPicked(false, false, 9, 4) == 4 && ut::utGroupRowPicked(false, true, 9, 4) == 4 &&
+               ut::utGroupRowPicked(false, false, 9, 0) == 0 && ut::utGroupRowPicked(true, false, 9, 4) == 0 &&
+               ut::utGroupRowPicked(true, true, 9, 4) == 9,
+           "a group's button: another group on the row it was left on; the page shown at its top, or kept from the real page", "");
+    }
     {
         // the two latches. DATA (gameOff): a fault in this game's generated set turns the view
         // OFF and refuses it until the next game switch - a world change is no switch. ENGINE

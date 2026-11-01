@@ -148,7 +148,13 @@
 //     relics and charms stored stay in the journal, on no page. A file from 26 keeps every value
 //     and every line and gains the key at its default; a mod's own file from 26 takes the main
 //     file's value (the key it did not have).
-#define UT_INI_VERSION 27
+// 28 = [advanced] relic_names (default 1), relic_sort (1), relic_split (1), formula_copies (1). A
+//     file from 27 keeps every value and every line and gains the keys commented at their defaults;
+//     a mod's own file from 27 takes the main file's values (the keys it did not have).
+// 29 = [advanced] view_resume (default 1); relic_split is a line now, its comment says so. A file from
+//     28 keeps every value and every line and gains the key commented at its default; a mod's own
+//     file from 28 takes the main file's value (the key it did not have).
+#define UT_INI_VERSION 29
 // The ini_version from which search_mark's default is 1 (the migration moves an old default 3).
 #define UT_SEARCH_FRAME_SINCE 16
 // The ini_version from which owned_marks' default is 3 (the migration moves an old default 1).
@@ -291,6 +297,11 @@ struct UtConfig {
     int relicBonusGap = 1;
     // The relic and charm pages: every block on its own framed panel (1) or none (0).
     int relicPanels = 1;
+    int relicNames = 1;      // each block's name on the line above it
+    int relicSort = 1;       // the blocks of each part: 0 game order, 1 by name
+    int relicSplit = 1;      // a line between the relics and the charms
+    int viewResume = 1;      // the collection comes back when the Transfer tab does
+    int formulaCopies = 1;   // an arcane formula's slot keeps any number of copies
     char padScreen[48] = "";     // pad_screen: the pad pinned to a screen corner
     char labelScreen[48] = "";   // label_screen: the label pinned to a screen corner
 

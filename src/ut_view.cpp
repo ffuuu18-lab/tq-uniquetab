@@ -52,6 +52,7 @@ const void* volatile g_subVft = nullptr;  // its vftable, read at every accessor
 bool g_goneSaid = false;
 volatile LONG g_inAccessor = 0;
 volatile LONG g_memberVerified = 0;     // this open: member == real sack and kind == 1, seen live
+bool g_resumeWish = false;              // view_resume: the tab or the caravan took the view OFF (game thread)
 volatile LONG g_worldGen = 0;          // every world up / down (viewOnWorld)
 const unsigned kUiKindOff = 0x148;      // LITERAL ui.stashKind
 
@@ -167,7 +168,10 @@ bool isMultiplayer(bool* known, bool* server = nullptr, bool* client = nullptr) 
 
 void event(int ev, int arg) {
     const UtViewStep st = utViewApply(&g_vs, ev, arg);
-    if (st.turnedOff) viewForceOff(utViewWhyText(st.why));
+    if (st.turnedOff) {
+        g_resumeWish = utViewResumeWish(st.why);
+        viewForceOff(utViewWhyText(st.why));
+    }
 }
 
 // read the session state, feed a CHANGE to the state machine (G6: OFF once), and say it.
@@ -477,6 +481,13 @@ void viewTick() {
     // G6: the session state, polled twice a second (and at every toggle request below). a
     // CHANGE (single / multiplayer / unknown) turns the view OFF once; multiplayer itself does not.
     if ((g_ticks % 30) == 0 && viewAvailable()) mpNote();
+    if (utViewResumeNow(g_vs, g_resumeWish, g_cfg.enabled && g_cfg.viewResume && !panelLayoutEditOpen(),
+                        InterlockedCompareExchange(&g_memberVerified, 0, 0) != 0,
+                        InterlockedCompareExchange(&g_toggleReq, 0, 0) != 0)) {
+        g_resumeWish = false;   // one try a visit: a refusal says why and does not repeat
+        logI("view: back on the Transfer tab - the collection comes back where it was left (view_resume)");
+        viewRequest(kUtViewReqOn);
+    }
     // enabled=0 (the ini's master switch): the view is not available - a shown one goes off at
     // once, and a request still queued is refused and said.
     if (!g_cfg.enabled) {
@@ -613,6 +624,7 @@ unsigned viewWorldGeneration() { return (unsigned)InterlockedCompareExchange(&g_
 
 void viewOnWorld(bool up) {
     InterlockedIncrement(&g_worldGen);   // the tint's controller cache key
+    g_resumeWish = false;                // view_resume lasts while one game stays loaded
     const UtViewStep st = utViewApply(&g_vs, up ? kUtViewEvWorldUp : kUtViewEvWorldDown, 0);
     (void)st;
     // Every world change is an OFF, and a world that went away takes its objects with it: the
@@ -1237,6 +1249,7 @@ void itemFacts(unsigned id, unsigned ctrlId, const void** item, const void** ctr
 // (as a refused unique has one line).
 bool relicFacts(UtDepositFacts* f, const char* name) {
     f->relicKind = name[0] && liveRelicFind(name) >= 0;
+    f->manyKind = g_cfg.formulaCopies && name[0] && liveIsFormula(name);
     return f->relicKind;
 }
 
@@ -1332,7 +1345,7 @@ bool viewCapable(const TqCursorItemMove* handler) {
     f.inCatalogue = g_capCat;
     f.stack = g_capStack;
     f.rowsNow = g_capRows;   // one copy per record (no per-frame journal read)
-    if (g_capCat) relicFacts(&f, g_capName);   // a binary search of the list, no journal read
+    if (g_capCat) relicFacts(&f, g_capName);   // a binary search of the list and a walk of the formula group, no journal read
     const int v = utDepositCapableVerdict(f);
     // the user could not tell why nothing happened - ONE debug line per cursor id naming
     // the fact that failed (the slot is asked every frame; the line is not).
@@ -1369,7 +1382,7 @@ int viewDepositDrop(TqCursorItemMove* handler) {
         if (!ctrl) f.bindings = false;
         if (f.isItem && f.inCatalogue) f.rowsNow = storeCount(name);
         if (f.isItem && f.inCatalogue) relicFacts(&f, name);
-        if (f.isItem && f.inCatalogue && (!f.rowsNow || f.relicKind) && utStackIsSingle(f.stack)) {
+        if (f.isItem && f.inCatalogue && (!f.rowsNow || f.relicKind || f.manyKind) && utStackIsSingle(f.stack)) {
             char capName[256];
             unsigned st = 0;
             f.haveCap = protoCapture(item, &cap, capName, sizeof(capName), &st);
@@ -1455,7 +1468,7 @@ int viewDepositQuick(unsigned id) {
         itemFacts(id, 0, &item, nullptr, name, sizeof(name), &f.isItem, &f.inCatalogue, &f.stack);
         if (f.isItem && f.inCatalogue) f.rowsNow = storeCount(name);
         if (f.isItem && f.inCatalogue) relicFacts(&f, name);
-        if (f.isItem && f.inCatalogue && (!f.rowsNow || f.relicKind) && utStackIsSingle(f.stack)) {
+        if (f.isItem && f.inCatalogue && (!f.rowsNow || f.relicKind || f.manyKind) && utStackIsSingle(f.stack)) {
             char capName[256];
             unsigned st = 0;
             f.haveCap = protoCapture(item, &cap, capName, sizeof(capName), &st);

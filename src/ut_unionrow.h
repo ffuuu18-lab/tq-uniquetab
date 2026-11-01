@@ -1,4 +1,5 @@
-// ut_unionrow.h - the saved row of a page that has just become a button's union, and nothing else.
+// ut_unionrow.h - the saved row of a page that has just become a button's union, and the row a
+// group's button lands on.
 //
 // A start (or a switch to another game) restores uniq_group / uniq_row from uniquetab.state. A page
 // built before the buttons file is resolved clamps that row to the saved group's OWN rows; when the
@@ -41,6 +42,13 @@ inline int utUnionRestoredRow(const UtRowRestore& r, int want, int row, int memb
     if (row >= r.row) return row;
     if (membersNow < 2 || membersBefore >= 2) return row;
     return r.row;
+}
+
+// view_resume: the row a group's button lands on. Another group: the row that group was left on
+// (the page build clamps it). The page it is on: its top, or, from the real Transfer page, where it is.
+inline int utGroupRowPicked(bool samePage, bool keepRow, int rowNow, int rowLeft) {
+    if (samePage) return keepRow ? rowNow : 0;
+    return rowLeft > 0 ? rowLeft : 0;
 }
 
 }  // namespace ut

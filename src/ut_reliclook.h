@@ -17,15 +17,15 @@ inline bool utRelicProtoLit(int protoSlot, unsigned long long seq) {
 
 // The owned-marks style a page slot follows this frame for its gray copy and its background skip
 // (ut_owned ownedGrayWanted / ownedBackgroundSkip): `ownedMarks` while the marks are trusted
-// (`marksNow`: the inventory walk, the journal set, the measured grid). A relic slot's lit / empty
-// state is its journal row alone (utRelicProtoLit), so it also follows `ownedMarks` with only the
-// journal set known - between a rebuild and the owned recount it keeps its gray copy instead of
-// one frame of colour - and under the OWN filter too (the marks are not trusted there): OWN keeps
-// the held blocks whole, and their empty slots stay gray exactly as with OWN off, only the slots
-// that hold something show their colours. Else 0 (no gray copy, no skip).
+// (`marksNow`: the inventory walk, the journal set, the measured grid), else 0 (no gray copy, no
+// skip). A relic slot is always the gray style, whatever owned_marks says: an empty slot's gray copy
+// is how the page tells it from a slot that holds something. Its lit / empty state is its journal
+// row alone (utRelicProtoLit), so it needs only the journal set known - between a rebuild and the
+// owned recount it keeps its gray copy instead of one frame of colour, and under the OWN filter
+// too: OWN keeps the held blocks whole, and their empty slots stay gray as with OWN off.
 inline int utRelicMarksStyle(bool marksNow, bool relicSlot, int ownedMarks, bool journalKnown) {
-    if (marksNow) return ownedMarks;
-    return relicSlot && journalKnown ? ownedMarks : 0;
+    if (relicSlot) return journalKnown ? 3 : 0;
+    return marksNow ? ownedMarks : 0;
 }
 
 // The icon whose gray copy an empty relic slot shows. The generator writes the relic gray copies
@@ -84,6 +84,13 @@ struct UtRelicPanel {
     int pos;
     int col, line, cols, lines;
 };
+
+// relic_split: the panel of a window whose block starts another part (-1 = one part in the window).
+inline int utRelicPartChange(const UtRelicPanel* p, int n) {
+    for (int i = 1; i < n; ++i)
+        if (p[i].part != p[i - 1].part) return i;
+    return -1;
+}
 
 // The panels of a window's places (utRelicWindowPlaces: reading order, dead cells included). The
 // places of one block follow each other, so each run of one block is one panel; `firstPos` = the

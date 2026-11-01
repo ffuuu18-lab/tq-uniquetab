@@ -64,6 +64,7 @@ bool ownedMarkRect(int i, float* x, float* y, float* w, float* h);   // prototyp
 bool ownedGrayWanted(int i);
 // Prototype i is a slot of the relic page (no veil there: an empty slot shows its gray copy).
 bool ownedRelicSlot(int i);
+unsigned ownedPageRows(int i);   // prototype i's journal rows (a unique's place), taken with the page
 // prototype i's background draw (the engine's red, class tint, rarity border) is to be
 // SKIPPED - ut_viewgate.h utBackgroundSkip over: the record uncollected, the slot not the hovered
 // one (the same g_unveil as the gray lend and the veil), the marks' style this frame (0 when the

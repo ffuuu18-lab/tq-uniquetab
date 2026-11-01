@@ -15,7 +15,7 @@
 // A block's rows go in tier order, then by key.
 //
 // The file, CRLF, tab-separated, UTF-8:
-//   B <block no. from 1> <block id> <R relic | C charm> <rows in the block>
+//   B <block no. from 1> <block id> <R relic | C charm> <rows in the block> <first tier's name> <last tier's name>
 //   R <record> <tier 0..3> <shards to complete> <relicBitmap> <shardBitmap> <bonus count> <bonus>...
 //   X <record> <reason, the words of uniq-excluded.txt>   by record, after every block
 // No group, page or uniq-records.txt line takes these records; uniq-excluded.txt does not list

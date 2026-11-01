@@ -124,7 +124,8 @@ std::string relicsListText(const std::vector<RelicItem>& relics, const std::vect
     std::size_t n = 0;
     for (const Block& b : order) {
         out += "B\t" + std::to_string(++n) + "\t" + b.bid + "\t" + (b.part == 0 ? "R" : "C") + "\t" +
-               std::to_string(b.rows.size()) + "\r\n";
+               std::to_string(b.rows.size()) + "\t" + b.rows.front().r->item.name + "\t" +
+               b.rows.back().r->item.name + "\r\n";
         ++(b.part == 0 ? c.relicBlocks : c.charmBlocks);
         if (b.rows.size() == 1) ++c.oneLineBlocks;
         for (const Row& row : b.rows) {

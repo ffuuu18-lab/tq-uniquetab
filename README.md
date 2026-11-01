@@ -20,7 +20,10 @@ way to see at a glance what you have found and what you have not.
 
 **The arcane formulae** have their page after the Artifacts, each in a cell two squares wide.
 Hovering a formula says whether the formula itself is in your collection; the artifact it makes
-keeps its own line on its own tooltip, never on the formula's.
+keeps its own line on its own tooltip, never on the formula's. A formula's cell keeps any number
+of single copies (`formula_copies=1`, the default): a corner number counts them from two up, and
+a take gives back the newest. A stack of two or more is refused like any stack, and a formula
+your own group in `uniquetab-groups.ini` takes off this page keeps one copy.
 
 **Your items do not go into a caravan file.** The collection lives in the mod's own file next to
 the mod. The mod never writes `Player.chr`, the Transfer's `winsys.dxb` or any other save file:
@@ -85,7 +88,7 @@ game that runs with no log in either place never loaded the plugin. Check the lo
 There is nothing to do by hand. Your collection and your settings stay where they are, and the
 first start does the rest, once:
 
-- `uniquetab.ini` is rewritten as `ini_version 27` with every value you set kept and a `[layout]`
+- `uniquetab.ini` is rewritten as `ini_version 29` with every value you set kept and a `[layout]`
   part added; a setting that moved (where the collection was left goes to `uniquetab.state`, the
   rollover words to `[tab]` of the buttons file) is carried there, and the log names each move;
 - every catalogue is rebuilt from your game files, because what goes into it changed; on a page
@@ -109,9 +112,13 @@ mod draws a small pad of buttons:
 - **Transfer** (its lamp lit while the real Transfer page shows) switches the Transfer page to the
   collection and back. **F6** does the same
   (`view_hotkey`). Your real Transfer items are untouched and come back the moment you switch
-  back.
+  back. If changing tab or closing the caravan took the collection away, it comes back on its group
+  and row when you return to the Transfer tab (`view_resume=1`); after you switch it off yourself,
+  or after you load a game, the real page shows until you click.
 - The **group buttons** (Helm, Torso, ... Artf, BLU, and Relic for the relic and charm page) select
-  a group and switch the collection on.
+  a group and switch the collection on, on the row that group was left on (until you flip **OWN**
+  or switch to another game). The button of the group already showing goes to its top; from the real Transfer page, it
+  brings the collection back on its row.
 - **OWN** toggles between showing every item of the group and only the ones you already have.
 - **<** and **>** (half a cell each, beside OWN) turn the group's pages. After them, past the
   search field, the label says the group, the slot rows shown (`rows 1-5 / 12`), how many of the
@@ -159,6 +166,13 @@ blocks and the empty columns before the first bonus, and `relics_565x637=x,y,w,h
 `[layout]` gives the page an area of its own (the layout editor opened on the Relic page writes
 it; with no line the item grid in force is used).
 
+Each block has its **name** on the line above it, in the language of the catalogue
+(`text_language`) (`relic_names=1`, the default; 0 gives those
+lines back: the base game's 16 x 15 area holds 27 pages with names, 24 without).
+Each part's blocks stand in order of name, the relics still before the charms (`relic_sort=1`, the
+default; 0 = the game's order, from the next page you open). A coloured line marks where the relics
+end and the charms start, in the gap that is already there (`relic_split=1`, the default). An empty slot on this page is gray whatever `owned_marks` says.
+
 On the **Relic** page every relic or charm tooltip speaks of its slot there. A
 completed relic or charm says **In your collection** when its record with that completion bonus is
 stored, **In your collection (another roll)** when only other bonuses of that record are, and
@@ -171,7 +185,7 @@ the corner tick when you carry that relic or charm with that bonus somewhere (th
 does).
 
 The Relic page's label is short and names no page (the pressed **Relic** button does):
-`64-67/93  page 17/23  8/1971  pieces 50` - the blocks shown of all blocks, the fixed page, the bonus
+`61-63/93  page 18/27  8/1971  pieces 50` - the blocks shown of all blocks, the fixed page, the bonus
 slots holding something of all bonus slots, and the shards stored. A narrower label box drops the
 page, then the blocks, then the pieces; a search adds `found N` (`=N` in a narrow box).
 
@@ -260,7 +274,7 @@ to DEBUG; `log_level=debug` shows every one:
   start-up. Set
   `collect_unobtainable=1` to collect them anyway.
 - **Already in the collection** - the collection keeps one copy of each record (the Relic page's
-  slots keep any number).
+  slots keep any number, and so do the formulae's with `formula_copies=1`).
 - **No slot on the Relic page** - a completed relic or charm with a bonus its record's table does
   not list, or a shard count the record does not have.
 - **A stack** of two or more.
@@ -343,8 +357,10 @@ under `[advanced]` at the end, commented out at its default.
 | `view_hotkey` | 117 | the key that switches the Transfer page to the collection and back, as a Windows virtual-key code (117 = F6, the default; 0 = the Transfer button only) |
 | `search` | 1 | 1 = the search field on the collection page; 0 = no field, no marks, no key taken (if the game started with 0, a 1 works from the next start) |
 
-The file says `ini_version=27`. An older file is carried over on the first start with every value
-kept. A file from 26 keeps every line and gains `collect_relics=1` under `[general]`; a mod's own
+The file says `ini_version=29`. An older file is carried over on the first start with every value
+kept. A file from 27 keeps every line and takes the defaults of `relic_names`, `relic_sort`,
+`relic_split`, `formula_copies` and `view_resume`; a mod's own file from 27 takes the main file's
+values of those keys once, at its first entry. A file from 26 keeps every line and gains `collect_relics=1` under `[general]`; a mod's own
 file from 26 takes the main file's `collect_relics` once, at its first entry. A file from 22
 keeps every line - your `[layout]` lines, `pad_screen` and `label_screen`,
 and every commented row stays commented - and gains `ui_scale_pct`, `collect_pristine_only`,
@@ -369,7 +385,7 @@ does beside it. Remove the `;` in front of one to change it; the line keeps its 
 | `group_buttons` | 1 | draw the pad of group buttons and let it be clicked |
 | `page_hotkeys` | 1 | the wheel scrolls rows, PageUp/PageDown turn pages, Ctrl changes group |
 | `plate_label` | 1 | draw the group label beside the buttons |
-| `owned_marks` | 3 | how an item you do not own yet is marked: 0 none, 1 a dark veil, 2 a thin frame, 3 its icon in gray |
+| `owned_marks` | 3 | how an item you do not own yet is marked: 0 none, 1 a dark veil, 2 a thin frame, 3 its icon in gray (the Relic page's empty slots are gray at every value) |
 | `have_marks` | 0 | 1 = an item you do not own yet but carry somewhere (inventory, stash, Transfer, Relic Vault) gets a small corner tick |
 | `slot_plates` | 3 | the ground under each slot: 0 none, 1 a dark plate (thin frames where it cannot be drawn), 2 thin frames, 3 the equipment window's own slot art |
 | `grid_cover` | 1 | cover the grid cells no slot uses in the caravan's ground colour; on the relic and charm pages the caravan background is shown with its lattice erased instead (that ground colour only until the copy is painted) |
@@ -388,6 +404,11 @@ does beside it. Remove the `;` in front of one to change it; the line keeps its 
 | `relic_block_gap` | 1 | the Relic page: the empty lines between two blocks (0..2) |
 | `relic_bonus_gap` | 1 | the Relic page: the empty columns between a row's shard slot and its first bonus (0..1) |
 | `relic_panels` | 1 | the Relic page: 1 = every block stands on its own framed panel; 0 = no panels |
+| `relic_names` | 1 | the Relic page: 1 = each block's name on the line above it (the gap between two blocks is then at least that line); 0 = no names |
+| `relic_sort` | 1 | the Relic page: 0 = the game's order; 1 = each part's blocks by name, the relics before the charms (from the next page you open) |
+| `relic_split` | 1 | the Relic page: 1 = a coloured line between the relics and the charms, taking no space; 0 = none |
+| `view_resume` | 1 | the Transfer tab: 1 = the collection comes back on its group and row if a tab change or closing the caravan took it away, and each group keeps its row; 0 = the real page until you click, and a group starts at its top |
+| `formula_copies` | 1 | 1 = a formula's cell keeps any number of single copies; 0 = one copy, as any other item (copies already stored stay, keep their number and can be taken) |
 | `plate_label_size` | 13 | the height of the label line's text, 8..32 (the button captions are fitted to their buttons; `size.label` in the buttons file wins over it) |
 | `pad_caption_max` | 14 | largest caption size on the buttons; the button size limits it too (6..36). `size.caption_max` in the buttons file and a button's own `size` win over it. A long caption of the buttons file is fitted on its own button under the same ceiling |
 | `font` | `fonts/albertus mt light.fnt` | the caption font, by its name in `Resources\Fonts.arc` |
@@ -502,7 +523,8 @@ them:
   the game losing the focus.
 - A click on the caravan driver while the caravan is open makes the game close the caravan and open
   it again in place: the editor closes with nothing written, and the tab comes back as after any
-  open (the pad and the toggle on the Transfer page, the view OFF, Ctrl+wheel).
+  open (the pad and the toggle on the Transfer page, the view OFF or back on its group and row by
+  `view_resume`, Ctrl+wheel).
 - **RESET** puts all three back at their default places; SAVE then removes their lines - on the
   game's own Transfer page too, where the grid cannot be moved: the collection's `grid_` line goes
   as well.

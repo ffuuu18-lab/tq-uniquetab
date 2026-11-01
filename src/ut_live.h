@@ -58,7 +58,9 @@ int liveShownGroup();
 int liveShownPage();
 int liveWantedGroup();
 
-bool liveSelectGroup(int group);   // absolute: one button, one group; the window at row 0
+// absolute: one button, one group; the window on the row that group was left on, or at row 0 when
+// it is the page already shown (keepRow: that page stays on its row)
+bool liveSelectGroup(int group, bool keepRow = false);
 // the view shows a WINDOW of the group's slot rows per page, from a slot-row
 // offset (liveShownPage). liveStepPage moves it by a whole window (< > / PgUp / PgDn), liveStepRow
 // by one slot row (the wheel); both clamp so the window stays full (the last one overlaps).
@@ -140,6 +142,7 @@ bool liveRebuildInput(int* wheelTicks, long long* firstQpc);
 void liveMarkDirty();
 // is `folded` (lower case, '/') one of the catalogue's records? Game thread; no allocation.
 bool liveHasRecord(const char* folded);
+bool liveIsFormula(const char* folded);   // an Arcane Formulae record (the "blueprint" group)
 struct UtMiTable;   // ut_mikind.h
 // The catalogue's KIND of a record (any spelling): 1 = a monster infrequent, 0 = not (or not a
 // catalogue record), -1 = unknown (catalogue.bin could not be read). Lock-free: the table is built
@@ -174,7 +177,7 @@ const char* liveStatus();
 bool liveIsRelicGroup(int group);      // `group` is the relic page's group (and the list is read)
 // The relic layout's area (whole cells) and its two gaps, from the panel's layout pass while a
 // relic page is shown; laid out again and the page rebuilt only when one of them changes.
-bool liveSetRelicGeometry(int cols, int rows, int blockGap, int bonusGap);
+bool liveSetRelicGeometry(int cols, int rows, int blockGap, int bonusGap, int nameLine);
 int liveRelicGroup();                  // that group, -1 = none
 const UtRelicList* liveRelicList();    // the list of the game in force (null = none)
 int liveRelicFind(const char* folded); // a record's row in that list, -1 = not a relic / charm

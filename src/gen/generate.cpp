@@ -290,7 +290,8 @@ std::string fingerprintOf(const std::string& gameDir, const std::string& lang,
     // 11 the collection rule on every layer (no path rule, whole template words, the reach walk).
     // 12 the relic and charm list (uniq-relics.txt, relics_gen.h) and the gray copies of its icons.
     // 13 the relic page's group (uniq-groups.txt's G line "relics", no E line).
-    std::string fp = "GDUT-STAMP 13\nlang=" + lang + "\n";
+    // 14 the relic list's B lines name their first and last tier (the block's name on the page).
+    std::string fp = "GDUT-STAMP 14\nlang=" + lang + "\n";
     // a custom game: its leaf (the start-up game's stamp has no such line, so it reads as before)
     if (!v.startup()) fp += "game=" + v.name() + "\n";
     fp += groupsLine;

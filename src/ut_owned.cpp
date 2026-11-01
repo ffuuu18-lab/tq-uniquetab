@@ -103,12 +103,14 @@ bool g_gridWaitLongSaid = false;   // the INFO line after kUtGridWaitSay waits
 int g_geoW = 0, g_geoH = 0;
 float g_geoScale = 0.0f;
 bool g_marksNow = false;       // ownedMarksBegin's answer for this frame
+bool g_unveilNow = false;      // the same trust at any owned_marks: a relic slot is gray at 0 too
 int g_unveil = -1;             // the prototype whose slot the cursor is on (not veiled)
 // the marks are drawn from the Present detour, AFTER the engine's tooltip, so they
 // are hidden while a tooltip is likely open: the cursor is on the measured grid and either on a
 // cell a prototype covers (g_occ) or the last proven hover returned an item (g_hoverId).
 char g_occ[kGridRowsMax][kGridColsMax];
 char g_pageRelic[kUtProtoMax];   // prototype i is a relic page slot (its marks: utRelicProtoLit)
+unsigned g_pageRows[kUtProtoMax];   // prototype i's journal rows (a unique's place; formula_copies' count)
 volatile LONG g_hoverId = 0;
 
 char g_status[160] = "owned=unknown";
@@ -320,6 +322,7 @@ void computePage() {
         unsigned long long seq = 0;
         const bool relic = have && protoSlotKindAt(i, &slot) && slot > 0 && protoAtSeq(i, &seq);
         g_pageRelic[i] = (char)relic;
+        g_pageRows[i] = have && !relic ? (unsigned)storeCount(rec) : 0u;
         if (relic) {   // a relic slot that holds something is bright; its have-mark is keyed by bonus
             g_pageOwned[i] = (char)(journalSetKnown() && utRelicProtoLit(slot, seq));
             // the corner tick: a green slot (prototype slot 2 + bonus) whose (record, bonus) the
@@ -536,6 +539,7 @@ void ownedTick(bool on) {
 void ownedOnViewOff() {
     g_pageN = 0;
     g_marksNow = false;
+    g_unveilNow = false;
     InterlockedExchange(&g_hoverId, 0);
 }
 
@@ -551,6 +555,7 @@ void ownedWorldGone() {
     g_invCount = 0;
     g_invHashCount = 0;
     g_marksNow = false;
+    g_unveilNow = false;
     InterlockedExchange(&g_hoverId, 0);
 }
 
@@ -792,7 +797,7 @@ int ownedSackKeys(const void* sack, unsigned* out, int cap) {
 // Begin with the cursor the POST reads, so the gray lend and the veil agree in every frame.
 void ownedUnveilRefresh(bool cursorOk, float cx, float cy) {
     g_unveil = -1;
-    if (g_marksNow && cursorOk && g_cw && g_ch && cx >= g_gridX && cy >= g_gridY) {
+    if (g_unveilNow && cursorOk && g_cw && g_ch && cx >= g_gridX && cy >= g_gridY) {
         // the veil STAYS on every unowned slot while the cursor is on the
         // grid (hiding them all read as "everything collected"); only the hovered
         // slot is un-veiled, so the item under the cursor shows bright; the tooltip is
@@ -828,8 +833,8 @@ int ownedMarksBegin(const PlateGeometry& g, bool cursorOk, float cx, float cy) {
     // under the OWN filter every record shown is owned - the veil is moot.
     // bright = collected (journal rows), dim = not; the self-checks (g_known) still prove
     // the page's prototypes before any mark is drawn over them.
-    g_marksNow = g_cfg.ownedMarks != 0 && g_known && journalSetKnown() && g_gridVerdict == 1 &&
-                 g_pageN > 0 && !liveOwnedOnlyActive();
+    g_unveilNow = g_known && journalSetKnown() && g_gridVerdict == 1 && g_pageN > 0 && !liveOwnedOnlyActive();
+    g_marksNow = g_cfg.ownedMarks != 0 && g_unveilNow;
     ownedUnveilRefresh(cursorOk, cx, cy);
     return g_marksNow ? g_cfg.ownedMarks : 0;
 }
@@ -867,6 +872,8 @@ bool ownedGrayWanted(int i) {
 bool ownedMarksNow() { return g_marksNow; }
 
 bool ownedRelicSlot(int i) { return i >= 0 && i < g_pageN && i < kUtProtoMax && g_pageRelic[i] != 0; }
+
+unsigned ownedPageRows(int i) { return i >= 0 && i < g_pageN && i < kUtProtoMax ? g_pageRows[i] : 0u; }
 
 bool ownedBackgroundSkip(int i, bool routeLive) {
     if (i < 0 || i >= g_pageN || i >= kUtProtoMax) return false;

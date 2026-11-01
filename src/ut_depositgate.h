@@ -88,6 +88,7 @@ struct UtDepositFacts {
     bool notPristine;    // the capture names a part beyond its record (utPartsPristine false)
     // Appended after them, so an aggregate that leaves them out means "a unique":
     bool relicKind;      // the record is a relic or charm of the relic list: any number of rows
+    bool manyKind;       // an arcane formula with formula_copies=1: any number of rows too
     int relicRoute;      // utRelicRoute of the capture (UtRelicRoute; relicKind only)
 };
 
@@ -172,7 +173,7 @@ inline int utDepositDecide(const UtDepositFacts& f) {
     if (!f.bindings) return kUtDepRefuseBindings;
     if (!f.isItem) return kUtDepRefuseNotItem;
     if (!f.inCatalogue) return kUtDepRefuseNotCatalogue;
-    if (f.rowsNow > 0u && !f.relicKind) return kUtDepRefuseHave;   // a relic: any number
+    if (f.rowsNow > 0u && !f.relicKind && !f.manyKind) return kUtDepRefuseHave;   // a relic: any number
     if (!utStackIsSingle(f.stack)) return kUtDepRefuseStack;
     if (!f.haveCap || !f.capMatches) return kUtDepRefuseCapture;
     if (f.relicKind && !utRelicRouteAccepted(f.relicRoute)) {

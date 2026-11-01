@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,7 @@ struct UtRelicRow {
 
 struct UtRelicBlock {
     std::string id;     // folder / stem, folded
+    std::string name;   // utRelicBlockName of its tiers' names ("" = the list names none)
     char part = 'R';    // 'R' relic, 'C' charm (the class decides)
     int firstRow = 0;   // its rows in UtRelicList::rows, tier order
     int rows = 0;
@@ -86,6 +88,56 @@ inline std::string fold(const std::string& s) {
 }
 }  // namespace relicpage_detail
 
+// A tag as the page shows it: no colour codes ({^y}, ^y), and of the gender alternatives
+// ("[ms]A [fs]B", the translated tags) the first, without its marker.
+inline std::string utRelicNameClean(const std::string& in) {
+    std::string s;
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '{' && i + 3 < in.size() && in[i + 1] == '^' && in[i + 3] == '}') {
+            i += 3;
+        } else if (in[i] == '^' && i + 1 < in.size()) {
+            ++i;
+        } else if (in[i] == '[' && i + 3 < in.size() && in[i + 1] >= 'a' && in[i + 1] <= 'z' &&
+                   in[i + 2] >= 'a' && in[i + 2] <= 'z' && in[i + 3] == ']') {
+            if (s.find_first_not_of(' ') != std::string::npos) break;
+            i += 3;
+        } else {
+            s.push_back(in[i]);
+        }
+    }
+    const size_t a = s.find_first_not_of(' '), z = s.find_last_not_of(' ');
+    return a == std::string::npos ? std::string() : s.substr(a, z - a + 1);
+}
+
+// A block's name from its first and last tier's names: the whole words they share at the end
+// ("Essence of Hecate's Crescent" + "Incarnation of Hecate's Crescent" -> "Hecate's Crescent",
+// "Peng Claw" + "Legendary Peng Claw" -> "Peng Claw"), without a list of tier words. Words are cut
+// at blanks: with none before the shared end the first tier's whole name stays. A block of one
+// tier has only its own name: the game's English tier words are taken off it.
+inline std::string utRelicBlockName(const std::string& firstTag, const std::string& lastTag) {
+    const std::string one = utRelicNameClean(firstTag), two = utRelicNameClean(lastTag);
+    const std::string& first = one.empty() ? two : one;
+    const std::string& last = two.empty() ? one : two;
+    std::string s = first;
+    if (first != last) {
+        size_t n = 0;
+        while (n < first.size() && n < last.size() &&
+               first[first.size() - 1 - n] == last[last.size() - 1 - n])
+            ++n;
+        size_t at = first.size() - n;
+        while (at < first.size() && at > 0 && first[at - 1] != ' ') ++at;   // whole words only
+        if (at < first.size()) s = first.substr(at);
+    } else {
+        static const char* const kTier[] = {"Essence of ", "Embodiment of ", "Incarnation of ", "Epic ",
+                                            "Legendary "};
+        for (const char* t : kTier)
+            if (s.compare(0, strlen(t), t) == 0) s.erase(0, strlen(t));
+    }
+    if (s.compare(0, 3, "of ") == 0) s.erase(0, 3);
+    if (s.compare(0, 4, "the ") == 0) s.erase(0, 4);
+    return s;
+}
+
 // Reads uniq-relics.txt. False (and `err` says the line) on any malformed line; an empty file is
 // a list without blocks.
 inline bool utRelicListRead(const std::string& text, UtRelicList* out, std::string* err) {
@@ -105,11 +157,12 @@ inline bool utRelicListRead(const std::string& text, UtRelicList* out, std::stri
         if (line.empty()) continue;
         splitTabs(line, &f);
         long v = 0, t = 0, n = 0;
-        if (f[0] == "B" && f.size() == 5 && toInt(f[1], 1, 100000, &v) &&
+        if (f[0] == "B" && f.size() >= 5 && toInt(f[1], 1, 100000, &v) &&
             (int)v == (int)l.blocks.size() + 1 && (f[3] == "R" || f[3] == "C") &&
             toInt(f[4], 1, 3, &n)) {
             UtRelicBlock b;
             b.id = f[2];
+            if (f.size() == 7) b.name = utRelicBlockName(f[5], f[6]);   // a tab inside a name: no name
             b.part = f[3][0];
             b.firstRow = (int)l.rows.size();
             l.blocks.push_back(b);
@@ -169,6 +222,32 @@ inline bool utRelicListRead(const std::string& text, UtRelicList* out, std::stri
     return true;
 }
 
+// relic_sort: each part's blocks by name, or back in the game's order (the relics stay before the
+// charms). The rows stay where they are; a row's block index follows its block.
+inline void utRelicListSort(UtRelicList* l, bool byName) {
+    const int n = (int)l->blocks.size();
+    std::vector<int> order((size_t)n), remap((size_t)n);
+    std::vector<std::string> key((size_t)n);
+    for (int i = 0; i < n; ++i) {
+        order[(size_t)i] = i;
+        key[(size_t)i] = relicpage_detail::fold(l->blocks[(size_t)i].name);
+    }
+    std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+        const char pa = l->blocks[(size_t)a].part, pb = l->blocks[(size_t)b].part;
+        if (pa != pb) return pa == 'R';
+        if (!byName) return l->blocks[(size_t)a].firstRow < l->blocks[(size_t)b].firstRow;
+        return key[(size_t)a] < key[(size_t)b];
+    });
+    std::vector<UtRelicBlock> sorted;
+    sorted.reserve((size_t)n);
+    for (int k = 0; k < n; ++k) {
+        sorted.push_back(l->blocks[(size_t)order[(size_t)k]]);
+        remap[(size_t)order[(size_t)k]] = k;
+    }
+    l->blocks.swap(sorted);
+    for (UtRelicRow& r : l->rows) r.block = remap[(size_t)r.block];
+}
+
 // The row of a folded record (lower case, '/'), -1 = not on the list. No allocation.
 // The take's journal call by the place's prototype slot: none or 0 = a unique's place (the take
 // of its newest row); 1 = the red slot (ONE shard; the cursor then holds the shard's own row);
@@ -214,20 +293,28 @@ struct UtRelicGeometry {
     int cols = 16, rows = 15;   // the area in cells
     int blockGap = 1;           // empty lines between blocks (0..2)
     int bonusGap = 1;           // empty columns between the red slot and the first bonus (0..1)
+    int nameLine = 0;           // relic_names: each block's name on the line above it
 };
 
-// The relic layout's geometry from the relic area in force (its whole cells) and the two gap
-// settings, each kept to its range (relic_block_gap 0..2, relic_bonus_gap 0..1).
-inline UtRelicGeometry utRelicGeometryOf(int cols, int rows, int blockGap, int bonusGap) {
+// The line a window's first block starts on (its name's line above it), and the lines between
+// blocks: a block's name sits in the gap, so with names the gap is at least that one line.
+inline int utRelicTopLines(const UtRelicGeometry& g) { return g.nameLine ? 1 : 0; }
+inline int utRelicGapLines(const UtRelicGeometry& g) { return g.nameLine && g.blockGap < 1 ? 1 : g.blockGap; }
+
+// The relic layout's geometry from the relic area in force (its whole cells) and the settings,
+// each kept to its range (relic_block_gap 0..2, relic_bonus_gap 0..1).
+inline UtRelicGeometry utRelicGeometryOf(int cols, int rows, int blockGap, int bonusGap, int nameLine = 0) {
     UtRelicGeometry g;
     g.cols = cols;
     g.rows = rows;
+    g.nameLine = nameLine ? 1 : 0;
     g.blockGap = blockGap < 0 ? 0 : blockGap > 2 ? 2 : blockGap;
     g.bonusGap = bonusGap < 0 ? 0 : bonusGap > 1 ? 1 : bonusGap;
     return g;
 }
 inline bool utRelicGeometrySame(const UtRelicGeometry& a, const UtRelicGeometry& b) {
-    return a.cols == b.cols && a.rows == b.rows && a.blockGap == b.blockGap && a.bonusGap == b.bonusGap;
+    return a.cols == b.cols && a.rows == b.rows && a.blockGap == b.blockGap && a.bonusGap == b.bonusGap &&
+           a.nameLine == b.nameLine;
 }
 
 struct UtRelicLayout {
@@ -262,17 +349,17 @@ inline bool utRelicLayoutBuild(const UtRelicList& l, const UtRelicGeometry& g, U
         for (int k = 0; k < l.blocks[b].rows; ++k) s += y.rowLines[(size_t)(l.blocks[b].firstRow + k)];
         y.blockOf.push_back((int)b);
         y.blockLines.push_back(s);
-        if (s > g.rows) ++y.tallBlocks;
+        if (s + utRelicTopLines(g) > g.rows) ++y.tallBlocks;
     }
     // the fixed pages: whole blocks, greedy, a page holds at least one block
     const int nb = (int)y.blockLines.size();
     int b = 0;
     while (b < nb) {
         y.pageStart.push_back(b);
-        int used = y.blockLines[(size_t)b];
+        int used = utRelicTopLines(g) + y.blockLines[(size_t)b];
         ++b;
-        while (b < nb && used + g.blockGap + y.blockLines[(size_t)b] <= g.rows) {
-            used += g.blockGap + y.blockLines[(size_t)b];
+        while (b < nb && used + utRelicGapLines(g) + y.blockLines[(size_t)b] <= g.rows) {
+            used += utRelicGapLines(g) + y.blockLines[(size_t)b];
             ++b;
         }
     }
@@ -286,10 +373,10 @@ inline int utRelicPageCount(const UtRelicLayout& y) { return (int)y.pageStart.si
 inline int utRelicWindowEnd(const UtRelicLayout& y, int first) {
     const int nb = (int)y.blockLines.size();
     if (first < 0 || first >= nb) return first < 0 ? 0 : nb;
-    int used = y.blockLines[(size_t)first];
+    int used = utRelicTopLines(y.geo) + y.blockLines[(size_t)first];
     int b = first + 1;
-    while (b < nb && used + y.geo.blockGap + y.blockLines[(size_t)b] <= y.geo.rows) {
-        used += y.geo.blockGap + y.blockLines[(size_t)b];
+    while (b < nb && used + utRelicGapLines(y.geo) + y.blockLines[(size_t)b] <= y.geo.rows) {
+        used += utRelicGapLines(y.geo) + y.blockLines[(size_t)b];
         ++b;
     }
     return b;
@@ -360,7 +447,7 @@ inline int utRelicWindowPlaces(const UtRelicList& l, const UtRelicLayout& y, int
     int n = 0;
     if (!out || cap <= 0) return 0;
     const int end = utRelicWindowEnd(y, first);
-    int line = 0;
+    int line = utRelicTopLines(y.geo);
     for (int b = first < 0 ? 0 : first; b < end; ++b) {
         const UtRelicBlock& bk = l.blocks[(size_t)y.blockOf[(size_t)b]];
         for (int k = 0; k < bk.rows; ++k) {
@@ -386,7 +473,7 @@ inline int utRelicWindowPlaces(const UtRelicList& l, const UtRelicLayout& y, int
             }
             line += y.rowLines[(size_t)r];
         }
-        line += y.geo.blockGap;
+        line += utRelicGapLines(y.geo);
     }
     return n;
 }

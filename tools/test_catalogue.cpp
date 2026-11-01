@@ -701,7 +701,7 @@ RelicFileCounts relicFileCounts(const std::string& text) {
             if (t == std::string::npos) break;
             a = t + 1;
         }
-        if (f[0] == "B" && f.size() == 5) {
+        if (f[0] == "B" && f.size() == 7) {
             const bool relic = f[3] == "R";
             ++(relic ? c.relicB : c.charmB);
             const std::size_t rows = std::strtoul(f[4].c_str(), nullptr, 10);
@@ -772,16 +772,18 @@ int relicUnits() {
     mk(rs[1], "Records/R/02_Aegis.dbr", "ItemRelic", 30, 3, {"B2", "Records\\B3"});
     mk(rs[2], "records/r/01_aegis.dbr", "ItemRelic", 10, 3, {"B4"});
     mk(rs[3], "records/r/x4_ember.dbr", "ItemRelic", 1, 3, {});
+    rs[2].item.name = "Essence of Aegis";
+    rs[1].item.name = "Epic Aegis";
     const std::vector<gen::ExcludedItem> xs = {
         {"records/r/03_aegis.dbr", "unobtainable: only in loot tables nothing reaches", false}};
     gen::RelicListCounts n;
     const std::string text = gen::relicsListText(rs, xs, &n);
-    check(text == "B\t1\trecords/r/aegis\tR\t2\r\n"
+    check(text == "B\t1\trecords/r/aegis\tR\t2\tEssence of Aegis\tEpic Aegis\r\n"
                   "R\trecords/r/01_aegis.dbr\t1\t3\ti.tex\ts.tex\t1\tB4\r\n"
                   "R\tRecords/R/02_Aegis.dbr\t2\t3\ti.tex\ts.tex\t2\tB2\tRecords\\B3\r\n"
-                  "B\t2\trecords/r/x4_ember\tR\t1\r\n"
+                  "B\t2\trecords/r/x4_ember\tR\t1\t\t\r\n"
                   "R\trecords/r/x4_ember.dbr\t0\t3\ti.tex\ts.tex\t0\r\n"
-                  "B\t3\trecords/c/bat\tC\t1\r\n"
+                  "B\t3\trecords/c/bat\tC\t1\t\t\r\n"
                   "R\trecords/c/01_bat.dbr\t1\t5\ti.tex\ts.tex\t1\tB1\r\n"
                   "X\trecords/r/03_aegis.dbr\tunobtainable: only in loot tables nothing reaches\r\n",
           "relics: relic blocks before charm blocks, by expansion, then level; tiers in order; X lines last");
@@ -793,7 +795,7 @@ int relicUnits() {
         mk(ms[0], "records/m/01_foo.dbr", "ItemRelic", 5, 3, {"B1"});
         mk(ms[1], "records/m/foo.dbr", "ItemRelic", 1, 3, {"B2"});
         gen::RelicListCounts mn;
-        check(gen::relicsListText(ms, {}, &mn) == "B\t1\trecords/m/foo\tR\t2\r\n"
+        check(gen::relicsListText(ms, {}, &mn) == "B\t1\trecords/m/foo\tR\t2\t\t\r\n"
                                                   "R\trecords/m/foo.dbr\t0\t3\ti.tex\ts.tex\t1\tB2\r\n"
                                                   "R\trecords/m/01_foo.dbr\t1\t3\ti.tex\ts.tex\t1\tB1\r\n" &&
                   mn.relicBlocks == 1 && mn.oneLineBlocks == 0 && mn.rows == 2,

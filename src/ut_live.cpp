@@ -197,6 +197,13 @@ volatile LONG g_wantGroup = 0;
 // the WINDOW's first slot row. The name stays GD's "page" in the API, the
 // unit is a slot row: the wheel moves it by one, < > / PgUp / PgDn by a window (the group's rows).
 volatile LONG g_wantPage = 0;
+// view_resume: the row each page was left on, by its button's first group, while this game's state
+// is in force (memory only; only the page in force goes to uniquetab.state).
+const int kGroupRowMax = 256;
+volatile LONG g_groupRow[kGroupRowMax] = {};
+void groupRowsForget() {
+    for (volatile LONG& r : g_groupRow) InterlockedExchange(&r, 0);
+}
 volatile LONG g_dirty = 0;
 int g_shownGroup = 0;   // game thread
 int g_shownPage = 0;    // the shown window's first slot row
@@ -335,6 +342,7 @@ struct RelicTables {
     long listedWrites = -1;                 // journalWrites() of the last relist
     std::vector<unsigned char> held;        // per block: some slot holds something (OWN)
     bool ownLaid = false;                   // the layout in force is OWN's (the held blocks only)
+    bool byName = false;                    // the blocks' order in force (relic_sort)
     std::vector<unsigned char> match;       // per state: the search's match (green slots only)
     int bonusesHeld = 0;                    // green slots holding at least one item
     unsigned pieces = 0;                    // the shards in every red slot
@@ -380,6 +388,7 @@ UtRelicGeometry relicGeometry() {
     UtRelicGeometry g;
     g.cols = g_hostCols;
     g.rows = g_hostRows;
+    g.nameLine = g_cfg.relicNames ? 1 : 0;
     return g;
 }
 
@@ -395,8 +404,12 @@ void readRelics(HMODULE selfModule) {
         return;
     }
     RelicTables* t = new RelicTables();
-    if (!utRelicListRead(text, &t->list, &err) ||
-        !utRelicLayoutBuild(t->list, relicGeometry(), &t->layout)) {
+    const bool listOk = utRelicListRead(text, &t->list, &err);
+    if (listOk && g_cfg.relicSort == 1) {
+        utRelicListSort(&t->list, true);
+        t->byName = true;
+    }
+    if (!listOk || !utRelicLayoutBuild(t->list, relicGeometry(), &t->layout)) {
         logW("live: %s - no relic page",
              err.empty() ? "the relic page does not fit the area" : err.c_str());
         delete t;
@@ -612,11 +625,23 @@ void relicRelayout() {
         if (g_searchOn) searchRecompute();   // the found count follows the blocks shown
     }
 }
+
+// relic_sort of the settings in force, at a page build: a game's list is read before its own settings
+// come in force (configSetGame at the world load). The held flags are per block: taken again.
+void relicFollowSort(RelicTables* t) {
+    const bool byName = g_cfg.relicSort == 1;
+    if (byName == t->byName) return;
+    t->byName = byName;
+    utRelicListSort(&t->list, byName);
+    t->listedWrites = -1;
+    relicRelist();
+    relicRelayout();
+}
 }  // namespace
 
-bool liveSetRelicGeometry(int cols, int rows, int blockGap, int bonusGap) {
+bool liveSetRelicGeometry(int cols, int rows, int blockGap, int bonusGap, int nameLine) {
     if (cols < 1 || rows < 1) return false;
-    const UtRelicGeometry g = utRelicGeometryOf(cols, rows, blockGap, bonusGap);
+    const UtRelicGeometry g = utRelicGeometryOf(cols, rows, blockGap, bonusGap, nameLine);
     if (g_relicGeoSet && utRelicGeometrySame(g, g_relicGeo)) return false;
     g_relicGeo = g;
     g_relicGeoSet = true;
@@ -711,6 +736,7 @@ void unionsWantOnKey();
 void applyStateLocked() {
     g_stateGame = configGameGeneration();
     g_ownedOnly = g_cfg.ownedOnly != 0;
+    groupRowsForget();
     const int n = g_groups ? (int)g_groups->size() : 0;
     // the saved group itself: its page's key comes from THIS game's buttons (unionsWantOnKey, at
     // the resolve of the game's buttons file, or at once when they are already in force)
@@ -817,6 +843,7 @@ bool liveToggleOwnedOnly() {
     g_ownPersist = true;
     if (g_searchOn) searchRecompute();   // the counts and the marks follow OWN
     InterlockedExchange(&g_wantPage, 0);   // GD: a filter change starts the group at its top
+    groupRowsForget();                     // the rows of the other filter mean nothing here
     utRowRestoreMoved(g_restore);
     noteNav(false);
     markDirty();
@@ -949,10 +976,16 @@ int liveShownGroup() { return g_shownGroup; }
 int liveShownPage() { return g_shownPage; }
 int liveWantedGroup() { return (int)InterlockedCompareExchange(&g_wantGroup, 0, 0); }
 
-bool liveSelectGroup(int group) {
+bool liveSelectGroup(int group, bool keepRow) {
     if (!liveActive() || group < 0 || group >= liveGroupCount()) return false;
-    InterlockedExchange(&g_wantGroup, unionRep(group));   // its button's page
-    InterlockedExchange(&g_wantPage, 0);
+    const int rep = unionRep(group);   // its button's page
+    const int from = liveWantedGroup();
+    const int row = (int)InterlockedCompareExchange(&g_wantPage, 0, 0);
+    const bool remember = g_cfg.viewResume != 0;
+    if (remember && rep != from && from >= 0 && from < kGroupRowMax) InterlockedExchange(&g_groupRow[from], row);
+    const int left = remember && rep < kGroupRowMax ? (int)InterlockedCompareExchange(&g_groupRow[rep], 0, 0) : 0;
+    InterlockedExchange(&g_wantGroup, rep);
+    InterlockedExchange(&g_wantPage, utGroupRowPicked(rep == from, keepRow && remember, row, left));
     utRowRestoreMoved(g_restore);
     noteNav(false);
     markDirty();
@@ -1037,6 +1070,16 @@ int liveMiCount() { return utMiCount(g_mi); }
 
 const UtMiTable* liveMiTable() { return g_mi; }
 
+bool liveIsFormula(const char* folded) {
+    if (!g_groups || !folded || !*folded) return false;
+    for (const Group& g : *g_groups) {
+        if (g.id != "blueprint") continue;
+        for (const std::string& r : g.records)
+            if (_stricmp(r.c_str(), folded) == 0) return true;
+    }
+    return false;
+}
+
 bool liveHasRecord(const char* folded) {
     if (!g_groups || !folded || !*folded) return false;
     for (size_t g = 0; g < g_groups->size(); ++g) {
@@ -1056,6 +1099,7 @@ int livePagePlaces(UtProtoPlace* out, int cap) {
         // the relic page: the window of whole blocks from g_wantPage, its places' states from
         // the facts of the last journal change (taken here when the journal moved)
         RelicTables* t = g_relic;
+        relicFollowSort(t);
         relicRelist();
         if (relicOwnActive(t) != t->ownLaid) relicRelayout();   // OWN flipped, or its facts came
         const int asked = (int)InterlockedCompareExchange(&g_wantPage, 0, 0);
