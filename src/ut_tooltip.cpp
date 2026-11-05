@@ -445,8 +445,13 @@ struct Latch {
     unsigned int lastClass;
     int state;  // 0 = none / consumed, 1 = COLLECTED, 2 = NOT COLLECTED, 3 = ANOTHER ROLL
     DWORD tick;
+    unsigned edits;   // an arcane formula's reagent edits (t_edits) the swap puts in its copy
 };
 __declspec(thread) Latch t_latch;
+// THE REAGENT EDITS of the formula latched last on this thread (reagentBody): engine lines the
+// swap replaces in its borrowed copy, never in the engine's vector. Their lines and texts live
+// in t_reagentLine / t_reagentText / t_count until the next formula's rollover on this thread.
+__declspec(thread) UtTooltipEdit t_edits[kUtTooltipEditMax];
 // Set by the property search around its own GetUIDisplayText call (tooltipSearchCapture).
 __declspec(thread) bool t_searchCapture = false;
 
@@ -463,6 +468,7 @@ __declspec(thread) int t_formulaDepth;
 
 void clearLatch() {
     t_latch.state = 0;
+    t_latch.edits = 0;
 }
 
 // A partial relic piece's line (latch state 4): the collected words and its record's stored shards,
@@ -472,8 +478,10 @@ const int kRelicLineChars = 160;
 __declspec(thread) unsigned char t_relicLine[kLineSize];
 __declspec(thread) unsigned short t_relicText[kRelicLineChars];
 
-const unsigned char* pendingLine(const void* vec, unsigned* lineCount) {
+// `*editN` = the latch's reagent edits (t_edits) when it matches, else 0.
+const unsigned char* pendingLine(const void* vec, unsigned* lineCount, unsigned* editN) {
     *lineCount = 1;
+    *editN = 0;
     if (!vec) return nullptr;
     if (InterlockedCompareExchange(&g_tooltipOff, 0, 0)) return nullptr;
     if (!InterlockedCompareExchange(&g_linesReady, 0, 0)) return nullptr;
@@ -495,6 +503,8 @@ const unsigned char* pendingLine(const void* vec, unsigned* lineCount) {
                            prefixRead, atPrefixEnd)) {
         return nullptr;
     }
+    // the edits index the latched lines, which a prefix match keeps in place
+    if (cur.edits <= kUtTooltipEditMax) *editN = cur.edits;
     if (cur.state == 4) return t_relicLine;   // a partial relic piece: its one built line
     if (cur.state == 3) {
         if (!InterlockedCompareExchange(&g_rollReady, 0, 0)) return g_lineYes;
@@ -538,8 +548,19 @@ bool tooltipSwapBuild(const void* vec, const unsigned char* extraLine, unsigned 
 
 bool tooltipSwapBuildN(const void* vec, const unsigned char* extraLine, unsigned k,
                        unsigned char** ownedOut, UtTooltipSwap* out) {
+    return tooltipSwapBuildEdits(vec, extraLine, k, nullptr, 0, ownedOut, out);
+}
+
+// The edits are checked against the COPY, all of them before any is written: an index past the
+// engine's N, or a line there whose class is not the one the edit was made for, refuses the whole
+// swap (the vanilla tooltip, nothing allocated). The engine's own vector is only read.
+bool tooltipSwapBuildEdits(const void* vec, const unsigned char* extraLine, unsigned k,
+                           const UtTooltipEdit* edits, unsigned editN, unsigned char** ownedOut,
+                           UtTooltipSwap* out) {
     if (ownedOut) *ownedOut = nullptr;
-    if (!vec || !extraLine || !ownedOut || !out || k < 1 || k > 64) return false;
+    if (!vec || !ownedOut || !out || k > 64 || editN > kUtTooltipEditMax || (k == 0 && editN == 0) ||
+        (k && !extraLine) || (editN && !edits))
+        return false;
     const unsigned char* begin = nullptr;
     const unsigned char* end = nullptr;
     utGuardEnter();
@@ -559,6 +580,12 @@ bool tooltipSwapBuildN(const void* vec, const unsigned char* extraLine, unsigned
         InterlockedIncrement(&g_refusedShape);
         return false;
     }
+    for (unsigned i = 0; i < editN; ++i) {
+        if (!edits[i].line || edits[i].index >= n) {
+            InterlockedIncrement(&g_refusedShape);
+            return false;
+        }
+    }
     unsigned char* buf = (unsigned char*)malloc((n + k) * kLineSize);
     if (!buf) return false;
     utGuardEnter();
@@ -568,7 +595,18 @@ bool tooltipSwapBuildN(const void* vec, const unsigned char* extraLine, unsigned
         free(buf);
         return false;
     }
-    memcpy(buf + bytes, extraLine, k * kLineSize);
+    for (unsigned i = 0; i < editN; ++i) {
+        unsigned cls = 0;
+        memcpy(&cls, buf + (size_t)edits[i].index * kLineSize, 4);
+        if (cls != edits[i].expectClass) {
+            free(buf);
+            InterlockedIncrement(&g_refusedShape);
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < editN; ++i)
+        memcpy(buf + (size_t)edits[i].index * kLineSize, edits[i].line, kLineSize);
+    if (k) memcpy(buf + bytes, extraLine, k * kLineSize);
     out->begin = buf;
     out->end = buf + bytes + k * kLineSize;
     out->cap = out->end;
@@ -751,6 +789,12 @@ struct RelicMemo {
 };
 __declspec(thread) RelicMemo t_relicMemo;
 
+// The journal facts of one record, asked by the relic line and the reagent mark. One buffer (the
+// rollover runs on the game thread); a second thread finds it busy and gets no line this time.
+const size_t kFactsCap = 512;
+UtRelicRowFacts g_facts[kFactsCap];
+volatile LONG g_factsBusy = 0;
+
 // MOD-SIDE READS of the hovered item's replica: its var1 and its relicBonus. 1 = read, 0 = the
 // string does not read as one, -1 = faulted.
 int readRelicSeh(const void* item, unsigned rr, unsigned* var1, char* bonus, unsigned cap) {
@@ -801,16 +845,12 @@ bool relicState(void* item, const LatchPrep& prep, int* state) {
     const DWORD now = GetTickCount();
     if (!(m.valid && (now - m.tick) <= kMemoMaxAgeMs && m.var1 == var1 &&
           strcmp(m.record, prep.record) == 0 && _stricmp(m.bonus, bonus) == 0)) {
-        // the facts' buffer is one (the rollover runs on the game thread); a second thread finds
-        // it busy and gets no line this time
-        static UtRelicRowFacts s_facts[512];
-        static volatile LONG s_busy = 0;
-        if (InterlockedExchange(&s_busy, 1)) return true;
+        if (InterlockedExchange(&g_factsBusy, 1)) return true;
         char key[256];
         size_t n = 0;
-        if (utJournalKey(prep.record, key, sizeof(key))) n = journalRowsOf(key, s_facts, 512);
-        utRelicTipOf(row, var1, bonus, s_facts, (int)(n < 512 ? n : 512), &m.tip);
-        InterlockedExchange(&s_busy, 0);
+        if (utJournalKey(prep.record, key, sizeof(key))) n = journalRowsOf(key, g_facts, kFactsCap);
+        utRelicTipOf(row, var1, bonus, g_facts, (int)(n < kFactsCap ? n : kFactsCap), &m.tip);
+        InterlockedExchange(&g_factsBusy, 0);
         _snprintf_s(m.record, sizeof(m.record), _TRUNCATE, "%s", prep.record);
         _snprintf_s(m.bonus, sizeof(m.bonus), _TRUNCATE, "%s", bonus);
         m.var1 = var1;
@@ -903,6 +943,7 @@ void latchBody(void* item, void* lines) {
         fresh.lastClass = prep.lastClass;
         fresh.state = state;
         fresh.tick = GetTickCount();
+        fresh.edits = 0;
         t_latch = fresh;
         InterlockedIncrement(&g_latches);
         // The only telemetry this feature has. It lives HERE rather than in the worker's heartbeat
@@ -920,6 +961,448 @@ void latchBody(void* item, void* lines) {
         // the lock guard is the fact that there is no SEH frame around it.
         clearLatch();
     }
+}
+
+// ---- THE REAGENTS IN THE COLLECTION (an arcane formula's own rollover) --------------------------
+// ItemArtifactFormula::GetUIDisplayText (Game.dll 0x1BC1A0) asks IsReagent1/2/3Avalable (its one
+// caller; the Enchanter's craft never asks them), pushes the count line "Required Reagents
+// (n/3)" (class 0x2C, Localize of [this+0x6E4] with the yellow count and the listed count), then
+// exactly one line per reagent in order 1, 2, 3: 0x2D (yellow) when the player has it, else 0x2E
+// (grey) - an empty list prints a grey line and is not in the total. The mark is TEXT ONLY: a grey
+// line whose reagent the collection holds becomes a mod-owned yellow line, the engine's text plus
+// " " plus tooltip.reagent, and the count line is rebuilt in the game's own words with those
+// counted - both put in the swap's borrowed copy (t_edits), never in the engine's vector, and no
+// engine answer is changed. ADVISORY: a missing binding, a decode or a list that does not read as
+// one, or a fault turns the mark off for the session with one line; the count line alone has its
+// own latch (g_countOff).
+const unsigned kClassReagents = 0x2C;      // ArtifactFormulaReagents, the count line
+const unsigned kClassReagentYes = 0x2D;    // ArtifactFormulaReagentAvailable
+const unsigned kClassReagentNo = 0x2E;     // ArtifactFormulaReagentNotAvailable
+const size_t kStrSize = 0x18;              // VS2012 x86 std::string (16-byte buffer, size, capacity)
+const int kReagentRecs = 4;                // base records read per reagent (the stock data has one)
+const size_t kReagentListMax = 4096;       // entries a reagent list may hold and read as a vector
+const size_t kReagentChars = 200;          // a marked line: the reagent's name, " ", the word
+const size_t kCountChars = 160;            // the count line
+const char* const kCountTag = "xtagArtifactReagents";
+const char* const kDefaultReagentWords = "(Collection)";
+
+typedef void*(__cdecl* PfnLocInstance)();
+typedef const unsigned short*(__cdecl* PfnLocalize)(void* self, const char* tag, ...);
+static_assert(TQ_TIP_FORMULA_ISREAGENT1AVALABLE_CC == TQCC_THISCALL, "IsReagent1Avalable");
+static_assert(TQ_LOC_INSTANCE_CC == TQCC_CDECL, "LocalizationManager::Instance");
+static_assert(TQ_LOC_LOCALIZE_CC == TQCC_CDECL, "LocalizationManager::Localize (varargs)");
+void* r_Localize = nullptr;
+PfnLocInstance p_LocInstance = nullptr;
+PfnLocalize p_Localize = nullptr;
+
+volatile LONG g_reagentOff = 0;     // 1 = the mark is off for the session
+volatile LONG g_reagentReady = 0;
+volatile LONG g_countOff = 0;       // 1 = the count line stays the engine's for the session
+volatile LONG g_reagentMarks = 0;   // reagent lines marked
+volatile LONG g_reagentSkips = 0;   // formula reads whose lists did not read (that formula unmarked)
+bool g_countSlotChecked = false;    // the instance's vtable +0x10 is the Localize export (once)
+unsigned g_reagentList[3] = {0, 0, 0};   // reagent N's lists in an ItemArtifactFormula (decoded)
+char g_reagentWords[96] = "(Collection)";   // [tab] tooltip.reagent of the buttons file
+unsigned short g_reagentWide[96];
+size_t g_reagentWideLen = 0;
+
+__declspec(thread) unsigned char t_reagentLine[4][kLineSize];   // reagents 1..3, the count line
+__declspec(thread) unsigned short t_reagentText[3][kReagentChars];
+
+void reagentDisable(bool fault, const char* why) {
+    if (InterlockedExchange(&g_reagentOff, 1)) return;
+    if (fault)
+        logE("tooltip: the reagent mark is OFF for this session - %s; a formula's reagent lines are "
+             "the game's own", why ? why : "?");
+    else
+        logW("tooltip: the reagent mark is off - %s; a formula's reagent lines are the game's own",
+             why ? why : "?");
+}
+
+// One formula whose reagent lists do not read as vectors of strings: ITS lines stay the game's, the
+// mark goes on for every other formula (a fault or a failed decode is reagentDisable's). Said for
+// the first such formula of the session; the summary line's reagentSkips counts the reads.
+void reagentSkip(const char* record) {
+    if (InterlockedIncrement(&g_reagentSkips) != 1) return;
+    logW("tooltip: the reagent lists of %s do not read as vectors of strings - that formula's "
+         "reagent lines are the game's own, the other formulae are still marked (said once)",
+         record ? record : "?");
+}
+
+void countDisable(const char* why) {
+    if (InterlockedExchange(&g_countOff, 1)) return;
+    logW("tooltip: the formula's count line stays the game's for this session - %s; the reagent "
+         "lines are still marked", why ? why : "?");
+}
+
+// The VS2012 wstring over `storage` (n characters, ended): in place below 8, else the pointer.
+void wideOver(MsvcWString* s, const unsigned short* storage, size_t n) {
+    memset(s, 0, sizeof(*s));
+    s->size = n;
+    if (n < 8) {
+        memcpy(s->bx.buf, storage, (n + 1) * sizeof(unsigned short));
+        s->res = 7;
+    } else {
+        s->bx.ptr = storage;
+        s->res = n;
+    }
+}
+
+// One mod-owned GameTextLine over a wide text, the engine line's bool kept.
+void handWideLine(unsigned char* line, unsigned cls, const unsigned short* storage, size_t n,
+                  unsigned char flag) {
+    memset(line, 0, kLineSize);
+    memcpy(line, &cls, 4);
+    wideOver((MsvcWString*)(line + 0x04), storage, n);
+    line[0x1C] = flag;
+}
+
+// A VS2012 std::vector<std::string>'s count (0 = empty), -1 = it does not read as one. Raw reads:
+// called only inside the caller's guarded frame. A reagent list is the database's: SVAERA's
+// formulae list up to 165 records (a reroll formula: every artifact of a tier), and its amber
+// flask 88 uniques, so the bound is one no database list comes near.
+int strVecCount(const unsigned char* v, const unsigned char** first) {
+    const unsigned char* b = *(const unsigned char* const*)v;
+    const unsigned char* e = *(const unsigned char* const*)(v + sizeof(void*));
+    *first = b;
+    if (b == e) return 0;
+    if (!b || e < b || ((size_t)(e - b) % kStrSize) != 0) return -1;
+    const size_t n = (size_t)(e - b) / kStrSize;
+    return n > kReagentListMax ? -1 : (int)n;
+}
+
+// What the formula's three reagent lists hold: whether a base-record list has a record, whether
+// a prefix or suffix list is set (such a reagent is never marked: the collection's copy might not
+// be the roll it asks), and the first records' names as the engine spells them.
+struct ReagentRead {
+    bool listed[3];
+    bool affixed[3];
+    int recs[3];
+    char rec[3][kReagentRecs][256];
+};
+__declspec(thread) ReagentRead t_reagentRead;
+
+// MOD-SIDE READS of the formula's three reagent lists: no lock, no allocation, no log. 1 = read,
+// 0 = a list that does not read as a vector of strings, -1 = faulted. A name of 256 characters or
+// more is not copied (that record is not asked).
+int readReagentsSeh(const unsigned char* formula, const unsigned* lists, ReagentRead* out) {
+    __try {
+        for (int r = 0; r < 3; ++r) {
+            const unsigned char* base = formula + lists[r];
+            const unsigned char* first = nullptr;
+            const unsigned char* unused = nullptr;
+            const int n = strVecCount(base, &first);
+            const int np = strVecCount(base + 0x0C, &unused);
+            const int ns = strVecCount(base + 0x18, &unused);
+            if (n < 0 || np < 0 || ns < 0) return 0;
+            out->listed[r] = n > 0;
+            out->affixed[r] = np > 0 || ns > 0;
+            out->recs[r] = 0;
+            for (int i = 0; i < n && out->recs[r] < kReagentRecs; ++i) {
+                const unsigned char* s = first + (size_t)i * kStrSize;
+                size_t len = 0, res = 0;
+                memcpy(&len, s + 0x10, sizeof(len));
+                memcpy(&res, s + 0x14, sizeof(res));
+                if (res < len) return 0;
+                if (len == 0 || len >= sizeof(out->rec[r][0])) continue;
+                const char* t = res >= 16 ? *(const char* const*)s : (const char*)s;
+                if (!t) return 0;
+                char* d = out->rec[r][out->recs[r]];
+                memcpy(d, t, len);
+                d[len] = 0;
+                ++out->recs[r];
+            }
+        }
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// MOD-SIDE READS of the formula's own lines: the first count line (class 0x2C) and the classes of
+// the three reagent lines after it. 1 = found, 0 = no such run (another shape: nothing is marked),
+// -1 = faulted.
+int readReagentLinesSeh(const void* vec, const unsigned char** first, unsigned* at, unsigned cls[3]) {
+    __try {
+        const unsigned char* const* p = (const unsigned char* const*)vec;
+        const unsigned char* b = p[0];
+        const unsigned char* e = p[1];
+        if (!b || e < b || ((size_t)(e - b) % kLineSize) != 0) return 0;
+        const size_t n = (size_t)(e - b) / kLineSize;
+        if (n > kMaxLines) return 0;
+        for (size_t i = 0; i + 3 < n; ++i) {
+            if (*(const unsigned int*)(b + i * kLineSize) != kClassReagents) continue;
+            for (size_t r = 0; r < 3; ++r) {
+                cls[r] = *(const unsigned int*)(b + (i + 1 + r) * kLineSize);
+                if (cls[r] != kClassReagentYes && cls[r] != kClassReagentNo) return 0;
+            }
+            *first = b;
+            *at = (unsigned)i;
+            return 1;
+        }
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// MOD-SIDE READS of one engine line: its text (the VS2012 wstring at +0x04) into `out`, at most
+// cap - 1 characters and ended, and its bool. 1 = read, 0 = longer than that or not a string,
+// -1 = faulted.
+int readLineTextSeh(const unsigned char* line, unsigned short* out, size_t cap, size_t* len,
+                    unsigned char* flag) {
+    __try {
+        const MsvcWString* s = (const MsvcWString*)(line + 0x04);
+        const size_t n = s->size;
+        if (n >= cap || s->res < n) return 0;
+        const unsigned short* t = s->res < 8 ? s->bx.buf : s->bx.ptr;
+        if (!t) return 0;
+        memcpy(out, t, n * sizeof(unsigned short));
+        out[n] = 0;
+        *len = n;
+        *flag = line[0x1C];
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// MOD-SIDE READS of a text the engine returned: copied with its end, at most cap - 1 characters.
+// 1 = copied, 0 = no end within `cap`, -1 = faulted.
+int copyWideSeh(const unsigned short* s, unsigned short* out, size_t cap, size_t* len) {
+    __try {
+        if (!s) return 0;
+        for (size_t i = 0; i < cap; ++i) {
+            out[i] = s[i];
+            if (!s[i]) {
+                *len = i;
+                return 1;
+            }
+        }
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+bool readSlotSeh(const void* obj, unsigned slot, void** out) {
+    __try {
+        *out = (*(void* const* const*)obj)[slot];
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// true = the journal holds a full, usable copy of the reagent's base record `raw` (any spelling):
+// a completed relic or charm row, any row of an artifact (tooltipReagentRowsHold), or a row of an
+// equipment record - never a row pending out. Without the relic list the relic rules are not
+// known, so nothing is held. Takes the journal's lock: called OUTSIDE every SEH frame.
+bool reagentHeld(const char* raw) {
+    char rec[256];
+    if (!utJournalKey(raw, rec, sizeof(rec)) || !rec[0]) return false;
+    const UtRelicList* list = liveRelicList();
+    if (!list) return false;
+    const int r = liveRelicFind(rec);
+    if (r < 0) return liveHasRecord(rec) && storeCount(rec) > 0;
+    if (InterlockedExchange(&g_factsBusy, 1)) return false;
+    const size_t n = journalRowsOf(rec, g_facts, kFactsCap);
+    const bool held = tooltipReagentRowsHold(list->rows[(size_t)r].artifact, g_facts,
+                                             (int)(n < kFactsCap ? n : kFactsCap));
+    InterlockedExchange(&g_factsBusy, 0);
+    return held;
+}
+
+// Which reagents of a formula the collection holds, memoised per formula record (collectedState's
+// 250 ms). Nothing is memoised while the journal's set is not open.
+struct ReagentMemo {
+    char record[256];
+    bool listed[3];
+    bool held[3];
+    DWORD tick;
+    bool valid;
+};
+__declspec(thread) ReagentMemo t_reagentMemo;
+
+const ReagentMemo* reagentMemo(const void* formula, const char* record) {
+    ReagentMemo& m = t_reagentMemo;
+    const DWORD now = GetTickCount();
+    if (m.valid && (now - m.tick) <= kMemoMaxAgeMs && strcmp(m.record, record) == 0) return &m;
+    m.valid = false;
+    ReagentRead& rd = t_reagentRead;
+    utGuardEnter();
+    const int got = readReagentsSeh((const unsigned char*)formula, g_reagentList, &rd);
+    utGuardLeave();
+    if (got < 0) {
+        reagentDisable(true, "the formula's reagent lists read faulted");
+        return nullptr;
+    }
+    if (got == 0) reagentSkip(record);   // memoised as listing nothing: no mark on this formula
+    for (int r = 0; r < 3; ++r) {
+        m.listed[r] = got > 0 && rd.listed[r];
+        m.held[r] = false;
+        for (int i = 0; m.listed[r] && !rd.affixed[r] && i < rd.recs[r] && !m.held[r]; ++i)
+            m.held[r] = reagentHeld(rd.rec[r][i]);
+    }
+    if (!journalSetKnown()) return nullptr;   // the set closed under the question: no mark
+    _snprintf_s(m.record, sizeof(m.record), _TRUNCATE, "%s", record);
+    m.tick = now;
+    m.valid = true;
+    return &m;
+}
+
+// A grey reagent line made yellow: the engine's text, " ", the word. False = its text does not
+// fit (that reagent is not marked) or could not be read.
+bool reagentLine(const unsigned char* first, unsigned index, int r) {
+    if (g_reagentWideLen + 3 >= kReagentChars) return false;
+    const size_t room = kReagentChars - 2 - g_reagentWideLen;
+    size_t len = 0;
+    unsigned char flag = 0;
+    utGuardEnter();
+    const int got = readLineTextSeh(first + (size_t)index * kLineSize, t_reagentText[r], room, &len, &flag);
+    utGuardLeave();
+    if (got < 0) {
+        reagentDisable(true, "a reagent line's text read faulted");
+        return false;
+    }
+    if (got == 0) return false;
+    t_reagentText[r][len++] = ' ';
+    memcpy(t_reagentText[r] + len, g_reagentWide, g_reagentWideLen * sizeof(unsigned short));
+    len += g_reagentWideLen;
+    t_reagentText[r][len] = 0;
+    handWideLine(t_reagentLine[r], kClassReagentYes, t_reagentText[r], len, flag);
+    return true;
+}
+
+// The count line's words for (n, total): LocalizationManager::Instance()->Localize(tag, n, total),
+// the call the engine makes (through the instance's vtable +0x10, which must hold the export).
+// GAME THREAD ONLY. Both calls are ENGINE CALLS, deliberately unguarded (rule 9); Localize formats
+// into the manager's own buffer, which is copied at once under SEH.
+bool localise(int n, int total, unsigned short* out, size_t* len) {
+    void* mgr = p_LocInstance();
+    if (!mgr) return false;
+    if (!g_countSlotChecked) {
+        void* slot = nullptr;
+        utGuardEnter();
+        const bool read = readSlotSeh(mgr, 4, &slot);
+        utGuardLeave();
+        if (!read || slot != r_Localize) {
+            countDisable("the LocalizationManager's vtable +0x10 is not the Localize export");
+            return false;
+        }
+        g_countSlotChecked = true;
+    }
+    const unsigned short* s = p_Localize(mgr, kCountTag, n, total);
+    utGuardEnter();
+    const int got = copyWideSeh(s, out, kCountChars, len);
+    utGuardLeave();
+    if (got < 0) {
+        countDisable("the localised count line's read faulted");
+        return false;
+    }
+    return got > 0 && *len > 0;
+}
+
+// The count line with the collection's reagents counted, memoised by its numbers. The engine's own
+// line must read exactly Localize(tag, its count, total) first - the proof that the tag and the
+// numbers are the ones its line was made of; a line that does not is one WARN and the count line
+// stays the engine's for the session.
+struct CountMemo {
+    int engineAvail, avail, total;
+    unsigned char flag;
+    size_t len;
+    bool valid;
+    unsigned short text[kCountChars];
+};
+__declspec(thread) CountMemo t_count;
+
+bool countLine(const unsigned char* first, unsigned at, int engineAvail, int avail, int total) {
+    if (InterlockedCompareExchange(&g_countOff, 0, 0) || !p_LocInstance || !p_Localize) return false;
+    CountMemo& c = t_count;
+    if (!(c.valid && c.engineAvail == engineAvail && c.avail == avail && c.total == total)) {
+        c.valid = false;
+        unsigned short engine[kCountChars];
+        unsigned short mine[kCountChars];
+        size_t elen = 0, mlen = 0;
+        unsigned char flag = 0;
+        utGuardEnter();
+        const int got = readLineTextSeh(first + (size_t)at * kLineSize, engine, kCountChars, &elen, &flag);
+        utGuardLeave();
+        if (got < 0) {
+            countDisable("the engine's count line read faulted");
+            return false;
+        }
+        if (got == 0 || !localise(engineAvail, total, mine, &mlen)) return false;
+        if (mlen != elen || memcmp(mine, engine, elen * sizeof(unsigned short)) != 0) {
+            countDisable("the engine's count line is not Localize(\"xtagArtifactReagents\", its "
+                         "count, total)");
+            return false;
+        }
+        if (!localise(avail, total, c.text, &c.len)) return false;
+        c.engineAvail = engineAvail;
+        c.avail = avail;
+        c.total = total;
+        c.flag = flag;
+        c.valid = true;
+    }
+    handWideLine(t_reagentLine[3], kClassReagents, c.text, c.len, c.flag);
+    return true;
+}
+
+// The mark, after latchBody on the formula's way out: the edits ride with the latch this formula
+// has just taken (a formula outside the catalogue takes none, so it keeps the vanilla lines), and
+// the swap of this thread's next GameTextLineToString puts them in its borrowed copy. Called
+// OUTSIDE every SEH frame: each read of engine memory sits in its own guarded frame, and the
+// journal's lock and the log are taken between them.
+void reagentBody(void* item, void* lines) {
+    if (t_searchCapture || t_latch.state < 1 || t_latch.state > 4) return;
+    if (InterlockedCompareExchange(&g_tooltipOff, 0, 0) ||
+        InterlockedCompareExchange(&g_reagentOff, 0, 0) ||
+        !InterlockedCompareExchange(&g_reagentReady, 0, 0))
+        return;
+    if (!g_cfg.tooltipMark || !journalSetKnown()) return;
+    const unsigned char* first = nullptr;
+    unsigned at = 0;
+    unsigned cls[3] = {0, 0, 0};
+    utGuardEnter();
+    const int got = readReagentLinesSeh(lines, &first, &at, cls);
+    utGuardLeave();
+    if (got < 0) {
+        reagentDisable(true, "the formula's lines read faulted");
+        return;
+    }
+    if (got == 0) return;
+    if (cls[0] != kClassReagentNo && cls[1] != kClassReagentNo && cls[2] != kClassReagentNo) return;
+    char record[256];
+    if (!readRecord(item, record, sizeof(record))) return;
+    const ReagentMemo* m = nullptr;
+    try {   // no engine call in here (rule 9): the reads, the journal's lock, the catalogue
+        m = reagentMemo(item, record);
+    } catch (...) {
+        m = nullptr;
+    }
+    if (!m) return;
+    int avail = 0, total = 0;
+    const unsigned marks = tooltipReagentMarks(cls, m->listed, m->held, &avail, &total);
+    unsigned n = 0;
+    int marked = 0;
+    for (unsigned r = 0; r < 3; ++r) {
+        if (!(marks & (1u << r)) || !reagentLine(first, at + 1 + r, (int)r)) continue;
+        t_edits[n].index = at + 1 + r;
+        t_edits[n].expectClass = kClassReagentNo;
+        t_edits[n].line = t_reagentLine[r];
+        ++n;
+        ++marked;
+    }
+    if (!n) return;
+    if (countLine(first, at, avail, avail + marked, total)) {
+        t_edits[n].index = at;
+        t_edits[n].expectClass = kClassReagents;
+        t_edits[n].line = t_reagentLine[3];
+        ++n;
+    }
+    t_latch.edits = n;
+    InterlockedExchangeAdd(&g_reagentMarks, marked);
 }
 
 // TQ: x86 __thiscall targets are detoured through __fastcall(this, edx, args...) - the same stack
@@ -978,6 +1461,7 @@ void __fastcall hk_FormulaGetUIDisplayText(void* item, void* /*edx*/, const void
     }
     const long long t0 = probeNow();
     latchBody(item, lines);
+    reagentBody(item, lines);   // the reagents the collection holds ride with that latch
     probePresentAdd(probeNow() - t0);
 }
 
@@ -987,8 +1471,9 @@ void __cdecl hk_GameTextLineToString(const void* lines, void* out) {
     const long long t0 = probeNow();   // the match and the swap build, never the engine's
     const unsigned char* extra = nullptr;
     unsigned extraN = 1;
+    unsigned editN = 0;
     __try {
-        extra = pendingLine(lines, &extraN);
+        extra = pendingLine(lines, &extraN, &editN);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         extra = nullptr;
         faulted("the GameTextLineToString match");
@@ -1003,7 +1488,7 @@ void __cdecl hk_GameTextLineToString(const void* lines, void* out) {
     borrowed.begin = nullptr;
     borrowed.end = nullptr;
     borrowed.cap = nullptr;
-    if (!tooltipSwapBuildN(lines, extra, extraN, &owned, &borrowed)) {
+    if (!tooltipSwapBuildEdits(lines, extra, extraN, t_edits, editN, &owned, &borrowed)) {
         probePresentAdd(probeNow() - t0);
         if (o_ToString) o_ToString(lines, out);
         return;
@@ -1042,15 +1527,7 @@ void makeWide(MsvcWString* s, const char* ascii, unsigned short* storage, size_t
         i += k;
     }
     storage[n] = 0;
-    s->size = n;
-    if (n < 8) {
-        memcpy(s->bx.buf, storage, (n + 1) * sizeof(unsigned short));
-        s->bx.buf[n] = 0;
-        s->res = 7;
-    } else {
-        s->bx.ptr = storage;
-        s->res = n;
-    }
+    wideOver(s, storage, n);
 }
 
 // Reads back what the ctor wrote. A mod-side read of a mod-owned buffer, so the swallowing frame
@@ -1153,6 +1630,60 @@ void rollInit() {
          g_textRoll, rr, kUtReplicaStr[1], kUtReplicaStr[2], rr + kUtReplicaSeed);
 }
 
+void reagentWordsWide() {
+    MsvcWString w;
+    makeWide(&w, g_reagentWords, g_reagentWide, sizeof(g_reagentWide) / sizeof(g_reagentWide[0]));
+    g_reagentWideLen = w.size;
+}
+
+// The reagent mark, after the lines: ADVISORY like the roll line. IsReagent1/2/3Avalable are READ
+// for the three lists' offsets (utReagentListOffset), never called; a missing export or a decode
+// that does not give three lists 0x24 apart turns the mark off (one line). Without
+// LocalizationManager::Instance / Localize the count line stays the engine's.
+void reagentInit(HMODULE game) {
+    reagentWordsWide();
+    const void* fn[3] = {
+        proc(game, TQ_TIP_FORMULA_ISREAGENT1AVALABLE, "ItemArtifactFormula::IsReagent1Avalable"),
+        proc(game, TQ_TIP_FORMULA_ISREAGENT2AVALABLE, "ItemArtifactFormula::IsReagent2Avalable"),
+        proc(game, TQ_TIP_FORMULA_ISREAGENT3AVALABLE, "ItemArtifactFormula::IsReagent3Avalable")};
+    if (!fn[0] || !fn[1] || !fn[2]) {
+        reagentDisable(false, "ItemArtifactFormula::IsReagentNAvalable is not exported");
+        return;
+    }
+    unsigned char code[3][0x70];
+    utGuardEnter();
+    const bool read = readCodeSeh(fn[0], code[0], sizeof(code[0])) &&
+                      readCodeSeh(fn[1], code[1], sizeof(code[1])) &&
+                      readCodeSeh(fn[2], code[2], sizeof(code[2]));
+    utGuardLeave();
+    unsigned x[3] = {0, 0, 0};
+    for (int i = 0; read && i < 3; ++i) x[i] = utReagentListOffset(code[i]);
+    if (!x[0] || x[1] != x[0] + 0x24 || x[2] != x[1] + 0x24) {
+        char why[160];
+        _snprintf_s(why, sizeof(why), _TRUNCATE,
+                    "IsReagent1/2/3Avalable do not read three reagent lists 0x24 apart (this+0x%X / "
+                    "+0x%X / +0x%X)", x[0], x[1], x[2]);
+        reagentDisable(false, why);
+        return;
+    }
+    memcpy(g_reagentList, x, sizeof(g_reagentList));
+    HMODULE engine = GetModuleHandleA("Engine.dll");
+    void* inst = proc(engine, TQ_LOC_INSTANCE, "LocalizationManager::Instance");
+    void* loc = proc(engine, TQ_LOC_LOCALIZE, "LocalizationManager::Localize");
+    if (!inst || !loc || exportAliasCount(engine, inst) != 1 || exportAliasCount(engine, loc) != 1) {
+        countDisable("LocalizationManager::Instance / Localize is missing or folded in Engine.dll");
+    } else {
+        r_Localize = loc;
+        p_LocInstance = (PfnLocInstance)inst;
+        p_Localize = (PfnLocalize)loc;
+    }
+    InterlockedExchange(&g_reagentReady, 1);
+    logD("tooltip: the reagent mark is ready - a formula's reagent lists at this+0x%X / +0x%X / "
+         "+0x%X (decoded from IsReagent1/2/3Avalable, never called), the word \"%s\", the count "
+         "line %s", x[0], x[1], x[2], g_reagentWords,
+         InterlockedCompareExchange(&g_countOff, 0, 0) ? "the game's" : "in the game's own words");
+}
+
 }  // namespace
 
 // An UNREGISTERED class is neither a crash nor a refusal by the engine: GetGameTextStyleName's
@@ -1223,6 +1754,39 @@ void tooltipTextRefresh(const char* yes, const char* no, const char* roll, int c
          "0x%02X), another roll \"%s\"", g_textYes, g_classYes, g_textNo, g_classNo, g_textRoll);
 }
 const char* tooltipTextNo() { return g_textNo; }
+
+void tooltipReagentWordsRefresh(const char* words) {
+    char w[sizeof(g_reagentWords)];
+    _snprintf_s(w, sizeof(w), _TRUNCATE, "%s", words && words[0] ? words : kDefaultReagentWords);
+    if (strcmp(w, g_reagentWords) == 0 && g_reagentWideLen) return;
+    const bool moved = strcmp(w, g_reagentWords) != 0;
+    memcpy(g_reagentWords, w, sizeof(w));
+    reagentWordsWide();   // pure: the detours read it on this same thread
+    if (moved) logI("tooltip: the reagent word from the buttons file - \"%s\"", g_reagentWords);
+}
+const char* tooltipReagentWords() { return g_reagentWords; }
+
+unsigned tooltipReagentMarks(const unsigned cls[3], const bool listed[3], const bool held[3],
+                             int* avail, int* total) {
+    unsigned marks = 0;
+    *avail = 0;
+    *total = 0;
+    for (unsigned r = 0; r < 3; ++r) {
+        if (!listed[r]) continue;   // an empty list: a grey line, not in the total, never marked
+        ++*total;
+        if (cls[r] == kClassReagentYes) ++*avail;
+        else if (cls[r] == kClassReagentNo && held[r]) marks |= 1u << r;
+    }
+    return marks;
+}
+
+bool tooltipReagentRowsHold(bool artifact, const UtRelicRowFacts* rows, int n) {
+    for (int i = 0; rows && i < n; ++i) {
+        if (rows[i].pending == kUtRelicPendOut || rows[i].unresolved) continue;
+        if (artifact || !utRelicRowIsRed(rows[i])) return true;
+    }
+    return false;
+}
 
 bool tooltipVerifyLine(const unsigned char* line, unsigned cls, size_t wantLen) {
     utGuardEnter();
@@ -1313,6 +1877,7 @@ bool tooltipInit(HMODULE selfModule) {
     }
     InterlockedExchange(&g_linesReady, 1);
     rollInit();
+    reagentInit(game);
     const TextClassInfo* iy = classInfo(g_classYes);
     const TextClassInfo* in = classInfo(g_classNo);
     logD("tooltip: both lines ready - COLLECTED is class 0x%02X \"%s\" RGB (%d,%d,%d) and NOT "
@@ -1400,7 +1965,8 @@ long tooltipInnerSuppressed() { return InterlockedCompareExchange(&g_innerSuppre
 const char* tooltipStatus() {
     _snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
                 "tooltip: %s hooks=%ld lines=%ld latches=%ld swaps=%ld refusedShape=%ld "
-                "faults=%ld alloc=%ld innerSuppressed=%ld anotherRoll=%ld",
+                "faults=%ld alloc=%ld innerSuppressed=%ld anotherRoll=%ld reagentMarks=%ld "
+                "reagentSkips=%ld",
                 InterlockedCompareExchange(&g_tooltipOff, 0, 0) ? "OFF" : "armed",
                 InterlockedCompareExchange(&g_hooksOn, 0, 0),
                 InterlockedCompareExchange(&g_linesReady, 0, 0),
@@ -1410,7 +1976,9 @@ const char* tooltipStatus() {
                 InterlockedCompareExchange(&g_faults, 0, 0),
                 InterlockedCompareExchange(&g_allocBalance, 0, 0),
                 InterlockedCompareExchange(&g_innerSuppressed, 0, 0),
-                InterlockedCompareExchange(&g_rollLines, 0, 0));
+                InterlockedCompareExchange(&g_rollLines, 0, 0),
+                InterlockedCompareExchange(&g_reagentMarks, 0, 0),
+                InterlockedCompareExchange(&g_reagentSkips, 0, 0));
     return g_status;
 }
 
@@ -1474,6 +2042,24 @@ unsigned tooltipTestLatchCount() {
 }
 const unsigned char* tooltipTestLine(bool yes) { return yes ? g_lineYes : g_lineNo; }
 const unsigned char* tooltipTestRollLine() { return g_lineRoll; }
+void tooltipTestReagentArm(unsigned list1, unsigned list2, unsigned list3, void* locInstance,
+                           void* localize) {
+    g_reagentList[0] = list1;
+    g_reagentList[1] = list2;
+    g_reagentList[2] = list3;
+    r_Localize = localize;
+    p_LocInstance = reinterpret_cast<PfnLocInstance>(locInstance);
+    p_Localize = reinterpret_cast<PfnLocalize>(localize);
+    InterlockedExchange(&g_countOff, locInstance && localize ? 0 : 1);
+    g_countSlotChecked = false;
+    InterlockedExchange(&g_reagentOff, 0);
+    InterlockedExchange(&g_reagentReady, 1);
+    t_reagentMemo.valid = false;
+    t_count.valid = false;
+    reagentWordsWide();
+}
+bool tooltipTestReagentOff() { return InterlockedCompareExchange(&g_reagentOff, 0, 0) != 0; }
+bool tooltipTestCountOff() { return InterlockedCompareExchange(&g_countOff, 0, 0) != 0; }
 #endif  // UT_TOOLTIP_TEST_SEAM
 
 }  // namespace ut

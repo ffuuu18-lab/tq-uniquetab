@@ -12,7 +12,7 @@ it means.
 
 The mod is C++17, MSVC, built by `build.bat` into `bin\uniquetab.asi` - a plain 32-bit DLL with the
 extension Ultimate ASI Loader looks for. It exports nothing. `README.md` is the player's document;
-this one is the code's. This text describes version 1.1.1 (the item search is section 4b; the
+this one is the code's. This text describes version 1.1.2 (the item search is section 4b; the
 custom games, the relic and charm page and the collection rule are in sections 6 and 7); the
 version is written in one place, `src\ut_version.h`, which the start-up banner and
 `tools\package.ps1` both read.
@@ -302,7 +302,7 @@ a frames-not-advancing stall check.
 | `src\gen\` | the catalogue generator: `arz_reader` (ARZ v3), `arc_reader` (ARC v1), `inflate` (zlib), `catalogue_gen`, `generate` (with `GameSpec`, GD's view: a custom game's `.arz`, `Text.arc` and archives over the base game's, its leaf from `utSaveSetLeaf`); the groups model `ut_groups.h` (the `uniquetab-groups.ini` parser, the matcher, the auto groups and Other, the built-in table, the G line) and `ut_groups_default.h` (the built-in template as a raw string, `builtinGroupSet`, `loadGroupsFile`) |
 | `src\model\` | `catalogue` (the binary format), `collection` (ownership), `layout` (the footprint packer) - pure, no Windows |
 | `ut_view.cpp/.h` | the collection VIEW on the Transfer page: the substitution, the one OFF path, the guards, the deposit and take routes |
-| `ut_proto.cpp/.h` | the mod sack and the display prototypes: one real `Item` per record of the page, built from the replica |
+| `ut_proto.cpp/.h` | the mod sack and the display prototypes: one real `Item` per record of the page, built from the replica. The move's object walks (`protoFindObjects` / `protoFindItems`, over `GetObjectList`) prove the vector readable once and read it in ONE guarded frame, as `walkObjects` does; a fault is one ERROR after the frame and false (the move refused). The red-shard take's read-back walk runs only for its DEBUG line |
 | `ut_live.cpp/.h` | the page model: the group table, the page / group shown, the OWN filter, the row window |
 | `ut_mikind.cpp/.h` | the KIND table: the catalogue's monster infrequents by record (any spelling), their name and item level, and the refusal's words naming the stored roll. Pure; `test_store` links it over `data\oracle\catalogue.bin` |
 | `ut_screenprobe.cpp/.h` | the screen parts' input: a detour on the front input device's `GetMouseEvent` (found from the live vtable of `Engine::GetInputDevice()` at the first world up, checked by its bytes) and a generation counter on `Engine::ProcessUserInput`; the original always runs first, the record is read under SEH, the press machine (`ut_padinput.h`) decides it, and a consumed event's type and held bytes are rewritten in their own guarded frame; the per-world proof of the event space and the `buttons: screen input` lines (the 20 event lines at DEBUG, the proof and the consumed-click lines at INFO once per world) |
@@ -320,7 +320,7 @@ a frames-not-advancing stall check.
 | `ut_store.cpp/.h` | the private table's owning side: the save set chosen at world load (and with it the game: the tee, `configSetGame`, the journal's folder), the start-up journal move, the deposit / take choke points, the character-save watch |
 | `ut_rescue.cpp/.h` | the journal (format TQ-1) and its CSV export. Pure file I/O - not one engine call. `journal_dir` is read once in `journalInit`: a folder that does not exist or cannot be written (one create-and-delete check) is ignored with one WARN; while it is in force a set whose `.jsonl` is still in the mod folder is named once (`sayUnreadModFolderJournal`) - that file is not read |
 | `ut_recon.cpp/.h` | the pending rows settled against the character's own containers (read only) |
-| `ut_tooltip.cpp/.h` | the item rollover: the "In your collection" line, and the capture flag that keeps a search capture out of it |
+| `ut_tooltip.cpp/.h` | the item rollover: the "In your collection" line, an arcane formula's reagents the collection holds (the swap's edits), and the capture flag that keeps a search capture out of it |
 | `ut_search.cpp/.h` | the item search (section 4b): the text capture, the index and its schedule, the query, the field and its key gate, the real Transfer page's item cache, the one fault latch. The header's top half is pure |
 | `ut_bindings.cpp/.h` | **every fact the mod knows about the game's memory**, in one place, with how it is obtained and how it is confirmed |
 | `ut_coverstep.h`, `ut_depositgate.h`, `ut_viewgate.h`, `ut_paintgate.h`, `ut_ownedfold.h`, `ut_rowmath.h`, `ut_padlayout.h`, `ut_protoshift.h`, `ut_gridcheck.h`, `ut_slotart.h`, `ut_graytex.h`, `ut_costprobe.h`, `ut_textfold.h`, `ut_sfnt.h`, `ut_textmeasure.h`, `ut_unionrow.h`, `ut_resname.h` | the pure-logic headers: a decision extracted from its engine context so an offline test can run exactly the code the mod runs |
@@ -330,7 +330,7 @@ a frames-not-advancing stall check.
 | `ut_threads.h` | the four threads' stack reserves |
 | `gen\gen_heap.cpp/.h` | the build arena and the per-build heap pair (invariant 17) |
 | `gen\relics_gen.cpp/.h` | `uniq-relics.txt`: the relic and charm records `collectItems` hands it, in blocks (a record's tiers) and page order; the relic page reads it |
-| `ut_relicpage.h`, `ut_relicroute.h` | pure: the relic and charm page (the blocks laid out on its area, the fixed pages, the wheel, what each place shows, OWN, the search's relic rules, the rollover's slot line) and the relic rules of the collection (where a deposited piece goes, which row a take hands out, one shard from the red slot, the CSV cells) |
+| `ut_relicpage.h`, `ut_relicroute.h` | pure: the relic and charm page (the blocks laid out on its area, the fixed pages, the wheel, what each place shows, OWN, the search's relic rules, the rollover's slot line) and the relic rules of the collection (where a deposited piece goes, which row a take hands out, one shard from the red slot, the CSV cells); the artifact page of `collect_artifact_bonuses=1` too (the list's part A on a layout of 2 x 2 places, `utRelicPartKeep`; its formulae's 2 x 1 cells in column 0 from the F lines, `UtRelicFormulaPlace`; the plain slot last in the flow, `utArtifactRoute` / `utArtifactPlainChoice` / `utArtifactTakeChoice`) |
 | `ut_searchfold.h` | pure: the one fold the search applies to an item's text and to the query, and the substring match |
 | `ut_color.h` | pure: a colour named in the ini (`search_mark_color`), a name from a fixed table or `#rrggbb` |
 
@@ -684,6 +684,15 @@ The ones the rest of the code leans on:
   (`protoIsItem`: its `GetItemReplicaInfo` slot holds `Item`'s). A page box whose newest row could
   not be rebuilt shows the bare prototype (dim, not takeable, its own WARN); that box carries the
   prototype's roll, so hovering it reads "(another roll)" although the record is held.
+- **The reagent mark's rows** (1.1.2, all OPTIONAL rows of `SELECTION`): `IsReagent1/2/3Avalable`
+  (Game.dll rva 0x1BC010 / 0x1BBE80 / 0x1BBCF0), whose bytes give a formula's three reagent lists
+  (`utReagentListOffset`: `mov eax,0x2AAAAAAB`, `mov ecx,[esi+X+4]`, `sub ecx,[esi+X]`, the
+  suffix `lea` at +0x57, the prefix `lea` at +0x68; 0x54C / 0x570 / 0x594, 0x24 apart), and
+  Engine.dll's `LocalizationManager::Instance` (rva 0x1C21D0) and `Localize` (rva 0x1C1D40,
+  `UAAPBGPBDZZ`: a virtual `__cdecl` (this, tag, ...)) for the count line. `tools\test_bindings.cpp`
+  checks the rvas, the decode and the conventions. `src\tq_exports.h` also carries two hand-added
+  rows the generator's `SELECTION` lacks (`TQ_RELIC_VFTABLE`, `TQ_CHARM_VFTABLE`): a regeneration
+  must put them back.
 - **The Transfer sack's item map**, which the search walks on the real Transfer page:
   `InventorySack::GetInventory` returns a `const std::map<unsigned, RectExt>&`, VS2012 x86. The map
   is {head, size}, the head the nil node, whose left is the smallest key; a node is left +0x00,
@@ -898,6 +907,27 @@ goes through those two. `relic_split` is only a line drawn at the panel where th
 cost space; a second button would touch search marks, totals, the union guard and the buttons file. `relic_sort` reorders
 `UtRelicList::blocks` at a page build when the value in force differs (`relicFollowSort`: a game's list
 is read before its own settings come in force); rows stay where they are, a row's `block` follows.
+`relic_empty_veil` (1.1.2) is `drawRelicVeils`, in the page draw's POST under the have-ticks and the counts:
+the owned_marks=1 veil (`kUnownedDim`) over each relic slot `ownedGrayWanted` grays
+(`utRelicEmptyVeiled`), so it follows the gray lend at every owned_marks (the hovered slot bright,
+under OWN too: `g_unveilNow` does not wait for OWN off, only `g_marksNow` does; nothing while the
+journal set is unknown) and never touches an item page. A gray copy has its
+colour icon's luma, so a legendary relic was told from its empty slot by its little colour alone;
+the study's ivory rim on held slots was left out, it read as a search hit
+(the 1.1.2 study).
+
+**OWN by slot** (`relic_own_slots`, 1.1.2, ini_version 30, `[advanced]`, hidden, default 0). Under
+OWN with the setting on, `relicRelist` also takes one flag per state (`utRelicSlotsHeld`: count > 0;
+`UtRelicRow::state` is a row's first state, the same index as `stateFirst`) and lays out again when
+those moved. `utRelicLayoutBuild` copies the flags into `UtRelicLayout::shown`: a row with none gets
+0 lines, a block with none is left out (exactly OWN's block set), a kept row keeps all its wrapped
+lines ("holes": every shown slot on its table cell). `utRelicWindowPlaces` skips a hidden green and
+emits a hidden red as `kUtRelicSlotDead` at column 0, so panels and names stay aligned and nothing
+gets a prototype there. No sticky rule: an emptied slot goes at the next relayout, as a block does
+under plain OWN. Found and "of" (`utRelicSearchFound`, `utRelicGreenSlots`) take the same flags.
+Deposits and takes need nothing: deposits route by the item's capture (no cell), takes by the
+prototype, and a hidden slot has none. The setting is followed at the next page build
+(`livePagePlaces` compares `relicOwnSlots` with `slotsLaid`).
 
 **The collection comes back** (`view_resume`, 1.1.1, in memory). `event()` keeps a wish when the
 tab or the caravan took the view OFF (`utViewResumeWish`); the player's OFF, every fault and a world
@@ -934,6 +964,69 @@ hidden rows). A version-13 stamp written before this key has no `collect_relics`
 first start of this build regenerates every set once with the reason `collect_relics changed to
 1 (the relics and charms have their page)` although the player changed nothing: expected, the
 stamp gained the line.
+
+**The artifact page** (`collect_artifact_bonuses`, `[general]`, default 1, ini_version 30; a stamp
+input as `collect_relics`: `collect_artifact_bonuses=1` is a stamp line only while on, so the
+option-off files are the same bytes as 1.1.1's and `data\oracle` did not move). On, `collectItems`
+joins every `ItemArtifactFormula` record (in folded-record order) to the artifact its
+`artifactName` names and gives each artifact the union of their `artifactBonusTableName` tables
+(read as `relicBonuses` reads a relic's; a custom game whose formulae differ for one artifact gets
+all of them); `generate.cpp` appends one `RelicItem` per catalogue artifact (class `ItemArtifact`,
+shards 0, no shard icon) and `relicsListText` writes them after the charms as part `A`, each a
+block of its own at tier 0; `buildLists(..., artifactBlocks)` writes their group's G line with
+the other records' count only (0 for the built-in Artifacts) and no E or `uniq-records.txt` line,
+like the relic page's. `build_catalogue.py --collect-artifact-bonuses` is the twin; the catalogue
+suite's pass 5 compares the option-on set byte for byte (stock AE 2.10: 90 blocks, 828 bonus
+slots, 90 formula lines). **The formulae (`GDUT-STAMP 15`).** After each part-A R line
+`relicsListText` / `relics_text` write one `F <formula record>` line per catalogue formula whose
+`craftsRecord` (artifactName) names the artifact, in folded-record order (`generate.cpp` joins them
+from `items`, so only formulae past the filter and EXCLUDE; stock: 90 artifacts to 90 formulae, the
+3 Lupine Necklace Designs join none). The formulae stay records of the blueprint group: catalogue.bin,
+`uniq-records.txt` and their E lines do not move. `utRelicListRead` keeps them on the row
+(`formulae`, `formulaFolded`, `formulaFirst`; `UtRelicList::formulae` numbers them) and refuses an F
+line that does not follow an artifact's R line; a list without F lines reads as before. At run time the same `RelicTables` serves both pages: `artLayout` lays out part A at
+`slot` 2 (2 x 2 places: column 0 the formulae's, a 2 x 1 `UtRelicFormulaPlace` each at line k of the
+row, `relic_bonus_gap`, the green slots wrapping, the plain slot always last at flow place n and
+wrapping like a green, so a row is `2 * ceil((n + 1) / perLine)` lines, or its formula count when
+that is more: 36 fixed pages at 16 x 15). The relic places keep column 0 as one `kUtRelicSlotDead`
+place per artifact row (the panel from column 0, no prototype); the formula cells come from
+`utRelicWindowPlaces`'s second array (`g_relicFormulae`), never `g_relicShown`, because the states,
+`liveRelicPlaceAt`, `drawRelicCounts` and the veils index the relic places. `livePagePlaces` appends
+them as slot-0 (unique) places after the relic ones: built, taken (`storeOnTake`, `formula_copies`),
+counted (`drawFormulaCounts`) and toned as on the Arcane Formulae page, but marked like a relic slot
+(`utRelicLook`, `computePage`'s `g_pageRelic`: gray when the journal holds no row of it at every
+owned_marks and under OWN, where a block stays for any slot it holds, no veil or frame of
+owned_marks, `relic_empty_veil` over it; the gray copy is the formula record's catalogue one, and
+`grayBegin` loads the copies on both relic-look pages, `grayEveryMarks`); `relicBackTake` sets
+their cells and widens their block's panel (`utRelicFormulaCell`). `relicRelist` counts each
+formula's rows not pending out (`formulaRows`): a stored formula alone keeps its block under OWN
+(`utRelicBlocksHeld`), and with `relic_own_slots` an empty one is ground (`formulaHeld`, the layout's
+`formulae` flags). The search marks a formula cell by its record's match on the Arcane Formulae
+page (`formulaK`, the `blueprint` group's capture; `g_placeRec` / `g_placeK` hold the formula
+protos only), and the artifact page's found and "of" count the green slots and the formula cells
+(`relicFormulaCells`); the plain slot is in no total, the label's included (`artHeld` / `artSlots`
+are green slots, `artPlain` its own figure). `formulaPageSet` (after `relicFindGroup`): while the
+artifact page is in force (`artPage`) the `blueprint` group's records that a formula line names are
+`away` (`Group::here`, `ownedHere`; `pageMaskOf` / `pageCountOf` in place of OWN's owned flags for
+the window, the pages, the search's counts and a union's view; `liveGroupOnPage` for the label), so
+that page keeps the formulae with no block; with no group showing the artifact page nothing is
+away, so no formula is ever on no page. The relic page's
+`layout` lays out parts R and C (`utRelicPartKeep`, with OWN's held flags), and the group whose G line id is
+`artifact` shows it (`artShown`; a player's groups file without that id has no artifact page,
+one WARN). The route never refuses (`utArtifactRoute`: a listed bonus green, anything else plain),
+so every row is reachable; every take hands out a whole row (`utRelicTakeCallOf(..., artifact)`
+is never `kUtRelicTakeShard`, the prototype is the row as stored, `UtProtoPlace::whole`), and
+`journalTakeRow` checks it against the table (`utArtifactTakeChoice`). Back at 0 the artifacts are
+one group's records again; a record stored several times is the `formula_copies` case (the newest
+shown, takes row by row, a second deposit refused). `collect_pristine_only=1` reads an artifact's
+relicBonus as its own bonus whatever the option says (`UtDepositFacts::artifactKind`,
+`liveIsArtifactRecord`: part A, or the `artifact` group's records). `relic_own_slots` means the
+same on this page: `relicRelayout` builds both layouts from the part keep flags (with OWN's held
+flags) and the one per-state `slotHeld`, so under OWN only the slots that hold something are
+places; an empty plain slot is skipped at its cell like a hidden green (ground; column 0 stays
+the row's dead place, so the panel still starts there), and an artifact with nothing stored is
+left out. Found and "of" take `keepA` / `keepR` with the same slot
+flags; the label's totals (`artHeld`, `artPlain`) are the page's whole counts, as the relic page's.
 
 **The monster infrequents** (`collect_mi`, default 1, a stamp input: `collect_mi=1` is a stamp
 line while on). Every EQUIP_SLOT record whose own itemClassification is Rare passes the same
@@ -974,6 +1067,33 @@ builds the crafted artifact inside it, and that artifact's own text detour runs 
 per-thread depth (`t_formulaDepth`, raised around the formula's original call and lowered in a
 `__finally`) turns the inner latch into a no-op, counted as `innerSuppressed` in the tooltip
 summary line, so a formula reads its own line and never the artifact's.
+
+The reagent mark (1.1.2, `reagentBody` in `ut_tooltip.cpp`, after `latchBody` on the formula's way
+out). The engine pushes the count line (class 0x2C, `Localize` of `xtagArtifactReagents` with the
+yellow and the listed counts) and then exactly one line per reagent, 1, 2, 3: 0x2D yellow when
+`IsReagentNAvalable` found it (inventory, equipped, Storage, Transfer, Relic Vault), else 0x2E
+grey; an empty list prints a grey line outside the total. A grey line whose reagent the journal
+holds whole becomes a mod-owned 0x2D line (the engine's text, " ", `tooltip.reagent`) and the
+count line is rebuilt through `LocalizationManager::Instance()->Localize` with those counted -
+both as EDITS carried with the formula's own latch (`Latch::edits`, `t_edits`) and written only into
+the swap's borrowed copy (`tooltipSwapBuildEdits`: each edit's line must still be of its class,
+else the vanilla tooltip); the engine's vector is never changed and no engine answer either. The
+three lists' offsets (this+0x54C / +0x570 / +0x594, base records then prefix +0x0C and suffix
++0x18 lists) are decoded at start from `IsReagent1/2/3Avalable`'s own bytes
+(`utReagentListOffset`, `ut_depositgate.h`) - read, never called, never detoured: the Enchanter
+(TQ.exe 0x0F6A40..) uses `GetReagentN*` / `GetCreationCost` and never them, so crafting is
+untouched. "Held" (`reagentHeld`, memoised per formula record 250 ms): a relic or charm's
+completed row, any row of an artifact (`tooltipReagentRowsHold`), an equipment record's
+`storeCount`; never a row pending out or unresolved, nothing without the relic list, never a
+reagent whose prefix or suffix list is set. The count line is used only when the engine's own
+line reads exactly `Localize(tag, its count, total)` and the instance's vtable +0x10 is the
+export; else one WARN and the engine's count for the session (`g_countOff`). A missing export,
+a failed decode or a fault: one line, the mark off for the session (`g_reagentOff`). A formula
+whose list does not read as a vector of strings (`strVecCount`: a span of whole strings, at most
+`kReagentListMax`; SVAERA's lists hold up to 165 records, only the first `kReagentRecs` are asked)
+keeps ITS game lines, memoised as listing nothing; one WARN for the first (`reagentSkip`), the
+summary line's `reagentSkips` counts the reads, and the others are still marked. A formula that
+is not a catalogue record takes no latch, so it keeps the game's lines.
 
 Memory: the generation's peak working set with the 1,096 monster infrequents and their gray
 icons is about 83 MB in `test_catalogue`'s fresh x86 process (`--peak`: +77 MB over its start;
@@ -1095,6 +1215,19 @@ row only (and the file is copied aside as `.bad-<stamp>` before the next write r
 higher format, a header naming another journal, or a file that is there and cannot be read means
 **read-only for the session**. "I cannot read it" never becomes "there is nothing in it".
 
+**The index and the facts generation (1.1.2, speed only).** `rebuildIndex` runs under `g_cs` after
+every change of the rows and keeps, per key hash, the collected count and the run of that key's row
+positions (`g_at`, file order); `journalRowsOf` and `journalNewest` read those positions (each row's
+key still compared; a rebuild that threw leaves `g_indexWhole` false and they scan), so the relic
+relist is O(records + rows), not records x rows. Each rebuild also moves `journalFactsGen()`, which
+the relic page's relist and `liveRelicStale` key on instead of `journalWrites()`: a take's touch
+(`journalTouchOut`, takenAt only) is written but rebuilds nothing, so a take relists once, not
+twice. Display only: the commit bodies (`journalTakeCommit`, `factsOfKey` in `journalTakeRow` /
+`journalTakeShard`) still scan the rows themselves. `test_journal` section P compares the index
+with the scan (`journalIndexBypass`) after deposits, takes, a split, a cancel, a save and a reload.
+The writer, the file and its flush and rename are unchanged; the whole-file write per move is the
+pause that is left.
+
 **Pending rows.** A deposit's row is `"pending":"in"` and a take's `"pending":"out"` until the
 character's next save; the character-save watch (`ut_store.cpp`, reading `Player.chr` under the
 game's `SaveData` folder, read only) settles them. A row the game never saved - a crash in
@@ -1157,7 +1290,7 @@ once collide on the build's PDB).
 | `tools\build_test_store.bat` | the private table and `ut_depositgate.h` |
 | `tools\build_test_tooltip.bat` | the tooltip line |
 | `tools\build_test_viewgate.bat` | the view's ON/OFF state machine, every event order up to depth 7 against a simulated Transfer page; the custom game entry's decisions (`utGameEntryStep`) and the start-up builds' order and per-game wait (`utGamesNext`, `utGamesEntryWaits`); the retire list's lifetimes, the memory line and its arena part, and the per-game data latch; the caravan re-opened in place (`utCaravanInteract`: a goodbye inside `OnPlayerInteract` is a close, then an open, and the view's state is open again) |
-| `tools\build_test_relicpage.bat` | the relic and charm page (`src\ut_relicpage.h`) over the oracle's `uniq-relics.txt`: the list, the fixed pages at 16 x 15 and 20 x 19, the wrap, the dead cells, the window of whole blocks, the wheel (one block) and `<` `>` (a fixed page), what each place shows; OWN (`utRelicBlocksHeld`, the layout of the held blocks with every slot in place), the search's relic rules, the have-mark key, the rollover's slot state and a partial piece's one line (`utRelicTipLine`) |
+| `tools\build_test_relicpage.bat` | the relic and charm page (`src\ut_relicpage.h`) over the oracle's `uniq-relics.txt`: the list, the fixed pages at 16 x 15 and 20 x 19, the wrap, the dead cells, the window of whole blocks, the wheel (one block) and `<` `>` (a fixed page), what each place shows; OWN (`utRelicBlocksHeld`, the layout of the held blocks with every slot in place; `relic_own_slots`: the slot flags, the layout identical without them, empty rows and blocks out, a hidden red dead at column 0, a wrapped bonus on its cell, the search's counts; on an artifact block column 0 dead, an empty plain slot and an empty formula ground, a held green on its 2 x 2 cell, a stored formula alone keeping its block, and both settings off the 1.1.1 layout; the F lines read and refused, the formula cells 2 x 1 at one line each, the plain slot last wrapping a six-bonus block, a third formula adding a line), the search's relic rules, the have-mark key, the rollover's slot state and a partial piece's one line (`utRelicTipLine`) |
 | `tools\build_test_buttons.bat` | the buttons file `uniquetab-buttons.ini`: the grammar and its refusals, the resolve against the groups, the `[unassigned]` rewrite, a new built-in group offered once (the rewrite holds it out until its offer ran; only the "added once" line is an opt-out - a player's SVAERA file the rewrite reached first gets `[SOU]`; the group table the offer reads is recorded at the game switch when the settings already follow the entered game, else at the tab's first open), the default file byte for byte against the Python twin |
 | `tools\build_test_text.bat` | the words of the buttons file's `[tab]`: UTF-8, the placeholders (`{found}` included), TQ's four label forms, and the label's fit against the earlier fixed cascade |
 | `tools\build_test_layout.bat` | the layout model `src\ut_layout.h` and the pad's pages `src\ut_padpage.h`: the `[layout]` text, the pad fitted to a rectangle (paged when narrow), the label, the grid part (`grid_<W>x<H>`: its whole cells, the box cap, the floor), the resolution of the grid, the pad and the label against each other, the screen parts' frame and publication, the layout from the measured page over the UI scale sweep, the game's own Transfer page (`utLayoutRealPage`, `utRealCellsCovered`, `utRealPadText`), and the re-fit on new cells (`src\ut_gridpack.h` over `src\model\layout.cpp`: every group re-packed or none, the pages, `utRowKeep`) |

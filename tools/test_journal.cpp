@@ -1545,6 +1545,86 @@ int main(int argc, char** argv) {
               "a depositedVar1 that is not a plain number: the row kept, the key dropped");
         journalOpenSet(nullptr);
     }
+    printf("\nP. the row index and the facts generation (1.1.2): the index reads as the scan did\n");
+    {
+        using namespace ut;
+        const char* kRelic = "records\\xpack\\item\\relics\\01_act4_test.dbr";
+        const char* kRelicKey = "records/xpack/item/relics/01_act4_test.dbr";
+        const char* kAmulet = "records\\item\\equipmentamulet\\u_n_amulet_01.dbr";
+        const char* kAmuletKey = "records/item/equipmentamulet/u_n_amulet_01.dbr";
+        const char* keys[] = {kRelicKey, kRingKey, kAmuletKey, "records/item/no_such_item.dbr"};
+        auto rcap = [&](unsigned seed, unsigned var1) {
+            UtReplicaCapture c = cap(kRelic, seed);
+            c.var1 = var1;
+            return c;
+        };
+        // every key through the index, then by the scan (1.1.1's reads): the same rows, the same newest
+        auto sameAsScan = [&]() {
+            static UtRelicRowFacts a[64], b[64];
+            static UtReplicaCapture ca, cb;
+            bool same = true;
+            for (const char* k : keys) {
+                unsigned long long sa = 0, sb = 0;
+                const size_t na = journalRowsOf(k, a, 64);
+                const bool fa = journalNewest(k, &ca, &sa);
+                journalIndexBypass(true);
+                const size_t nb = journalRowsOf(k, b, 64);
+                const bool fb = journalNewest(k, &cb, &sb);
+                journalIndexBypass(false);
+                same = same && na == nb && memcmp(a, b, sizeof(a[0]) * (na < 64 ? na : 64)) == 0 &&
+                       fa == fb && sa == sb && (!fa || sameCap(ca, cb));
+            }
+            return same;
+        };
+        auto shardSource = [&]() {
+            UtRelicRowFacts fx[64];
+            const int n = (int)journalRowsOf(kRelicKey, fx, 64);
+            bool split = false;
+            const int src = utRelicShardSource(fx, n, &split);
+            return src >= 0 ? fx[src].seq : 0ull;
+        };
+        const char* L = "tq-uniq-items-px";
+        clean(L);
+        bool rb = false, ok = journalOpenSet(L);
+        unsigned long long s[30] = {0}, t = 0, out = 0;
+        unsigned left = 0;
+        for (int i = 0; i < 30 && ok; ++i)   // three keys, interleaved
+            ok = journalDepositCommit(i % 3 == 0 ? cap(kRing, 500 + i) : i % 3 == 1 ? rcap(500 + i, 2)
+                                                                                    : cap(kAmulet, 500 + i),
+                                      &s[i], &rb);
+        check(ok && journalCount() == 30 && sameAsScan(), "the index, step 1: 30 deposits of three keys: the index reads as the scan");
+        check(journalSaveObserved(now() + 10) == 30 && sameAsScan(), "the index, step 1: saved: the same");
+        check(journalTakeCommit(kRingKey, s[27], &rb) && journalTakeShard(kRelicKey, shardSource(), &out, &left, &rb) &&
+                  sameAsScan(),
+              "the index, step 2: a take (pending out) and a shard split (a row appended): the same");
+        unsigned long long back = 0;
+        check(journalDepositCommit(cap(kRing, 527), &back, &rb) && back == s[27] && journalPendingOut() == 1 &&
+                  sameAsScan(),
+              "the index, step 3: the ring dropped back before a save: the take cancelled, the same");
+        check(journalDepositCommit(cap(kAmulet, 600), &t, &rb) && journalSaveObserved(now() + 10) == 2 &&
+                  journalCount() == 31 && sameAsScan(),
+              "the index, step 3: a save erases the shard row (the deposit behind it moves up): the same");
+        check(journalDepositCommit(cap(kAmulet, 601), &t, &rb) && journalDepositCommit(cap(kRing, 602), &back, &rb) &&
+                  journalTakeCommit(kAmuletKey, t, &rb) && journalCount() == 32 && sameAsScan(),
+              "the index, step 3: an unsaved deposit taken (its row erased, the ring behind it moves up): the same");
+        // a take's touch changes only the taken time: the file is written again, the facts are not
+        unsigned long long nw = 0;
+        check(journalNewest(kAmuletKey, nullptr, &nw) && journalTakeCommit(kAmuletKey, nw, &rb), "the index, step 4: a take");
+        const long f0 = journalFactsGen(), w0 = journalWrites();
+        check(journalTouchOut(nw) && journalFlushNow() && journalWrites() == w0 + 1 && journalFactsGen() == f0,
+              "the index, step 4: its touch is written, the facts generation stays (the relic page relists once)");
+        check(journalDepositCommit(cap(kAmulet, 601), &t, &rb) && journalFactsGen() != f0,
+              "the index, step 4: a deposit moves the facts generation");
+        const long f1 = journalFactsGen();
+        check(journalTakeCommit(kAmuletKey, t, &rb) && journalFactsGen() != f1 && sameAsScan(),
+              "the index, step 4: a take moves it");
+        const long f2 = journalFactsGen();
+        check(journalOpenSet("tq-uniq-items-tb") && journalOpenSet(L, 0, 0, true) && journalFactsGen() != f2 &&
+                  journalUnresolved() > 0 && sameAsScan(),
+              "the index, step 5: reloaded (a crash: the pending rows wait for the check): the same, the generation moved");
+        check(journalUnresolvedFallback("test") > 0 && sameAsScan(), "the index, step 5: the load rule applied: the same");
+        journalOpenSet(nullptr);
+    }
 
     printf("\n%s - %d passed, %d failed\n", g_fail ? "JOURNAL TESTS FAILED" : "ALL PASS", g_pass,
            g_fail);

@@ -1080,17 +1080,23 @@ def relic_bonuses(db, table: str):
     return out
 
 
+RELIC_PART = {"ItemRelic": 0, "ItemCharm": 1}   # any other class (ItemArtifact): part A, 2
+
+
 def relic_order(relics):
     """[(class, block id, [(tier, key, entry)])] in page order."""
     blocks = {}
     for r in relics:
         key = relic_fold(r["record"])
-        tier, bid = relic_block(key)
+        if r["class"] == "ItemArtifact":   # an artifact is a block of its own, tier 0
+            tier, bid = 0, key[:-4] if key.endswith(".dbr") else key
+        else:
+            tier, bid = relic_block(key)
         blocks.setdefault((r["class"], bid), []).append((tier, key, r))
     order = []
     for (cls, bid), rows in blocks.items():
         rows.sort(key=lambda t: (t[0], t[1].encode("utf-8")))
-        order.append(((0 if cls == "ItemRelic" else 1, relic_expansion(rows[0][1]),
+        order.append(((RELIC_PART.get(cls, 2), relic_expansion(rows[0][1]),
                        rows[0][2]["levelRequirement"], bid.encode("utf-8")), cls, bid, rows))
     order.sort(key=lambda o: o[0])
     return [(cls, bid, rows) for _k, cls, bid, rows in order]
@@ -1100,18 +1106,22 @@ def relics_text(relics, rexcluded) -> bytes:
     """uniq-relics.txt (relics_gen.cpp relicsListText)."""
     lines = []
     for n, (cls, bid, rows) in enumerate(relic_order(relics), 1):
-        lines.append("B\t%d\t%s\t%s\t%d\t%s\t%s" % (n, bid, "R" if cls == "ItemRelic" else "C", len(rows),
+        lines.append("B\t%d\t%s\t%s\t%d\t%s\t%s" % (n, bid, "RCA"[RELIC_PART.get(cls, 2)], len(rows),
                                                  rows[0][2]["name"], rows[-1][2]["name"]))
         for tier, _key, r in rows:
             lines.append("\t".join(["R", r["record"], str(tier), str(r["shards"]), r["bitmap"],
                                     r["shardBitmap"], str(len(r["bonuses"]))] + r["bonuses"]))
+            lines += ["F\t" + f for f in r.get("formulae", [])]   # part A: the artifact's formulae
     lines += ["X\t%s\t%s" % (x["record"], x["reason"]) for x in rexcluded]
     return "".join(l + "\r\n" for l in lines).encode("utf-8")
 
 
 def build(game_dir: str, out_dir: str, lang: str = "EN", collect_unobtainable: bool = False,
-          collect_mi: bool = False, groups_file=None, game=None, relic_sink=None):
-    """relic_sink: a dict that receives "relics" and "excluded" (the relic rows and X lines)."""
+          collect_mi: bool = False, groups_file=None, game=None, relic_sink=None,
+          collect_artifact_bonuses: bool = False):
+    """relic_sink: a dict that receives "relics" and "excluded" (the relic rows and X lines).
+    collect_artifact_bonuses: the artifacts' block page (uniq-relics.txt's A blocks, their group
+    without E lines) - the ini's collect_artifact_bonuses=1 (generate.h)."""
     game = game or GameSpec()
     db = arz.ArzDatabase.load_game(game_dir, game_arz=game.arz_path())
     skipped = []            # the custom game's archives that cannot be read (arc_reader.h ResourceArcs)
@@ -1180,6 +1190,7 @@ def build(game_dir: str, out_dir: str, lang: str = "EN", collect_unobtainable: b
     refs = collections.defaultdict(set)          # target key -> referrer keys (not itself)
     nondrop = collections.defaultdict(set)       # target key -> holder kinds
     cands, mi_cands, unmapped, relic_cands = [], [], [], []
+    formulae = []                                # (key, folded artifactName, artifactBonusTableName)
     templ = set()                                # candidates with a template word
     cls_of = {}                                  # record key -> Class (the reach walk)
     for key, src, rec, flds in db.items_with_fields():
@@ -1199,6 +1210,9 @@ def build(game_dir: str, out_dir: str, lang: str = "EN", collect_unobtainable: b
                         refs[tgt].add(key)
                     elif tgt != key:
                         nondrop[tgt].add(kind)
+        if collect_artifact_bonuses and cls == "ItemArtifactFormula":
+            formulae.append((key, relic_fold(arz.sfield(rec, "artifactName")),
+                             arz.sfield(rec, "artifactBonusTableName")))
         if cls in RELIC_CLASSES:
             if is_shipped(key, rec, cls, tags, db):
                 bonuses = relic_bonuses(db, arz.sfield(rec, "bonusTableName"))
@@ -1322,6 +1336,26 @@ def build(game_dir: str, out_dir: str, lang: str = "EN", collect_unobtainable: b
         if kept or not reason:
             relics.append(e)
     rexcluded.sort(key=lambda x: x["record"])
+    arts = []   # the artifacts' blocks (catalogue_gen.cpp collectItems artifactBonuses, generate.cpp)
+    if collect_artifact_bonuses:
+        union, seen = {}, {}
+        for _k, art, table in sorted(formulae, key=lambda f: f[0].encode("utf-8")):
+            if not art:
+                continue
+            for b in relic_bonuses(db, table):
+                if relic_fold(b) not in seen.setdefault(art, set()):
+                    seen[art].add(relic_fold(b))
+                    union.setdefault(art, []).append(b)
+        crafts = {}   # each artifact's catalogue formulae, in folded-record order (the F lines)
+        for e in items:
+            if e["craftsRecord"]:
+                crafts.setdefault(relic_fold(e["craftsRecord"]), []).append((relic_fold(e["record"]), e["record"]))
+        arts = [{"record": e["record"], "class": "ItemArtifact", "name": e["name"],
+                 "levelRequirement": e["levelRequirement"], "shards": 0, "bitmap": e["bitmap"],
+                 "shardBitmap": "", "bonuses": union.get(relic_fold(e["record"]), []),
+                 "formulae": [r for _k, r in sorted(crafts.get(relic_fold(e["record"]), []),
+                                                     key=lambda t: (t[0].encode("utf-8"), t[1].encode("utf-8")))]}
+                for e in items if e["isRelic"]]
     if relic_sink is not None:
         relic_sink["relics"], relic_sink["excluded"] = relics, rexcluded
 
@@ -1370,20 +1404,23 @@ def build(game_dir: str, out_dir: str, lang: str = "EN", collect_unobtainable: b
     with open(os.path.join(out_dir, "uniq-geometry.txt"), "wb") as fh:
         fh.write(geometry_text(geo))
     groups = write_lists(out_dir, items, excluded, collect_mi, groups_file, game.name(),
-                         geo["cols"], geo["rows"], relic_rows=len(relics))
+                         geo["cols"], geo["rows"], relic_rows=len(relics),
+                         artifact_blocks=collect_artifact_bonuses)
     with open(os.path.join(out_dir, RELIC_LIST), "wb") as fh:
-        fh.write(relics_text(relics, rexcluded))
+        fh.write(relics_text(relics + arts, rexcluded))
     write_stats(os.path.join(out_dir, "catalogue-stats.md"), items, excluded, cands, groups, meta,
                 relics, rexcluded)
     return items, excluded, cands, groups
 
 
 def write_lists(out_dir, items, excluded, collect_mi=False, groups_file=None, game_name="",
-                host_cols=HOST_COLS, host_rows=HOST_ROWS, relic_rows=0):
+                host_cols=HOST_COLS, host_rows=HOST_ROWS, relic_rows=0, artifact_blocks=False):
     """uniq-records.txt, uniq-groups.txt, uniq-excluded.txt - CRLF, as the DLL writes them. The
     groups are the group rules' (the built-in template of src/gen/ut_groups_default.h, or the
     user's uniquetab-groups.ini merged in front of it); a record no group takes is on no page and
-    not in uniq-records.txt."""
+    not in uniq-records.txt. artifact_blocks: the artifacts are on their block page, so no E line
+    and no uniq-records.txt line takes them; their group's G line counts the other records only
+    (catalogue_gen.cpp buildLists)."""
     rules, warning = load_groups(groups_file)
     if warning:
         print("WARN " + warning)
@@ -1412,8 +1449,11 @@ def write_lists(out_dir, items, excluded, collect_mi=False, groups_file=None, ga
         g["id"], g["label"], g["tag"] = gdefs[g["def"]]
         g["cols"], g["rows"] = cols, rows
         grp_lines.append("G\t%d\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s" % (
-            n, g["label"], cols, rows, g["cw"] * CELL_PX, g["ch"] * CELL_PX, len(g["items"]), g["id"], g["tag"]))
+            n, g["label"], cols, rows, g["cw"] * CELL_PX, g["ch"] * CELL_PX,
+            sum(1 for it in g["items"] if not (artifact_blocks and it["isRelic"])), g["id"], g["tag"]))
         for it in g["items"]:
+            if artifact_blocks and it["isRelic"]:   # on the artifact block page
+                continue
             rec_lines.append(it["record"])
             grp_lines.append("E\t%s\t%d\t%d" % (it["record"], it["footW"], it["footH"]))
     if relic_rows > 0:   # the relic page's group: one G line after the collection's, no E line
@@ -1675,6 +1715,9 @@ def main() -> int:
     ap.add_argument("--collect-mi", action="store_true",
                     help="admit the monster infrequents, every Rare equipment record (the ini's "
                          "collect_mi=1, the DLL's default)")
+    ap.add_argument("--collect-artifact-bonuses", action="store_true",
+                    help="the artifacts' block page: one block per artifact with its completion "
+                         "bonuses (the ini's collect_artifact_bonuses=1)")
     ap.add_argument("--game-mod", metavar="FOLDER",
                     help="a custom game's folder (<root>/<name>, holding Database/<name>.arz): its "
                          "records, text and archives over the base game's (the DLL's GameSpec)")
@@ -1696,7 +1739,8 @@ def main() -> int:
         print("no custom game database at %s (or the name gives no folder)" % game.arz_path())
         return 2
     items, excluded, cands, groups = build(args.game, args.out, args.lang, args.collect_unobtainable,
-                                           args.collect_mi, args.groups, game)
+                                           args.collect_mi, args.groups, game,
+                                           collect_artifact_bonuses=args.collect_artifact_bonuses)
     print(f"collection rule: {len(cands)} records ({sum(1 for c in cands if c['isMi'])} monster "
           f"infrequents); after EXCLUDE: {len(items)} ({sum(1 for i in items if i['isMi'])} MIs) "
           f"({sum(1 for x in excluded if not x['kept'])} dropped) in {len(groups)} groups")

@@ -175,12 +175,18 @@ const char* liveStatus();
 // Its window starts at a BLOCK (liveShownPage = the first shown block); the wheel moves one block,
 // < > / PageUp / PageDown a fixed page (ut_relicpage.h). Game thread unless said otherwise.
 bool liveIsRelicGroup(int group);      // `group` is the relic page's group (and the list is read)
+// `group` is the artifact page's (collect_artifact_bonuses=1: the list's part A, the "artifact"
+// group): a block page of 2 x 2 places that every liveRelic* call below serves while it is shown.
+bool liveIsArtifactPage(int group);
 // The relic layout's area (whole cells) and its two gaps, from the panel's layout pass while a
 // relic page is shown; laid out again and the page rebuilt only when one of them changes.
 bool liveSetRelicGeometry(int cols, int rows, int blockGap, int bonusGap, int nameLine);
 int liveRelicGroup();                  // that group, -1 = none
 const UtRelicList* liveRelicList();    // the list of the game in force (null = none)
 int liveRelicFind(const char* folded); // a record's row in that list, -1 = not a relic / charm
+// An artifact record: on the list's part A, or (collect_artifact_bonuses=0) one of the "artifact"
+// group's records - collect_pristine_only reads its relicBonus as its completion bonus.
+bool liveIsArtifactRecord(const char* folded);
 // A relic or charm record's facts for the deposit: its shards N, its tier, its bonus table as the
 // table spells it (`*tableN` entries). False = not on the relic list. No allocation.
 bool liveRelicFacts(const char* folded, unsigned* shards, int* tier, const char* const** table,
@@ -190,11 +196,19 @@ bool liveRelicFacts(const char* folded, unsigned* shards, int* tier, const char*
 // they change only when the page is built (no journal read here). 0 / false off the relic page.
 int liveRelicPlaceCount();
 bool liveRelicPlaceAt(int i, UtRelicPlace* place, UtRelicPlaceState* state);
+// The artifact window's formula cells (2 x 1 in column 0; unique places, not relic places), the
+// same way. 0 / false off the artifact page.
+int liveRelicFormulaCount();
+bool liveRelicFormulaAt(int i, UtRelicFormulaPlace* place);
+// Record k of `group` is on its page: false for a formula the artifact page's blocks show while
+// that page is in force (the Arcane Formulae page leaves it out). The label's page numbers.
+bool liveGroupOnPage(int group, int k);
 // The shown window: its first block, one past its last, the block count, the fixed page of its
 // first block (0-based) and the page count. False off the relic page.
 bool liveRelicWindow(int* firstBlock, int* endBlock, int* blocks, int* page, int* pages);
 // The label's numbers from the last relist: green slots holding at least one item, every bonus
-// slot, and the shards stored in every red slot.
+// slot, and the shards stored in every red slot - on the artifact page its own green slots and
+// the rows in every plain slot.
 bool liveRelicTotals(int* bonusesHeld, int* bonusSlots, unsigned* pieces);
 // The relic page is shown and the journal moved since its facts were taken (one counter read):
 // the view's tick rebuilds the page.

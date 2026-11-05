@@ -726,6 +726,7 @@ struct UtPadRelicLabel {
     int page = 0, pages = 0;               // 1-based fixed page of the first shown block
     int bonuses = 0, bonusSlots = 0;
     unsigned pieces = 0;
+    bool artifacts = false;                // the artifact page: "plain n" (its plain slots' rows)
     const char* found = "";                // "indexing k/n" or "found N"; empty while no query stands
     const char* brief = "";                // its short form, "k/n" or "=N"
 };
@@ -738,14 +739,15 @@ inline void utPadRelicForm(const UtPadRelicLabel& r, int form, char* line, size_
     char span[48];
     if (r.blocks > 0) _snprintf_s(span, sizeof(span), _TRUNCATE, "%d-%d/%d", r.first, r.last, r.blocks);
     else _snprintf_s(span, sizeof(span), _TRUNCATE, "0/0");
+    const char* pw = r.artifacts ? "plain" : "pieces";
     if (form <= 1)
-        _snprintf_s(line, cap, _TRUNCATE, "%s  page %d/%d  %d/%d  pieces %u%s%s", span, r.page, r.pages,
-                    r.bonuses, r.bonusSlots, r.pieces, sep, s);
+        _snprintf_s(line, cap, _TRUNCATE, "%s  page %d/%d  %d/%d  %s %u%s%s", span, r.page, r.pages,
+                    r.bonuses, r.bonusSlots, pw, r.pieces, sep, s);
     else if (form == 2)
-        _snprintf_s(line, cap, _TRUNCATE, "%s  %d/%d  pieces %u%s%s", span, r.bonuses, r.bonusSlots, r.pieces,
+        _snprintf_s(line, cap, _TRUNCATE, "%s  %d/%d  %s %u%s%s", span, r.bonuses, r.bonusSlots, pw, r.pieces,
                     sep, s);
     else if (form == 3)
-        _snprintf_s(line, cap, _TRUNCATE, "%d/%d  pieces %u%s%s", r.bonuses, r.bonusSlots, r.pieces, sep, s);
+        _snprintf_s(line, cap, _TRUNCATE, "%d/%d  %s %u%s%s", r.bonuses, r.bonusSlots, pw, r.pieces, sep, s);
     else
         _snprintf_s(line, cap, _TRUNCATE, "%d/%d%s%s", r.bonuses, r.bonusSlots, sep, s);
 }

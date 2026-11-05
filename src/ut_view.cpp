@@ -1226,7 +1226,7 @@ void pristineFacts(UtDepositFacts* f, const UtReplicaCapture& cap, char* why, si
         names[i - 1] = kUtIdStrKey[i];
     }
     f->notPristine =
-        !utPartsPristineKind(parts, names, kUtIdStrCount - 1, f->relicKind, why, whyCap);
+        !utPartsPristineKind(parts, names, kUtIdStrCount - 1, f->relicKind, why, whyCap, f->artifactKind);
 }
 
 // One walk: the object of `id`, its folded record, its stack, whether the record is collectable.
@@ -1249,6 +1249,7 @@ void itemFacts(unsigned id, unsigned ctrlId, const void** item, const void** ctr
 // (as a refused unique has one line).
 bool relicFacts(UtDepositFacts* f, const char* name) {
     f->relicKind = name[0] && liveRelicFind(name) >= 0;
+    f->artifactKind = name[0] && liveIsArtifactRecord(name);
     f->manyKind = g_cfg.formulaCopies && name[0] && liveIsFormula(name);
     return f->relicKind;
 }
@@ -1261,8 +1262,10 @@ void relicRouteFacts(UtDepositFacts* f, const UtReplicaCapture& cap, const char*
     const char* const* table = nullptr;
     int tableN = 0, bonusIndex = -1;
     if (!liveRelicFacts(name, &shards, nullptr, &table, &tableN)) return;
-    f->relicRoute = utRelicRoute(cap.var1, shards, cap.str[kUtIdRelicBonus], table, tableN,
-                                 &bonusIndex);
+    f->relicRoute = shards == 0u   // an artifact (the list's part A): its green slot or its plain one
+                        ? utArtifactRoute(cap.str[kUtIdRelicBonus], table, tableN, &bonusIndex)
+                        : utRelicRoute(cap.var1, shards, cap.str[kUtIdRelicBonus], table, tableN,
+                                       &bonusIndex);
     if (!utRelicRouteAccepted(f->relicRoute)) {
         utRelicRefusalFacts(refusal, refusalCap, cap.var1, shards, cap.str[kUtIdRelicBonus],
                             cap.seed);
@@ -1279,12 +1282,18 @@ void relicRouteFacts(UtDepositFacts* f, const UtReplicaCapture& cap, const char*
 // The take written to the journal before the prototype leaves (G7). A unique's place: today's
 // take of its row. A relic place: the green slot's row whole (journalTakeRow), the red slot's ONE
 // shard (journalTakeShard: `*held` = the row of the shard handed out, which the cursor then
-// holds). A stale relic page is refused and rebuilt. The red take's DEBUG relic line reads the
-// prototype back (protoCapture) before it is handed out.
+// holds). An artifact's place, its plain slot too: its row whole, checked against its table. A
+// stale relic page is refused and rebuilt. The red take's DEBUG relic line reads the prototype
+// back (protoCapture) before it is handed out.
 bool takeOnDisk(unsigned id, const char* record, unsigned long long seq, unsigned long long* held) {
     int slot = 0;
     const bool haveSlot = protoSlotOf(id, &slot);
-    const UtRelicTakeCall call = utRelicTakeCallOf(haveSlot, slot);
+    unsigned shards = 1;
+    const char* const* table = nullptr;
+    int tableN = 0;
+    const bool artifact = haveSlot && slot > 0 &&
+                          liveRelicFacts(record, &shards, nullptr, &table, &tableN) && shards == 0u;
+    const UtRelicTakeCall call = utRelicTakeCallOf(haveSlot, slot, artifact);
     *held = seq;
     if (call == kUtRelicTakeUnique) return storeOnTake(record, seq);
     bool taken = false;
@@ -1293,12 +1302,12 @@ bool takeOnDisk(unsigned id, const char* record, unsigned long long seq, unsigne
         unsigned left = 0;
         taken = storeOnTakeShard(record, seq, &outSeq, &left);
         *held = utRelicTakeHeld(call, taken, seq, outSeq);
-        if (taken) {
+        if (taken && logWants(UT_LOG_DEBUG)) {   // the read-back walk feeds this DEBUG line only
             static UtReplicaCapture cap;   // ~2 KB: kept off the engine's stack
             memset(&cap, 0, sizeof(cap));
             const void* item = nullptr;
             char capName[256], tail[96], line[1024];
-            unsigned st = 0, shards = 0;
+            unsigned st = 0;
             if (protoFindObjects(id, 0, &item, nullptr) && item &&
                 protoCapture(item, &cap, capName, sizeof(capName), &st)) {
                 liveRelicFacts(record, &shards, nullptr, nullptr, nullptr);
@@ -1312,8 +1321,11 @@ bool takeOnDisk(unsigned id, const char* record, unsigned long long seq, unsigne
             }
         }
     } else {
-        taken = storeOnTakeRow(record, seq);
-        if (taken) logD("relic: %s - row %llu taken whole (green slot %d)", record, seq, slot - 1);
+        taken = artifact ? storeOnTakeRow(record, seq, table, tableN) : storeOnTakeRow(record, seq);
+        if (taken && artifact && slot == 1)
+            logD("relic: %s - row %llu taken whole (the artifact's plain slot)", record, seq);
+        else if (taken)
+            logD("relic: %s - row %llu taken whole (green slot %d)", record, seq, slot - 2);
     }
     if (utRelicTakeRebuild(call, taken)) liveMarkDirty();   // a stale relic page: rebuilt
     return taken;
@@ -1345,7 +1357,7 @@ bool viewCapable(const TqCursorItemMove* handler) {
     f.inCatalogue = g_capCat;
     f.stack = g_capStack;
     f.rowsNow = g_capRows;   // one copy per record (no per-frame journal read)
-    if (g_capCat) relicFacts(&f, g_capName);   // a binary search of the list and a walk of the formula group, no journal read
+    if (g_capCat) relicFacts(&f, g_capName);   // a binary search of the list, a walk of the formula and artifact groups, no journal read
     const int v = utDepositCapableVerdict(f);
     // the user could not tell why nothing happened - ONE debug line per cursor id naming
     // the fact that failed (the slot is asked every frame; the line is not).

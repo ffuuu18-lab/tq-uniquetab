@@ -82,9 +82,19 @@ const int kPendNone = 0, kPendIn = 1, kPendOut = 2;
 CRITICAL_SECTION g_cs;
 bool g_csReady = false;
 std::vector<Row>* g_rows = nullptr;
-// FNV-1a 64 of the key -> rows in the collection. Rebuilt after every change, read without
-// allocation (journalRows is called per page build and per owned refresh).
-std::unordered_map<unsigned long long, unsigned int>* g_index = nullptr;
+// FNV-1a 64 of the key -> its rows: how many are in the collection, and where every one of them is
+// (g_at[first .. first + all), file order, pending out included). Rebuilt after every change, read
+// without allocation (journalRows per page build and owned refresh; journalRowsOf per relic record
+// and journalNewest, which no longer scan every row). A reader still compares each row's key.
+struct KeyRows {
+    unsigned int collected = 0;
+    unsigned int first = 0;
+    unsigned int all = 0;
+};
+std::unordered_map<unsigned long long, KeyRows>* g_index = nullptr;
+std::vector<unsigned int>* g_at = nullptr;
+bool g_indexWhole = false;   // false while a rebuild is under way or threw: the readers scan
+bool g_indexBypass = false;  // the tests' oracle (journalIndexBypass): the readers scan
 unsigned int g_collected = 0;
 unsigned long long g_nextSeq = 0;
 char g_dir[MAX_PATH] = {0};
@@ -135,7 +145,10 @@ volatile LONG g_setOpen = 0;
 HANDLE g_event = nullptr;
 volatile LONG g_dirty = 0;
 volatile LONG g_writes = 0;
-volatile LONG g_csvMode = 0;       // GD's latch; TQ default 0 (the ini's export_csv)
+// Moves at every change of the rows' facts (each rebuildIndex), never at a take's touch, which
+// changes only takenAt: the relic page relists on THIS, not on g_writes (journalFactsGen).
+volatile LONG g_factsGen = 0;
+volatile LONG g_csvMode = 0;      // GD's latch; TQ default 0 (the ini's export_csv)
 volatile LONG g_csvArm = 0;
 volatile LONG g_csvWrites = 0;
 volatile LONG g_csvFailLogged = 0;
@@ -158,16 +171,46 @@ unsigned long long nowFileTime() {
     return ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
 }
 
-// Caller holds g_cs.
+// Caller holds g_cs. Two passes: the counts per key, then each key's run of positions in g_at.
 void rebuildIndex() {
+    g_indexWhole = false;
+    InterlockedIncrement(&g_factsGen);
     g_index->clear();
     g_collected = 0;
     for (size_t i = 0; i < g_rows->size(); ++i) {
         const Row& r = (*g_rows)[i];
+        KeyRows& k = (*g_index)[keyHash(r.key.c_str())];
+        ++k.all;
         if (r.pending == kPendOut) continue;
-        ++(*g_index)[keyHash(r.key.c_str())];
+        ++k.collected;
         ++g_collected;
     }
+    unsigned int next = 0;
+    for (std::unordered_map<unsigned long long, KeyRows>::iterator it = g_index->begin();
+         it != g_index->end(); ++it) {
+        it->second.first = next;
+        next += it->second.all;
+        it->second.all = 0;   // counted again as the positions go in
+    }
+    g_at->resize(g_rows->size());
+    for (size_t i = 0; i < g_rows->size(); ++i) {
+        KeyRows& k = (*g_index)[keyHash((*g_rows)[i].key.c_str())];
+        (*g_at)[k.first + k.all++] = (unsigned int)i;
+    }
+    g_indexWhole = true;
+}
+
+// The positions of `key`'s rows, file order, from the index (caller holds g_cs); null = the index
+// is not whole, and the caller scans every row. Either way the caller compares each row's key.
+const unsigned int* rowsAt(const char* key, size_t* n) {
+    *n = 0;
+    if (!g_indexWhole || g_indexBypass) return nullptr;
+    static const unsigned int kNone = 0;
+    std::unordered_map<unsigned long long, KeyRows>::const_iterator it = g_index->find(keyHash(key));
+    if (it == g_index->end()) return &kNone;
+    if ((size_t)it->second.first + it->second.all > g_at->size()) return nullptr;
+    *n = it->second.all;
+    return g_at->data() + it->second.first;
 }
 
 // ---- the atomic write (GD, verbatim) --------------------------------------------------------
@@ -1054,7 +1097,8 @@ bool journalInit(HMODULE selfModule, const char* journalDir) {
     if (g_rows) return true;
     try {
         g_rows = new std::vector<Row>();
-        g_index = new std::unordered_map<unsigned long long, unsigned int>();
+        g_index = new std::unordered_map<unsigned long long, KeyRows>();
+        g_at = new std::vector<unsigned int>();
     } catch (...) {
         return false;
     }
@@ -1120,8 +1164,7 @@ bool journalOpenSet(const char* leaf, unsigned long long saveTime,
     EnterCriticalSection(&g_cs);
     InterlockedExchange(&g_setOpen, 0);
     g_rows->clear();
-    g_index->clear();
-    g_collected = 0;
+    rebuildIndex();   // empty: allocates nothing (the facts generation moves with the set)
     InterlockedExchange(&g_dirty, 0);
     InterlockedExchange(&g_readOnly, 0);
     InterlockedExchange(&g_copyAside, 0);
@@ -1146,7 +1189,7 @@ bool journalOpenSet(const char* leaf, unsigned long long saveTime,
             rebuildIndex();
         } catch (...) {
             g_rows->clear();
-            g_index->clear();
+            rebuildIndex();
             InterlockedExchange(&g_readOnly, 1);
             logE("journal: reading %s threw - READ-ONLY this session", g_path);
         }
@@ -1227,8 +1270,8 @@ unsigned int journalRows(const char* key) {
     const unsigned long long h = keyHash(key);
     unsigned int n = 0;
     EnterCriticalSection(&g_cs);
-    std::unordered_map<unsigned long long, unsigned int>::const_iterator it = g_index->find(h);
-    if (it != g_index->end()) n = it->second;
+    std::unordered_map<unsigned long long, KeyRows>::const_iterator it = g_index->find(h);
+    if (it != g_index->end()) n = it->second.collected;
     LeaveCriticalSection(&g_cs);
     return n;
 }
@@ -1274,7 +1317,11 @@ bool journalNewest(const char* key, UtReplicaCapture* out, unsigned long long* s
     if (!key || !*key || !g_rows || !g_csReady || !journalSetKnown()) return false;
     bool found = false;
     EnterCriticalSection(&g_cs);
-    for (size_t i = g_rows->size(); i-- > 0;) {
+    size_t n = 0;
+    const unsigned int* at = rowsAt(key, &n);   // null: every row, scanned
+    for (size_t j = at ? n : g_rows->size(); j-- > 0;) {
+        const size_t i = at ? at[j] : j;
+        if (i >= g_rows->size()) continue;
         const Row& r = (*g_rows)[i];
         if (r.pending == kPendOut || r.key != key) continue;
         if (out) {
@@ -1470,7 +1517,11 @@ size_t journalRowsOf(const char* key, UtRelicRowFacts* out, size_t cap) {
     if (!key || !*key || !g_rows || !g_csReady || !journalSetKnown()) return 0;
     size_t n = 0;
     EnterCriticalSection(&g_cs);
-    for (size_t i = 0; i < g_rows->size(); ++i) {
+    size_t m = 0;
+    const unsigned int* at = rowsAt(key, &m);   // null: every row, scanned
+    for (size_t j = 0; j < (at ? m : g_rows->size()); ++j) {
+        const size_t i = at ? at[j] : j;
+        if (i >= g_rows->size()) continue;
         const Row& r = (*g_rows)[i];
         if (r.key != key) continue;
         if (out && n < cap) rowFacts(r, &out[n]);
@@ -1480,7 +1531,8 @@ size_t journalRowsOf(const char* key, UtRelicRowFacts* out, size_t cap) {
     return n;
 }
 
-bool journalTakeRow(const char* key, unsigned long long seq, bool* rolledBack) {
+bool journalTakeRow(const char* key, unsigned long long seq, bool* rolledBack, const char* const* table,
+                    int tableN) {
     if (rolledBack) *rolledBack = false;
     if (!key || !journalUsable()) return false;
     bool stale = false, erased = false;
@@ -1494,7 +1546,8 @@ bool journalTakeRow(const char* key, unsigned long long seq, bool* rolledBack) {
                 if (f[i].seq == seq && f[i].pending != kPendOut) me = (int)i;
             if (me < 0) return false;
             bool split = false;
-            const int choice = utRelicRowIsRed(f[(size_t)me])
+            const int choice = tableN >= 0 ? utArtifactTakeChoice(f.data(), (int)f.size(), me, table, tableN)
+                               : utRelicRowIsRed(f[(size_t)me])
                                    ? utRelicShardSource(f.data(), (int)f.size(), &split)
                                    : utRelicGreenChoice(f.data(), (int)f.size(), f[(size_t)me].bonus);
             if (choice != me || split) {   // not the row its slot hands out now: stale
@@ -1642,7 +1695,7 @@ int journalSaveObserved(unsigned long long saveWriteTime) {
                 ++changed;
             }
         }
-        if (changed) rebuildIndex();
+        if (changed || warnIn) rebuildIndex();   // warnIn: `unresolved` is a relic fact too
     } catch (...) {
     }
     LeaveCriticalSection(&g_cs);
@@ -1823,6 +1876,14 @@ void journalSetCsvExport(int mode) {
 const char* journalPath() { return g_path; }
 const char* journalCsvPath() { return g_csvPath; }
 long journalWrites() { return InterlockedCompareExchange(&g_writes, 0, 0); }
+long journalFactsGen() { return InterlockedCompareExchange(&g_factsGen, 0, 0); }
+
+void journalIndexBypass(bool on) {
+    if (!g_csReady) return;
+    EnterCriticalSection(&g_cs);
+    g_indexBypass = on;
+    LeaveCriticalSection(&g_cs);
+}
 
 void journalSetRelicCells(UtRelicCellsFn fn) { g_relicCells = fn; }
 long journalCsvWrites() { return InterlockedCompareExchange(&g_csvWrites, 0, 0); }

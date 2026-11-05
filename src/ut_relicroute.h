@@ -27,8 +27,9 @@ enum UtRelicRoute {
     kUtRelicRouteRed,            // a partial piece: the record's red slot
     kUtRelicRouteGreen,          // a completed item: the green slot of its bonus
     kUtRelicRouteRefuseBonus,    // completed, with a bonus its record's table does not list
-    kUtRelicRouteRefuseShards    // a shard count the record does not allow, or a bonus that does
+    kUtRelicRouteRefuseShards,   // a shard count the record does not allow, or a bonus that does
                                  // not fit the count (a partial with one, a completed without)
+    kUtRelicRoutePlain           // an artifact without a bonus its table lists: its plain slot
 };
 
 const unsigned kUtRelicBonusMax = 260;   // one folded bonus record path with its NUL
@@ -98,7 +99,33 @@ inline int utRelicRoute(unsigned var1, unsigned shards, const char* bonus,
 }
 
 inline bool utRelicRouteAccepted(int route) {
-    return route == kUtRelicRouteRed || route == kUtRelicRouteGreen;
+    return route == kUtRelicRouteRed || route == kUtRelicRouteGreen || route == kUtRelicRoutePlain;
+}
+
+// ---- the artifacts (collect_artifact_bonuses=1) ------------------------------------------------
+// An artifact record (the list's part A, shards 0) has ONE plain slot and one green slot per
+// completion bonus its formulae can give. A crafted artifact keeps its bonus in relicBonus (+0x64,
+// var1 0); one from loot or a quest has none. Nothing is refused: a bonus the table lists goes to
+// its green slot, anything else (no bonus, or one the table does not list - an older row, a game
+// update, another game's formula) to the plain slot, so every stored row is on the page. Every
+// take hands out one WHOLE row, whatever var1 says: an artifact is never split.
+
+// `bonus` is one of the table's entries (any spelling); `index` (may be null) gets it, else -1.
+inline bool utArtifactListed(const char* bonus, const char* const* table, int tableN, int* index) {
+    if (index) *index = -1;
+    if (!bonus || !bonus[0]) return false;
+    for (int i = 0; table && i < tableN; ++i) {
+        if (table[i] && table[i][0] && utRelicFoldSame(table[i], bonus)) {
+            if (index) *index = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+// THE artifact routing: green (that entry) or plain.
+inline int utArtifactRoute(const char* bonus, const char* const* table, int tableN, int* bonusIndex) {
+    return utArtifactListed(bonus, table, tableN, bonusIndex) ? kUtRelicRouteGreen : kUtRelicRoutePlain;
 }
 
 // The refusal words (the deposit gate's utDepositWhyText uses the same).
@@ -106,6 +133,7 @@ inline const char* utRelicRouteWhy(int route) {
     switch (route) {
     case kUtRelicRouteRed: return "red";
     case kUtRelicRouteGreen: return "green";
+    case kUtRelicRoutePlain: return "plain";
     case kUtRelicRouteRefuseBonus: return "a completion bonus its record's table does not list";
     case kUtRelicRouteRefuseShards: return "a shard count its record does not allow";
     default: return "not routed";
@@ -162,6 +190,41 @@ inline unsigned utRelicGreenCount(const UtRelicRowFacts* rows, int n, const char
             utRelicFoldSame(rows[i].bonus, bonus))
             ++c;
     return c;
+}
+
+// An artifact row is the PLAIN slot's when `listed` (bool(const char* folded bonus)) does not
+// take its bonus: no bonus, or one its record's table does not list.
+template <class Listed>
+inline bool utArtifactRowPlain(const UtRelicRowFacts& r, Listed listed) {
+    return !r.bonus[0] || !listed(r.bonus);
+}
+// The plain slot's row a take hands out: the OLDEST plain row not pending out, settled rows before
+// rows pending in (the green slot's rule); whole. -1 = the slot is empty.
+template <class Listed>
+inline int utArtifactPlainChoice(const UtRelicRowFacts* rows, int n, Listed listed) {
+    int best = -1;
+    for (int i = 0; rows && i < n; ++i) {
+        if (rows[i].pending == kUtRelicPendOut || !utArtifactRowPlain(rows[i], listed)) continue;
+        if (best < 0 || utRelicRowFirst(rows[i], rows[best])) best = i;
+    }
+    return best;
+}
+// The plain slot's count: its rows not pending out.
+template <class Listed>
+inline unsigned utArtifactPlainCount(const UtRelicRowFacts* rows, int n, Listed listed) {
+    unsigned c = 0;
+    for (int i = 0; rows && i < n; ++i)
+        if (rows[i].pending != kUtRelicPendOut && utArtifactRowPlain(rows[i], listed)) ++c;
+    return c;
+}
+// The row an artifact take of row `me` must find (the journal's stale-page check): the plain
+// slot's choice for a plain row, the green slot's for a listed one.
+inline int utArtifactTakeChoice(const UtRelicRowFacts* rows, int n, int me, const char* const* table,
+                                int tableN) {
+    if (!rows || me < 0 || me >= n) return -1;
+    auto listed = [&](const char* b) { return utArtifactListed(b, table, tableN, nullptr); };
+    return utArtifactRowPlain(rows[me], listed) ? utArtifactPlainChoice(rows, n, listed)
+                                                : utRelicGreenChoice(rows, n, rows[me].bonus);
 }
 
 // The red slot's count: the SHARDS of the record's partial rows not pending out (a row of var1 0
@@ -229,13 +292,13 @@ inline void utRelicRefusalFacts(char* out, size_t cap, unsigned var1, unsigned s
                 relicBonus ? relicBonus : "", seed);
 }
 
-// A deposit's tail: "red", "green <bonus>", or "refused (<why>)".
+// A deposit's tail: "red", "green <bonus>", "plain", or "refused (<why>)".
 inline void utRelicRouteTail(int route, const char* bonus, char* out, size_t cap) {
     if (!out || !cap) return;
     if (route == kUtRelicRouteGreen)
         _snprintf_s(out, cap, _TRUNCATE, "green %s", bonus ? bonus : "");
-    else if (route == kUtRelicRouteRed)
-        _snprintf_s(out, cap, _TRUNCATE, "red");
+    else if (route == kUtRelicRouteRed || route == kUtRelicRoutePlain)
+        _snprintf_s(out, cap, _TRUNCATE, "%s", utRelicRouteWhy(route));
     else
         _snprintf_s(out, cap, _TRUNCATE, "refused (%s)", utRelicRouteWhy(route));
 }

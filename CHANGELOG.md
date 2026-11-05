@@ -3,6 +3,32 @@
 What changed in each release, newest first. `README.md` says how everything works; this file says
 when it arrived.
 
+## 1.1.2 - 5 November 2026
+
+Requires Titan Quest Anniversary Edition 2.10 (the 32-bit `TQ.exe`) with the x86 build of
+Ultimate ASI Loader, as 1.1.1.
+
+### New
+
+- Artifacts page: one block per artifact like the Relic page - its formula, one slot per completion bonus, and a last slot for artifacts that come without one (`collect_artifact_bonuses`).
+- Arcane Formulae page: only the formulae with no artifact block, while the artifact page is on.
+- Formula tooltips: a reagent in the collection shows yellow with "(Collection)" and counts in "Required Reagents".
+- Relic page: a dark veil over the empty slots, so the ones you hold stand out (`relic_empty_veil`).
+- Relic and artifact pages: OWN can also hide every empty slot (`relic_own_slots`).
+
+All are on by default except `relic_own_slots`; switch one with 0 / 1 in `uniquetab.ini` (`collect_artifact_bonuses` under
+`[general]`, the others under `[advanced]`).
+
+### Fixed
+
+- Taking and depositing in a big collection freezes the game far less (a take about 180 -> 80 ms with 8,000 items stored).
+- `collect_pristine_only=1` no longer refuses crafted artifacts.
+
+### Upgrading
+
+Replace `scripts\uniquetab.asi`. The first start rebuilds every game's files once and keeps your
+settings and your collection.
+
 ## 1.1.1 - 1 November 2026
 
 Requires Titan Quest Anniversary Edition 2.10 (the 32-bit `TQ.exe`) with the x86 build of

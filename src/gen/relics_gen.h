@@ -20,6 +20,18 @@
 //   X <record> <reason, the words of uniq-excluded.txt>   by record, after every block
 // No group, page or uniq-records.txt line takes these records; uniq-excluded.txt does not list
 // the X records.
+//
+// collect_artifact_bonuses=1 adds the artifacts (Class ItemArtifact, the catalogue's own records:
+// buildLists gives them no E line) after the charms as part A: each record a block of its own,
+// tier 0 (its block id is its folder and basename, no ".dbr"), in the same order (expansion,
+// levelRequirement, block id); its R line has shards 0, its artifactBitmap, an empty shard icon
+// and the union of its formulae's bonus tables (catalogue_gen.h collectItems), 0 bonuses for an
+// artifact no formula crafts:
+//   B <n> <block id> A 1 <name> <name>
+//   R <record> 0 0 <artifactBitmap> <empty> <bonus count> <bonus>...
+//   F <formula record>   one per catalogue formula whose artifactName names it, in folded-record
+//                        order (stock AE 2.10: one each; the formula stays a record of its group)
+// Without it the file is byte for byte what it was.
 #pragma once
 
 #include "gen/catalogue_gen.h"
@@ -40,9 +52,12 @@ int relicExpansionOf(const std::string& key);
 
 struct RelicListCounts {
     std::size_t relicBlocks = 0, charmBlocks = 0, oneLineBlocks = 0, rows = 0, bonuses = 0, left = 0;
+    std::size_t artifactBlocks = 0, artifactRows = 0, artifactBonuses = 0;   // part A (rows: R and C only)
+    std::size_t artifactFormulae = 0;                                         // part A's F lines
 };
 
-// uniq-relics.txt from the accepted records and the left-out ones (sorted by record).
+// uniq-relics.txt from the accepted records (the artifacts among them, Class ItemArtifact) and
+// the left-out ones (sorted by record).
 std::string relicsListText(const std::vector<RelicItem>& relics, const std::vector<ExcludedItem>& left,
                            RelicListCounts* counts = nullptr);
 

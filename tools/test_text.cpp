@@ -76,6 +76,17 @@ static void testBuiltins() {
               !strcmp(utt::utTextBuiltinPlain(utt::kTextTooltipNo), "Not in your collection") &&
               !strcmp(utt::utTextBuiltinPlain(utt::kTextTooltipRoll), " (another roll)"),
           "the rollover words: the tooltip's compiled ones");
+    {
+        utt::UtTextKind rk = utt::kTextCaption;
+        std::string rarg;
+        std::size_t rmin = 0, rmax = 0;
+        utt::utTextLimits(utt::kTextTooltipReagent, &rmin, &rmax);
+        check(utt::utTextParseKey("Tooltip.Reagent", &rk, &rarg) && rk == utt::kTextTooltipReagent &&
+                  utt::utTextKeyName(rk, "") == "tooltip.reagent" &&
+                  !strcmp(utt::utTextBuiltinPlain(rk), "(Collection)") &&
+                  utt::utTextFontOf(rk) == utt::kFontTooltip && rmin == 1 && rmax == 96,
+              "tooltip.reagent: a formula's reagent the collection holds, \"(Collection)\", 1..96, the game's font");
+    }
     check(!strcmp(utt::utStyleDefaultText("font.caption"), "fonts/albertus mt light.fnt"), "the caption font documented");
     // the [tab] sizes and colours the pad reads (unset = the design's)
     utt::UtTextStyle st;

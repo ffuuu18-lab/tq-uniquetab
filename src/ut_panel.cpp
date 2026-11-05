@@ -1759,9 +1759,11 @@ void btnResolve(const BtnFile* f) {
     const utt::UtTextPick roll = utt::utTextResolve(c, utt::kTextTooltipRoll, "");
     tooltipTextRefresh(yes.text.c_str(), no.text.c_str(), roll.text.c_str(), fromFile ? f->file.tooltipClass[0] : -1,
                        fromFile ? f->file.tooltipClass[1] : -1);
+    const utt::UtTextPick reagent = utt::utTextResolve(c, utt::kTextTooltipReagent, "");
+    tooltipReagentWordsRefresh(reagent.text.c_str());
     // what the resolve passed over (a letter above U+FFFF, a value the key does not take): one WARN
     if (!fskip.empty()) pad.skipped.push_back(fskip);
-    for (const utt::UtTextPick* p : {&unk, &yes, &no, &roll})
+    for (const utt::UtTextPick* p : {&unk, &yes, &no, &roll, &reagent})
         if (!p->skipped.empty()) pad.skipped.push_back(p->skipped);
     const std::string warn = utb::utbSkippedWarn(pad.skipped);
     if (!warn.empty()) logW("buttons: %s", warn.c_str());
@@ -2639,6 +2641,7 @@ bool drawPad(TqCanvas* c) {
         r.page = relicPages > 0 ? relicPage + 1 : 0;
         r.pages = relicPages;
         liveRelicTotals(&r.bonuses, &r.bonusSlots, &r.pieces);
+        r.artifacts = liveIsArtifactPage(liveShownGroup());
         char found[40], brief[24];
         searchLabel(found, sizeof(found), brief, sizeof(brief));
         r.found = found;
@@ -3923,10 +3926,16 @@ const char* grayRelicIcon(int i, const char* rec) {
     return utRelicGrayIcon(list->rows[(size_t)r], slot);
 }
 
+// The pages whose empty slots are gray at every owned_marks (ut_reliclook.h utRelicLook): the relic
+// page and the artifact page. Not g_relicPage, which is the relic AREA's page alone: the artifact
+// page lays out on the collection's grid, and gating on it left the artifact page at owned_marks
+// 0..2 lending the last relic page's copies by index (a 32 x 32 relic gray on a 64 x 64 artifact).
+bool grayEveryMarks() { return liveIsRelicGroup(liveShownGroup()); }
+
 // Begin of a routed page draw: the gray texture of every prototype, when the set changed.
 void grayBegin(int n, unsigned gen) {
     g_grayLent = g_grayWanted = 0;
-    if ((g_cfg.ownedMarks != 3 && !g_relicPage) || g_grayOff) return;   // a relic page is always gray
+    if ((g_cfg.ownedMarks != 3 && !grayEveryMarks()) || g_grayOff) return;   // a relic page is always gray
     if (gen == g_grayGen && n == g_grayCount) return;
     if (!g_graySource) {   // added before the first world only (panelGrayPrepare)
         grayFail("the gray folder was not added to the engine's file system before the first world "
@@ -4019,7 +4028,7 @@ void grayLend(int token) {
 // End of a routed page draw: the route's line once, and the readiness rule (5 s after the first
 // WANTED lend of a world with no size answered = the engine does not read the folder: the veil).
 void grayEnd() {
-    if ((g_cfg.ownedMarks != 3 && !g_relicPage) || g_grayOff) return;
+    if ((g_cfg.ownedMarks != 3 && !grayEveryMarks()) || g_grayOff) return;
     if (g_grayLent > 0 && !g_graySaid) {
         g_graySaid = true;
         logI("panel: uncollected records drawn in gray - the engine's own icon draw (TQ.exe+0x10ADE0, "
@@ -4820,6 +4829,26 @@ void drawFormulaCounts(TqCanvas* c) {
     }
 }
 
+// relic_empty_veil: the owned_marks=1 veil over every empty (gray) slot of the relic page, at every
+// owned_marks. The same source as the gray lend (ownedGrayWanted: the hovered slot shows bright
+// and unveiled, nothing while the journal set is unknown); under the have-ticks (drawMarks) and the
+// counts. Nothing is allocated.
+void drawRelicVeils(TqCanvas* c) {
+    if (!g_cfg.relicEmptyVeil) return;
+    UtRectF gr;
+    if (!panelSlotGrid(&gr)) return;
+    const int n = protoCount();
+    for (int i = 0; i < n; ++i) {
+        int col = 0, row = 0, w = 0, h = 0;
+        if (!utRelicEmptyVeiled(g_cfg.relicEmptyVeil, ownedRelicSlot(i), ownedGrayWanted(i)) ||
+            !protoSlotAt(i, &col, &row, &w, &h) || w < 1 || h < 1)
+            continue;
+        UtRectF in;   // the veil stays inside the caravan window
+        if (utRectClip(utSlotDrawnRect(gr, shownCols(), shownRows(), col, row, w, h), g_frame, &in))
+            fillRect(c, in.x, in.y, in.w, in.h, kUnownedDim);
+    }
+}
+
 void drawRelicCounts(TqCanvas* c) {
     const int n = liveRelicPlaceCount();
     if (n <= 0) return;
@@ -4835,7 +4864,7 @@ void drawRelicCounts(TqCanvas* c) {
         UtRelicPlaceState st;
         if (!liveRelicPlaceAt(i, &pl, &st) || pl.kind == kUtRelicSlotDead || st.empty || st.count < 2u)
             continue;
-        const UtRectF r = utSlotDrawnRect(gr, shownCols(), shownRows(), pl.col, pl.line, 1, 1);
+        const UtRectF r = utSlotDrawnRect(gr, shownCols(), shownRows(), pl.col, pl.line, pl.size, pl.size);
         if (r.x < g_frame.x || r.y < g_frame.y || r.x + r.w > g_frame.x + g_frame.w ||
             r.y + r.h > g_frame.y + g_frame.h)
             continue;   // inside the caravan window only
@@ -4894,10 +4923,14 @@ void relicBackTake(int cols, int rows) {
         if (liveRelicPlaceAt(i, &g_relicGroundPlaces[k], &st)) ++k;
     }
     utRelicOccupancy(g_relicGroundPlaces, k, cols, rows, g_relicOcc);
-    g_relicRunN = utRelicGroundRuns(g_relicOcc, cols, rows, g_relicRuns,
-                                    (int)(sizeof(g_relicRuns) / sizeof(g_relicRuns[0])));
     const UtRelicList* l = liveRelicList();
     g_relicPanelN = l ? utRelicPanelsOf(*l, g_relicGroundPlaces, k, first, g_relicPanels, kRelicPanelMax) : 0;
+    for (int i = 0, fn = liveRelicFormulaCount(); l && i < fn; ++i) {   // the artifact page's formulae
+        UtRelicFormulaPlace fp;
+        if (liveRelicFormulaAt(i, &fp)) utRelicFormulaCell(*l, fp, cols, rows, g_relicOcc, g_relicPanels, g_relicPanelN);
+    }
+    g_relicRunN = utRelicGroundRuns(g_relicOcc, cols, rows, g_relicRuns,
+                                    (int)(sizeof(g_relicRuns) / sizeof(g_relicRuns[0])));
 }
 
 void drawRelicBack(TqCanvas* c, const UtRectF& gr) {
@@ -4990,6 +5023,7 @@ void pageDrawVeils(TqCanvas* c, int pass) {
         }
     }
     const int markStyle = ownedMarksBegin(g_geo, g_cursorOk, g_cursorX, g_cursorY);
+    drawRelicVeils(c);   // the relic page's empty slots: under the have-ticks and the counts
     if (markStyle) drawMarks(c, markStyle);
     drawRelicCounts(c);   // the relic page's counts: over the items, under the tooltip
     drawRelicSplit(c);

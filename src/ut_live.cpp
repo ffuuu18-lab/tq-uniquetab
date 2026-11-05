@@ -33,7 +33,7 @@
 #include "ut_retire.h"
 #include "ut_search.h"   // the pure count / highlight / mark rules
 #include "ut_relicpage.h"   // the relic and charm page (pure)
-#include "ut_rescue.h"      // journalRowsOf / journalWrites (the relic page's facts)
+#include "ut_rescue.h"      // journalRowsOf / journalFactsGen (the relic page's facts)
 #include "ut_proto.h"       // protoSlotKindAt (the relic page's highlight)
 
 namespace ut {
@@ -51,9 +51,35 @@ struct Group {
     int ownedCount = 0;
     std::vector<unsigned char> match;   // the search's flags (sized once, at init)
     int hitCount = 0;                   // the matches that pass OWN, while a query stands
+    std::vector<unsigned char> here;    // the page's records while `away` > 0: the formulae the
+                                        // artifact page shows are left out (formulaPageSet)
+    std::vector<unsigned char> ownedHere;   // here and owned: OWN on such a page
+    int away = 0, ownedHereCount = 0;
 };
 
 std::vector<Group>* g_groups = nullptr;
+
+// A page's filter of its group: OWN's owned flags, and on a page whose records another page shows
+// (Group::away: the formulae in the artifact page's blocks) those left out. Null = every record.
+const unsigned char* pageMaskOf(const Group& g, bool own) {
+    if (g.away <= 0) return own ? g.owned.data() : nullptr;
+    return own ? g.ownedHere.data() : g.here.data();
+}
+// The records that filter keeps.
+int pageCountOf(const Group& g, bool own) {
+    if (g.away <= 0) return own ? g.ownedCount : (int)g.records.size();
+    return own ? g.ownedHereCount : (int)g.records.size() - g.away;
+}
+// ownedHere from here and owned (an owned-set refresh, a union's fill; never per frame).
+void ownedHereFill(Group& g) {
+    g.ownedHereCount = 0;
+    if (g.away <= 0) return;
+    g.ownedHere.assign(g.records.size(), 0);
+    for (size_t k = 0; k < g.records.size() && k < g.owned.size() && k < g.here.size(); ++k) {
+        g.ownedHere[k] = (unsigned char)(g.owned[k] && g.here[k] ? 1 : 0);
+        g.ownedHereCount += g.ownedHere[k];
+    }
+}
 
 // The cells every group is packed on: the derived grid's 16 x 15 (the engine's Transfer sack), or
 // the cells of the player's grid_ rectangle while it is in force (liveSetGrid, game thread).
@@ -168,6 +194,7 @@ void unionOwnedFill(UnionTable* u) {
             count += g.ownedCount;
         }
         v.ownedCount = count;
+        ownedHereFill(v);
     }
 }
 
@@ -265,12 +292,13 @@ void searchRecompute() {
     for (size_t gi = 0; gi < g_groups->size(); ++gi) {
         Group& g = (*g_groups)[gi];
         const int n = (int)g.records.size();
-        g.hitCount = g_searchOn ? utSearchCount(g.owned.data(), g.match.data(), n, own) : 0;
+        const unsigned char* mask = pageMaskOf(g, own);   // OWN, and the formulae shown elsewhere
+        g.hitCount = g_searchOn ? utSearchCount(mask, g.match.data(), n, mask != nullptr) : 0;
         if (!g_searchOn) continue;
         found += g.hitCount;
         if (g.hitCount > 0) ++groups;
         const bool indexed = gi < 32 && (g_searchIndexed & (1u << (unsigned)gi)) != 0;
-        if (gi < 32 && utSearchGroupMarked(g.owned.data(), g.match.data(), n, own, indexed))
+        if (gi < 32 && utSearchGroupMarked(mask, g.match.data(), n, mask != nullptr, indexed))
             marks |= 1u << (unsigned)gi;
     }
     relicSearchCount(&marks, &found, &groups);   // the relic page: its green slots' matches
@@ -329,23 +357,37 @@ static void readGeometry(HMODULE selfModule, bool baseIfMissing = true) {
 // ---- the relic and charm page -----------------------------------------------------------------
 // uniq-relics.txt, read with the group table. The group whose G line id is "relics" shows it: its
 // window starts at a BLOCK (g_wantPage), the wheel moves one block, < > a fixed page. The places'
-// states (counts, the row each prototype is built from) are taken from the journal ONCE per journal
-// change (journalWrites moved) when the relic page is built, never per frame. A table of a game
-// left behind is never freed (as the group tables): an input or draw path may still hold it.
+// states (counts, the row each prototype is built from) are taken from the journal ONCE per change
+// of its rows (journalFactsGen moved; a take's touch does not move it) when the relic page is
+// built, never per frame. A table of a game left behind is never freed (as the group tables): an
+// input or draw path may still hold it.
+// collect_artifact_bonuses=1: the same list holds the artifacts (part A), shown by the group whose
+// G line id is "artifact" (no E line then) on a layout of their own, 2 x 2 places
+// (artLayout); the relic page lays out parts R and C. One set of states serves both pages.
 namespace {
 struct RelicTables {
     UtRelicList list;
-    UtRelicLayout layout;
+    UtRelicLayout layout;                   // the relic page: parts R and C
+    UtRelicLayout artLayout;                // the artifact page: part A
+    std::vector<unsigned char> keepR, keepA;   // per block: laid out on each page (part and OWN)
     std::vector<int> stateFirst;            // per row: its first state (red, then each bonus)
     std::vector<UtRelicPlaceState> state;   // per (row, slot)
     std::vector<const char*> bonusPtr;      // the table's strings, per (row, slot); null on red
-    long listedWrites = -1;                 // journalWrites() of the last relist
+    long listedFacts = -1;                  // journalFactsGen() of the last relist
     std::vector<unsigned char> held;        // per block: some slot holds something (OWN)
     bool ownLaid = false;                   // the layout in force is OWN's (the held blocks only)
+    std::vector<unsigned char> slotHeld;    // per state: the slot holds something (relic_own_slots)
+    bool slotsLaid = false;                 // the layout in force shows only those slots
     bool byName = false;                    // the blocks' order in force (relic_sort)
     std::vector<unsigned char> match;       // per state: the search's match (green slots only)
-    int bonusesHeld = 0;                    // green slots holding at least one item
+    int bonusesHeld = 0;                    // green slots holding at least one item (parts R, C)
     unsigned pieces = 0;                    // the shards in every red slot
+    int artSlots = 0, artHeld = 0;          // the artifacts' green slots, and those holding one
+    unsigned artPlain = 0;                  // the rows in every plain slot
+    std::vector<unsigned> formulaRows;      // per list formula: its rows not pending out
+    std::vector<unsigned char> formulaHeld; // per list formula: stored (relic_own_slots)
+    std::vector<int> formulaK;              // per list formula: its record on the Arcane Formulae
+                                            // page (the search's match), -1 = none
 };
 RelicTables* g_relic = nullptr;
 int g_relicGroup = -1;                      // the "relics" G line's group, -1 = none
@@ -353,28 +395,70 @@ UtRelicPlace g_relicShown[kUtProtoMax];     // the shown window's places (dead c
 int g_relicShownN = 0;
 int g_relicShownEnd = 0;                    // one past the shown window's last block
 const char* const kRelicGroupId = "relics";
+int g_artGroup = -1;                        // the "artifact" G line's group, -1 = none
+const char* const kArtGroupId = "artifact";
+int g_bluGroup = -1;                        // the "blueprint" G line's group, -1 = none
+const char* const kBluGroupId = "blueprint";
+UtRelicFormulaPlace g_relicFormulae[kUtProtoMax];   // the artifact window's formula cells
+int g_relicFormulaN = 0;
+
+// The artifact page is in force: the list has artifact blocks and the "artifact" group is there.
+bool artPage(const RelicTables* t) { return t && t->list.artifactBlocks > 0 && g_artGroup >= 0; }
+
+// The artifact page's formula cells in the blocks it lays out (`keep`; under relic_own_slots the
+// stored ones only), and in `hits` those whose record matches the query on the Arcane Formulae page
+// (its capture: a formula cell has no text of its own). The plain slot is in no count.
+int relicFormulaCells(const RelicTables* t, const std::vector<unsigned char>& keep, int* hits) {
+    int cells = 0;
+    if (hits) *hits = 0;
+    const Group* b = g_groups && g_bluGroup >= 0 ? &(*g_groups)[(size_t)g_bluGroup] : nullptr;
+    for (const UtRelicRow& row : t->list.rows) {
+        if (row.formulae.empty() || row.block < 0 || (size_t)row.block >= keep.size() || !keep[(size_t)row.block])
+            continue;
+        for (size_t f = 0; f < row.formulae.size(); ++f) {
+            const size_t fi = (size_t)row.formulaFirst + f;
+            if (t->slotsLaid && (fi >= t->formulaHeld.size() || !t->formulaHeld[fi])) continue;
+            ++cells;
+            const int k = fi < t->formulaK.size() ? t->formulaK[fi] : -1;
+            if (hits && b && k >= 0 && (size_t)k < b->match.size() && b->match[(size_t)k]) ++*hits;
+        }
+    }
+    return cells;
+}
 
 // The relic part of the search's counts: the green slots whose text holds the query, in the blocks
-// the page lays out; the relic group's button is marked once the relic part is fully indexed.
-void relicSearchCount(unsigned* marks, int* found, int* groups) {
-    RelicTables* t = g_relic;
-    if (!t || !g_groups || g_relicGroup < 0 || g_relicGroup >= (int)g_groups->size()) return;
-    Group& g = (*g_groups)[(size_t)g_relicGroup];
-    g.hitCount = g_searchOn ? utRelicSearchFound(t->list, t->stateFirst.data(), t->match.data(),
-                                                 t->ownLaid ? t->held.data() : nullptr)
-                            : 0;
+// each page lays out (and of them, under relic_own_slots, the slots shown), on the artifact page its
+// formula cells too; a page's button is marked once the relic part is fully indexed.
+void relicSearchCountOf(RelicTables* t, int group, const std::vector<unsigned char>& keep,
+                        unsigned* marks, int* found, int* groups) {
+    if (group < 0 || group >= (int)g_groups->size()) return;
+    Group& g = (*g_groups)[(size_t)group];
+    int formulaHits = 0;
+    if (g_searchOn && group == g_artGroup && !keep.empty()) relicFormulaCells(t, keep, &formulaHits);
+    g.hitCount = g_searchOn && !keep.empty()
+                     ? utRelicSearchFound(t->list, t->stateFirst.data(), t->match.data(), keep.data(),
+                                          t->slotsLaid ? t->slotHeld.data() : nullptr) + formulaHits
+                     : 0;
     if (!g_searchOn) return;
     *found += g.hitCount;
     if (g.hitCount > 0) ++*groups;
-    const unsigned bit = g_relicGroup < 32 ? 1u << (unsigned)g_relicGroup : 0u;
+    const unsigned bit = group < 32 ? 1u << (unsigned)group : 0u;
     if (bit && (g_searchIndexed & bit) && g.hitCount > 0) *marks |= bit;
+}
+void relicSearchCount(unsigned* marks, int* found, int* groups) {
+    RelicTables* t = g_relic;
+    if (!t || !g_groups) return;
+    relicSearchCountOf(t, g_relicGroup, t->keepR, marks, found, groups);
+    if (artPage(t)) relicSearchCountOf(t, g_artGroup, t->keepA, marks, found, groups);
 }
 
 // OWN on the relic page: in force as on the unique pages (asked for, the owned set known), and the
 // journal's facts are known (they decide which blocks hold something).
 bool relicOwnActive(const RelicTables* t) {
-    return g_ownedOnly && g_ownKnown && t && t->listedWrites >= 0 && journalSetKnown();
+    return g_ownedOnly && g_ownKnown && t && t->listedFacts >= 0 && journalSetKnown();
 }
+// relic_own_slots under OWN: only the slots that hold something (from the next page build)
+bool relicOwnSlots(const RelicTables* t) { return relicOwnActive(t) && g_cfg.relicOwnSlots != 0; }
 void relicRelayout();
 
 // the relic area's cells and the two gap settings (liveSetRelicGeometry); until the panel sets
@@ -389,6 +473,12 @@ UtRelicGeometry relicGeometry() {
     g.cols = g_hostCols;
     g.rows = g_hostRows;
     g.nameLine = g_cfg.relicNames ? 1 : 0;
+    return g;
+}
+// the artifact page's: the same area and gaps, places of 2 x 2 cells
+UtRelicGeometry artGeometry() {
+    UtRelicGeometry g = relicGeometry();
+    g.slot = 2;
     return g;
 }
 
@@ -435,26 +525,50 @@ void readRelics(HMODULE selfModule) {
         return;
     }
     t->held.assign(t->list.blocks.size(), 0);
+    t->slotHeld.assign(t->state.size(), 0);
     t->match.assign(t->state.size(), 0);
+    t->keepR.assign(t->list.blocks.size(), 0);
+    t->keepA.assign(t->list.blocks.size(), 0);
+    t->formulaRows.assign((size_t)t->list.formulae, 0u);
+    t->formulaHeld.assign((size_t)t->list.formulae, 0);
+    t->formulaK.assign((size_t)t->list.formulae, -1);
+    utRelicPartKeep(t->list, false, nullptr, t->keepR.data());
+    utRelicPartKeep(t->list, true, nullptr, t->keepA.data());
+    for (const UtRelicRow& row : t->list.rows)
+        if (row.artifact) t->artSlots += (int)row.bonuses.size();
+    if (!utRelicLayoutBuild(t->list, relicGeometry(), &t->layout, t->keepR.data())) {
+        logW("live: the relic page does not fit the area - no relic page");
+        delete t;
+        return;
+    }
+    // the artifact page only with artifact blocks: without them nothing here changes (an area too
+    // small for 2 x 2 places leaves that page empty, one WARN)
+    if (t->list.artifactBlocks > 0 &&
+        !utRelicLayoutBuild(t->list, artGeometry(), &t->artLayout, t->keepA.data()))
+        logW("live: the artifact page does not fit the area - it shows no block");
     g_relic = t;
     const UtRelicGeometry used = relicGeometry();
     logI("live: uniq-relics.txt - %zu blocks (%d relic, %d charm), %zu records, %d bonus slots, "
          "%d fixed page(s) on %d x %d cells", t->list.blocks.size(), t->list.relicBlocks,
          t->list.charmBlocks, t->list.rows.size(), t->list.bonusSlots,
          utRelicPageCount(t->layout), used.cols, used.rows);
+    if (t->list.artifactBlocks > 0)
+        logI("live: collect_artifact_bonuses=1 - %d artifact blocks, %d bonus slots, %d formula cells, "
+             "%d fixed page(s) of 2 x 2 places", t->list.artifactBlocks, t->artSlots, t->list.formulae,
+             utRelicPageCount(t->artLayout));
 }
 
 // The facts of every relic record, once per journal change (game thread, the page build).
 void relicRelist() {
     RelicTables* t = g_relic;
     if (!t) return;
-    const long w = journalWrites();
-    if (!utRelicRelistDue(t->listedWrites, w)) return;
-    t->listedWrites = w;
+    const long w = journalFactsGen();
+    if (!utRelicRelistDue(t->listedFacts, w)) return;
+    t->listedFacts = w;
     static UtRelicRowFacts facts[512];
     char key[256];
-    int held = 0;
-    unsigned pieces = 0;
+    int held = 0, artHeld = 0;
+    unsigned pieces = 0, plain = 0;
     for (size_t r = 0; r < t->list.rows.size(); ++r) {
         const UtRelicRow& row = t->list.rows[r];
         size_t n = 0;
@@ -470,25 +584,51 @@ void relicRelist() {
         for (int s = 0; s <= (int)row.bonuses.size(); ++s) {
             UtRelicPlaceState& st = t->state[(size_t)(first + s)];
             utRelicPlaceState(row, s, got ? facts : nullptr, got, &st);
-            if (s > 0 && st.count > 0u) ++held;
-            if (s == 0) pieces += st.count;
+            if (s > 0 && st.count > 0u) ++(row.artifact ? artHeld : held);
+            if (s == 0) (row.artifact ? plain : pieces) += st.count;
+        }
+        for (size_t f = 0; f < row.formulaFolded.size(); ++f) {   // a formula cell: its rows, as a unique's
+            size_t fn = 0;
+            if (utJournalKey(row.formulaFolded[f].c_str(), key, sizeof(key))) fn = journalRowsOf(key, facts, 512);
+            unsigned c = 0;
+            for (size_t i = 0; i < fn && i < 512; ++i) c += facts[i].pending != kUtRelicPendOut ? 1u : 0u;
+            t->formulaRows[(size_t)row.formulaFirst + f] = c;
         }
     }
     t->bonusesHeld = held;
     t->pieces = pieces;
-    // OWN's blocks: laid out again only when the set of held blocks moved (once per journal change)
-    std::vector<unsigned char> keep(t->held.size(), 0);
-    if (!keep.empty()) utRelicBlocksHeld(t->list, t->stateFirst.data(), t->state.data(), keep.data());
-    if (keep != t->held) {
-        t->held.swap(keep);
+    t->artHeld = artHeld;
+    t->artPlain = plain;
+    // OWN's blocks: laid out again only when the set of held blocks moved (once per journal change);
+    // under relic_own_slots also when the set of held slots moved
+    std::vector<unsigned char> keep(t->held.size(), 0), slots(t->slotHeld.size(), 0);
+    std::vector<unsigned char> formulae(t->formulaHeld.size(), 0);
+    if (!keep.empty())
+        utRelicBlocksHeld(t->list, t->stateFirst.data(), t->state.data(), keep.data(),
+                          t->formulaRows.empty() ? nullptr : t->formulaRows.data());
+    if (!slots.empty()) utRelicSlotsHeld(t->state.data(), (int)slots.size(), slots.data());
+    for (size_t f = 0; f < formulae.size(); ++f) formulae[f] = (unsigned char)(t->formulaRows[f] > 0u ? 1 : 0);
+    const bool blocksMoved = keep != t->held;
+    const bool slotsMoved = slots != t->slotHeld || formulae != t->formulaHeld;
+    if (blocksMoved) t->held.swap(keep);
+    if (slotsMoved) {
+        t->slotHeld.swap(slots);
+        t->formulaHeld.swap(formulae);
+    }
+    if (blocksMoved || (slotsMoved && t->slotsLaid)) {
         if (t->ownLaid) relicRelayout();
         if (g_searchOn) searchRecompute();
     }
-    logD("live: relic facts taken (journal write %ld): %d of %d bonus slots held, %u pieces", w,
+    logD("live: relic facts taken (journal facts %ld): %d of %d bonus slots held, %u pieces", w,
          held, t->list.bonusSlots, pieces);
 }
 
-bool relicShown(int group) { return g_relic && group >= 0 && group == g_relicGroup; }
+// The block page `group` shows: the relic page, or the artifact page.
+bool artShown(int group) { return artPage(g_relic) && group >= 0 && group == g_artGroup; }
+bool relicShown(int group) { return g_relic && group >= 0 && (group == g_relicGroup || artShown(group)); }
+const UtRelicLayout& relicLayoutOf(const RelicTables* t, int group) {
+    return artShown(group) ? t->artLayout : t->layout;
+}
 
 // the CSV's relic cells (ut_rescue's csvWrite, any thread: the table of the game in force)
 bool relicCells(const char* key, int* tier, unsigned* shards) {
@@ -502,24 +642,63 @@ bool relicCells(const char* key, int* tier, unsigned* shards) {
 
 void relicFindGroup() {
     g_relicGroup = -1;
+    g_artGroup = -1;
+    if (!g_groups) return;
+    for (size_t i = 0; i < g_groups->size(); ++i) {
+        if ((*g_groups)[i].id == kRelicGroupId) g_relicGroup = (int)i;
+        if ((*g_groups)[i].id == kArtGroupId) g_artGroup = (int)i;
+    }
+    if (g_relic && g_relic->list.artifactBlocks > 0 && g_artGroup < 0)
+        logW("live: uniq-relics.txt has artifact blocks but no group is \"%s\" - no artifact page "
+             "(collect_artifact_bonuses=0 puts the artifacts back on their group page)", kArtGroupId);
+}
+
+// While the artifact page is in force its blocks show their formulae, so the Arcane Formulae page
+// (the group id "blueprint") leaves out every formula the list joins to an artifact and keeps the
+// others (stock: the 3 Lupine Necklace Designs). With no group showing the artifact page it shows
+// every formula, so no formula is ever on no page. formulaK: each formula's record there (its
+// search match).
+void formulaPageSet() {
+    RelicTables* t = g_relic;
+    g_bluGroup = -1;
     if (!g_groups) return;
     for (size_t i = 0; i < g_groups->size(); ++i)
-        if ((*g_groups)[i].id == kRelicGroupId) g_relicGroup = (int)i;
+        if ((*g_groups)[i].id == kBluGroupId) g_bluGroup = (int)i;
+    if (!t || t->list.formulae <= 0 || g_bluGroup < 0) return;
+    Group& g = (*g_groups)[(size_t)g_bluGroup];
+    for (const UtRelicRow& row : t->list.rows)
+        for (size_t f = 0; f < row.formulaFolded.size(); ++f)
+            for (size_t k = 0; k < g.records.size(); ++k)
+                if (_stricmp(g.records[k].c_str(), row.formulaFolded[f].c_str()) == 0) {
+                    t->formulaK[(size_t)row.formulaFirst + f] = (int)k;
+                    break;
+                }
+    if (!artPage(t)) return;
+    g.here.assign(g.records.size(), 1);
+    g.away = 0;
+    for (int k : t->formulaK)
+        if (k >= 0 && g.here[(size_t)k]) {
+            g.here[(size_t)k] = 0;
+            ++g.away;
+        }
+    ownedHereFill(g);
+    logI("live: the artifact page shows %d formula(e) in its blocks - the %s page keeps the other %d",
+         g.away, g.label.c_str(), (int)g.records.size() - g.away);
 }
 
 // The wheel / page step on the relic page: g_wantPage is the window's first block.
-bool relicStep(int dir, bool page) {
+bool relicStep(int group, int dir, bool page) {
     if (!g_relic) return false;
     const int from = (int)InterlockedCompareExchange(&g_wantPage, 0, 0);
-    const UtRelicLayout& y = g_relic->layout;
+    const UtRelicLayout& y = relicLayoutOf(g_relic, group);
     const int at = utRelicClampFirst(y, from);
     const int to = page ? utRelicPageStep(y, at, dir) : utRelicWheelStep(y, at, dir);
     if (to == from) return false;
     InterlockedExchange(&g_wantPage, to);
     noteNav(!page);
     markDirty();
-    logD("live: relic page - %s, blocks from %d (page %d of %d)", page ? "page step" : "wheel",
-         to + 1, utRelicPageOf(y, to) + 1, utRelicPageCount(y));
+    logD("live: %s page - %s, blocks from %d (page %d of %d)", artShown(group) ? "artifact" : "relic",
+         page ? "page step" : "wheel", to + 1, utRelicPageOf(y, to) + 1, utRelicPageCount(y));
     return true;
 }
 }  // namespace
@@ -589,6 +768,7 @@ bool liveInit(HMODULE selfModule) {
         g_groups = gs;
         readRelics(selfModule);
         relicFindGroup();
+        formulaPageSet();
         journalSetRelicCells(&relicCells);
         g_ownedOnly = g_cfg.ownedOnly != 0;   // the start state (configReload ran before)
         applyStateLocked();
@@ -612,17 +792,31 @@ size_t liveRetiredBytes() { return (size_t)(unsigned long)InterlockedCompareExch
 // its first visible item (GD's utRowKeep over the slot columns). Game thread; allocates only on a
 // change.
 namespace {
-// the relic layout on the grid in force (game thread); the window's first block is kept
+// the relic layout on the grid in force (game thread); the window's first block is kept. The
+// artifact page's with it, on the same area at 2 x 2 places.
 void relicRelayout() {
     RelicTables* t = g_relic;
     if (!t) return;
-    const bool own = relicOwnActive(t);
-    UtRelicLayout y;
-    if (!utRelicLayoutBuild(t->list, relicGeometry(), &y, own ? t->held.data() : nullptr)) return;
+    const bool own = relicOwnActive(t), slots = relicOwnSlots(t);
+    std::vector<unsigned char> keepR(t->list.blocks.size()), keepA(t->list.blocks.size());
+    if (!keepR.empty()) {
+        utRelicPartKeep(t->list, false, own ? t->held.data() : nullptr, keepR.data());
+        utRelicPartKeep(t->list, true, own ? t->held.data() : nullptr, keepA.data());
+    }
+    const unsigned char* shown = slots ? t->slotHeld.data() : nullptr;
+    const unsigned char* formulae = slots && !t->formulaHeld.empty() ? t->formulaHeld.data() : nullptr;
+    UtRelicLayout y, a;
+    if (!utRelicLayoutBuild(t->list, relicGeometry(), &y, keepR.data(), shown)) return;
+    if (t->list.artifactBlocks > 0 &&
+        utRelicLayoutBuild(t->list, artGeometry(), &a, keepA.data(), shown, formulae))
+        t->artLayout = a;
     t->layout = y;
-    if (own != t->ownLaid) {
+    t->keepR.swap(keepR);
+    t->keepA.swap(keepA);
+    if (own != t->ownLaid || slots != t->slotsLaid) {
         t->ownLaid = own;
-        if (g_searchOn) searchRecompute();   // the found count follows the blocks shown
+        t->slotsLaid = slots;
+        if (g_searchOn) searchRecompute();   // the found count follows the blocks (slots) shown
     }
 }
 
@@ -633,7 +827,7 @@ void relicFollowSort(RelicTables* t) {
     if (byName == t->byName) return;
     t->byName = byName;
     utRelicListSort(&t->list, byName);
-    t->listedWrites = -1;
+    t->listedFacts = -1;
     relicRelist();
     relicRelayout();
 }
@@ -807,15 +1001,16 @@ const char* liveGroupRecord(int group, int k) {
 
 int livePageCount(int group) {
     if (!g_groups || group < 0 || group >= (int)g_groups->size()) return 0;
-    if (relicShown(group)) return utRelicPageCount(g_relic->layout);
+    if (relicShown(group)) return utRelicPageCount(relicLayoutOf(g_relic, group));
     const Group& g = pageGroup(group);
-    return liveOwnedOnlyActive() ? gdut::pagesFor(g.slot, g.ownedCount) : g.pages;
+    return liveOwnedOnlyActive() || g.away > 0 ? gdut::pagesFor(g.slot, pageCountOf(g, liveOwnedOnlyActive()))
+                                                : g.pages;
 }
 
 namespace {
 // the records the wanted group shows now (OWN: its owned count) and the offset clamp.
 int shownOf(const Group& g) {
-    return liveOwnedOnlyActive() ? g.ownedCount : (int)g.records.size();
+    return pageCountOf(g, liveOwnedOnlyActive());
 }
 bool stepRows(int delta, const char* what, bool wheel = false) {
     if (!liveActive()) return false;
@@ -894,6 +1089,7 @@ void liveOwnedChanged() {
             count += f;
         }
         g.ownedCount = count;
+        ownedHereFill(g);
     }
     unionOwnedFill(g_unions);   // a union's flags are its members'
     g_ownKnown = known;
@@ -933,8 +1129,15 @@ bool liveSearchHighlight(int i, const char* record) {
     if (relicShown(g_shownGroup)) {   // a green slot whose (record, bonus) text holds the query
         RelicTables* t = g_relic;
         int slot = 0;
+        if (!protoSlotKindAt(i, &slot)) return false;
+        if (slot == 0) {   // a formula cell: its record's match on the Arcane Formulae page
+            const int k = utSearchPlaceIndex(g_placeRec, g_placeK, g_placeN, i, record);
+            if (!g_searchOn || k < 0 || g_bluGroup < 0 || g_bluGroup >= (int)g_groups->size()) return false;
+            const Group& b = (*g_groups)[(size_t)g_bluGroup];
+            return utSearchHighlight(b.match.data(), (int)b.match.size(), k, true);
+        }
         const int r = record ? utRelicFind(t->list, record) : -1;
-        if (r < 0 || !protoSlotKindAt(i, &slot) || slot < 2) return false;
+        if (r < 0 || slot < 2) return false;
         return utRelicSearchHit(t->match.data(), t->stateFirst[(size_t)r] + slot - 1, slot - 1,
                                 g_searchOn);
     }
@@ -960,15 +1163,19 @@ int liveSearchFound(int* groups) {
 int liveSearchShownIn(int group, int* of) {
     if (of) *of = liveGroupEntries(group);
     if (!g_groups || group < 0 || group >= (int)g_groups->size()) return 0;
-    if (g_relic && group == g_relicGroup) {   // the relic page: its laid-out green slots, no records
+    if (relicShown(group)) {   // a block page: its laid-out green slots, no records
         const RelicTables* t = g_relic;
-        const int green = utRelicGreenSlots(t->list, t->ownLaid ? t->held.data() : nullptr);
+        const std::vector<unsigned char>& keep = artShown(group) ? t->keepA : t->keepR;
+        const int green = keep.empty() ? 0
+                                       : utRelicGreenSlots(t->list, keep.data(),
+                                                           t->slotsLaid ? t->slotHeld.data() : nullptr) +
+                                             (artShown(group) ? relicFormulaCells(t, keep, nullptr) : 0);
         if (of) *of = green;
         return g_searchOn ? (*g_groups)[(size_t)group].hitCount : green;
     }
     const Group& g = pageGroup(group);   // a union's rep: the whole page's
-    if (of) *of = (int)g.records.size();
-    return g_searchOn ? g.hitCount : (int)g.records.size();
+    if (of) *of = pageCountOf(g, false);
+    return g_searchOn ? g.hitCount : pageCountOf(g, false);
 }
 
 int livePagesTotal() { return g_pagesTotal; }
@@ -996,14 +1203,15 @@ bool liveSelectGroup(int group, bool keepRow) {
 // clamped - so the last step lands on the last FULL window (it overlaps the one before it).
 bool liveStepPage(int dir) {
     if (!liveActive()) return false;
-    if (relicShown(liveWantedGroup())) return relicStep(dir < 0 ? -1 : 1, true);
+    if (relicShown(liveWantedGroup())) return relicStep(liveWantedGroup(), dir < 0 ? -1 : 1, true);
     const Group& g = pageGroup(liveWantedGroup());
     return stepRows((dir < 0 ? -1 : 1) * (g.slot.rows > 0 ? g.slot.rows : 1), "window step");
 }
 
 // one slot row (the wheel over the page). rebuilt on the next Update, no settle.
 bool liveStepRow(int dir) {
-    if (liveActive() && relicShown(liveWantedGroup())) return relicStep(dir < 0 ? -1 : 1, false);
+    if (liveActive() && relicShown(liveWantedGroup()))
+        return relicStep(liveWantedGroup(), dir < 0 ? -1 : 1, false);
     return stepRows(dir < 0 ? -1 : 1, "wheel", true);
 }
 
@@ -1101,12 +1309,15 @@ int livePagePlaces(UtProtoPlace* out, int cap) {
         RelicTables* t = g_relic;
         relicFollowSort(t);
         relicRelist();
-        if (relicOwnActive(t) != t->ownLaid) relicRelayout();   // OWN flipped, or its facts came
+        if (relicOwnActive(t) != t->ownLaid || relicOwnSlots(t) != t->slotsLaid)
+            relicRelayout();   // OWN flipped, its facts came, or relic_own_slots changed
+        const UtRelicLayout& y = relicLayoutOf(t, g);
         const int asked = (int)InterlockedCompareExchange(&g_wantPage, 0, 0);
-        const int first = utRelicClampFirst(t->layout, asked);
+        const int first = utRelicClampFirst(y, asked);
         if (first != asked) InterlockedExchange(&g_wantPage, first);
-        g_relicShownN = utRelicWindowPlaces(t->list, t->layout, first, g_relicShown, kUtProtoMax);
-        g_relicShownEnd = utRelicWindowEnd(t->layout, first);
+        g_relicShownN = utRelicWindowPlaces(t->list, y, first, g_relicShown, kUtProtoMax,
+                                            artShown(g) ? g_relicFormulae : nullptr, kUtProtoMax, &g_relicFormulaN);
+        g_relicShownEnd = utRelicWindowEnd(y, first);
         int n = 0;
         for (int i = 0; i < g_relicShownN && n < cap; ++i) {
             const UtRelicPlace& rp = g_relicShown[i];
@@ -1119,21 +1330,38 @@ int livePagePlaces(UtProtoPlace* out, int cap) {
             p.record = row.folded.c_str();
             p.col = p.slotCol = rp.col;
             p.row = p.slotRow = rp.line;
-            p.w = p.h = p.slotW = p.slotH = 1;
+            p.w = p.h = p.slotW = p.slotH = rp.size;   // 2 x 2 on the artifact page
             p.slot = utRelicProtoSlot(rp.slot);
+            p.whole = row.artifact;
             p.seq = st.empty ? 0ull : st.seq;
             p.var1 = st.protoVar1;
             p.bonus = rp.slot > 0 ? t->bonusPtr[k] : "";
         }
-        g_placeN = 0;   // no search highlight on the relic page
+        g_placeN = 0;   // the search's highlight map: the formula cells only
+        for (int i = 0; i < g_relicFormulaN && n < cap; ++i) {   // the formula cells: unique places
+            const UtRelicFormulaPlace& fp = g_relicFormulae[i];
+            const UtRelicRow& row = t->list.rows[(size_t)fp.row];
+            UtProtoPlace& p = out[n++];
+            memset(&p, 0, sizeof(p));
+            p.record = row.formulaFolded[(size_t)(fp.index - row.formulaFirst)].c_str();
+            p.col = p.slotCol = fp.col;
+            p.row = p.slotRow = fp.line;
+            p.w = p.slotW = fp.w;   // 2 x 1
+            p.h = p.slotH = fp.h;
+            p.slot = 0;   // a unique's place: its newest row, taken row by row (formula_copies)
+            g_placeRec[g_placeN] = p.record;
+            g_placeK[g_placeN] = t->formulaK.empty() ? -1 : t->formulaK[(size_t)fp.index];
+            ++g_placeN;
+        }
         g_shownCount = n;
         g_shownGroup = g;
         g_shownPage = first;
-        g_shownRows = (int)t->layout.blockLines.size();   // the relic page counts blocks (OWN: held)
+        g_shownRows = (int)y.blockLines.size();   // the relic page counts blocks (OWN: held)
         g_windowRows = g_relicShownEnd - first;
         _snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
-                    "groups=%d pages=%d shown=%d/%d relic blocks %d-%d", liveGroupCount(),
-                    g_pagesTotal, g, first, first + 1, g_relicShownEnd);
+                    "groups=%d pages=%d shown=%d/%d %s blocks %d-%d", liveGroupCount(),
+                    g_pagesTotal, g, first, artShown(g) ? "artifact" : "relic", first + 1,
+                    g_relicShownEnd);
         return n;
     }
     int page = (int)InterlockedCompareExchange(&g_wantPage, 0, 0);
@@ -1143,13 +1371,14 @@ int livePagePlaces(UtProtoPlace* out, int cap) {
     // `page` is the window's first SLOT ROW, clamped so the window stays full (the model's
     // placeWindow / clampRowOffset, model_test "window").
     const bool own = liveOwnedOnlyActive();
-    page = gdut::clampRowOffset(gr.slot, own ? gr.ownedCount : (int)gr.records.size(), page);
+    const unsigned char* mask = pageMaskOf(gr, own);   // OWN, and the formulae the artifact page shows
+    page = gdut::clampRowOffset(gr.slot, pageCountOf(gr, own), page);
     if (page != (int)InterlockedCompareExchange(&g_wantPage, 0, 0))
         InterlockedExchange(&g_wantPage, page);   // the filter shrank the group: clamp
     static gdut::PackPlacement placed[kUtProtoMax];
     const int want = cap < kUtProtoMax ? cap : kUtProtoMax;
     const int m = gdut::placeWindow(gr.slot, gr.fw.data(), gr.fh.data(), (int)gr.records.size(),
-                                    own ? gr.owned.data() : nullptr,
+                                    mask,
                                     page, placed, want,
                                     &g_shownCount);
     int n = 0;
@@ -1205,10 +1434,10 @@ void liveSetButtons(const int* buttonOf, int n) {
         u->plan = utUnionPlan(groups, [&](int g, int* out, int cap) {
             const int b = bo[(size_t)g];
             int k = 0;
-            if (b < 0 || g == g_relicGroup) return 0;
+            if (b < 0 || g == g_relicGroup || artShown(g)) return 0;   // a block page stands alone
             for (int x = 0; x < groups && k < cap; ++x)
                 if (bo[(size_t)x] == b) {
-                    if (x == g_relicGroup) {
+                    if (x == g_relicGroup || artShown(x)) {
                         relicJoined = true;
                         continue;
                     }
@@ -1247,7 +1476,12 @@ void liveSetButtons(const int* buttonOf, int n) {
                 v.match.insert(v.match.end(), g.match.begin(), g.match.end());
                 v.ownedCount += g.ownedCount;
                 v.hitCount += g.hitCount;
+                if (g.away > 0) v.here.insert(v.here.end(), g.here.begin(), g.here.end());
+                else v.here.insert(v.here.end(), g.records.size(), (unsigned char)1);
+                v.away += g.away;
             }
+            if (v.away <= 0) v.here.clear();
+            ownedHereFill(v);
             int exact = 0;
             const UtCell c = utUnionCell(mc, cells, &exact);
             v.slot.w = c.w;
@@ -1442,10 +1676,23 @@ void retireGameTables() {
 }
 
 bool liveIsRelicGroup(int group) { return relicShown(group); }
+bool liveIsArtifactPage(int group) { return artShown(group); }
 int liveRelicGroup() { return g_relic ? g_relicGroup : -1; }
 const UtRelicList* liveRelicList() { return g_relic ? &g_relic->list : nullptr; }
 
 int liveRelicFind(const char* folded) { return g_relic ? utRelicFind(g_relic->list, folded) : -1; }
+
+bool liveIsArtifactRecord(const char* folded) {
+    if (!folded || !folded[0]) return false;
+    RelicTables* t = g_relic;
+    const int r = t ? utRelicFind(t->list, folded) : -1;
+    if (r >= 0) return t->list.rows[(size_t)r].artifact;
+    if (!g_groups || g_artGroup < 0 || g_artGroup >= (int)g_groups->size()) return false;
+    const std::vector<std::string>& recs = (*g_groups)[(size_t)g_artGroup].records;
+    for (size_t k = 0; k < recs.size(); ++k)
+        if (_stricmp(recs[k].c_str(), folded) == 0) return true;
+    return false;
+}
 
 bool liveRelicFacts(const char* folded, unsigned* shards, int* tier, const char* const** table,
                     int* tableN) {
@@ -1478,6 +1725,21 @@ void liveSearchSetRelicMatch(int stateIndex, bool match) {
 
 int liveRelicPlaceCount() { return relicShown(g_shownGroup) ? g_relicShownN : 0; }
 
+int liveRelicFormulaCount() { return artShown(g_shownGroup) ? g_relicFormulaN : 0; }
+
+bool liveRelicFormulaAt(int i, UtRelicFormulaPlace* place) {
+    if (!artShown(g_shownGroup) || i < 0 || i >= g_relicFormulaN) return false;
+    if (place) *place = g_relicFormulae[i];
+    return true;
+}
+
+bool liveGroupOnPage(int group, int k) {
+    const std::vector<Group>* gs = groupsNow();
+    if (!gs || group < 0 || group >= (int)gs->size()) return false;
+    const Group& g = (*gs)[(size_t)group];
+    return g.away <= 0 || (k >= 0 && k < (int)g.here.size() && g.here[(size_t)k] != 0);
+}
+
 bool liveRelicPlaceAt(int i, UtRelicPlace* place, UtRelicPlaceState* state) {
     RelicTables* t = g_relic;
     if (!t || !relicShown(g_shownGroup) || i < 0 || i >= g_relicShownN) return false;
@@ -1492,24 +1754,26 @@ bool liveRelicWindow(int* firstBlock, int* endBlock, int* blocks, int* page, int
     if (!t || !relicShown(g_shownGroup)) return false;
     if (firstBlock) *firstBlock = g_shownPage;
     if (endBlock) *endBlock = g_relicShownEnd;
-    if (blocks) *blocks = (int)t->layout.blockLines.size();
-    if (page) *page = utRelicPageOf(t->layout, g_shownPage);
-    if (pages) *pages = utRelicPageCount(t->layout);
+    const UtRelicLayout& y = relicLayoutOf(t, g_shownGroup);
+    if (blocks) *blocks = (int)y.blockLines.size();
+    if (page) *page = utRelicPageOf(y, g_shownPage);
+    if (pages) *pages = utRelicPageCount(y);
     return true;
 }
 
 bool liveRelicTotals(int* bonusesHeld, int* bonusSlots, unsigned* pieces) {
     RelicTables* t = g_relic;
     if (!t) return false;
-    if (bonusesHeld) *bonusesHeld = t->bonusesHeld;
-    if (bonusSlots) *bonusSlots = t->list.bonusSlots;
-    if (pieces) *pieces = t->pieces;
+    const bool art = artShown(g_shownGroup);
+    if (bonusesHeld) *bonusesHeld = art ? t->artHeld : t->bonusesHeld;
+    if (bonusSlots) *bonusSlots = art ? t->artSlots : t->list.bonusSlots - t->artSlots;
+    if (pieces) *pieces = art ? t->artPlain : t->pieces;
     return true;
 }
 
 bool liveRelicStale() {
     RelicTables* t = g_relic;
-    return t && relicShown(g_shownGroup) && journalWrites() != t->listedWrites;
+    return t && relicShown(g_shownGroup) && journalFactsGen() != t->listedFacts;
 }
 
 bool liveReloadGame(HMODULE selfModule) {
@@ -1552,7 +1816,10 @@ bool liveReloadGame(HMODULE selfModule) {
     g_hostRows = gdut::kHostRows;
     g_relic = nullptr;   // the next game's uniq-relics.txt (the old table is never freed)
     g_relicGroup = -1;
+    g_artGroup = -1;
     g_relicShownN = 0;
+    g_relicFormulaN = 0;
+    g_bluGroup = -1;
     g_relicGeoSet = false;   // the previous game's relic area is not this game's
     const bool ok = liveInit(selfModule);
     markDirty();

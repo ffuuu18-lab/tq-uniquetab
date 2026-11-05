@@ -12,9 +12,9 @@
 // it expects from it. Adding a setting means adding one row - the text and the parser cannot
 // drift apart any more, because there is only one of each.
 //
-// THE SHORTER FILE (GD's renderer). Eight keys are plain lines under [general]: enabled,
-// collect_mi, collect_relics, collect_unobtainable, tooltip_mark, log_level, view_hotkey and
-// search. Every other
+// THE SHORTER FILE (GD's renderer). Nine keys are plain lines under [general]: enabled,
+// collect_mi, collect_relics, collect_artifact_bonuses, collect_unobtainable, tooltip_mark,
+// log_level, view_hotkey and search. Every other
 // row is HIDDEN (kUtCfgHidden): one line of the [advanced] blob at the end of the file, commented
 // out at its default (";key=default"), and written live only while its value differs. The parser
 // reads a live line wherever it stands; a commented row is a comment, so it reads back as the
@@ -154,7 +154,13 @@
 // 29 = [advanced] view_resume (default 1); relic_split is a line now, its comment says so. A file from
 //     28 keeps every value and every line and gains the key commented at its default; a mod's own
 //     file from 28 takes the main file's value (the key it did not have).
-#define UT_INI_VERSION 29
+// 30 = [advanced] relic_empty_veil (default 1): the dark veil over the empty (gray) slots of the
+//     relic pages; relic_own_slots (default 0): OWN on the relic pages shows only the slots that
+//     hold something; [general] collect_artifact_bonuses (default 1): the artifacts' block page. A
+//     file from 29 keeps every value and every line and gains the two [advanced] keys commented at
+//     their defaults and the [general] key at its default; a mod's own file from 29 takes the main
+//     file's values (the keys it did not have).
+#define UT_INI_VERSION 30
 // The ini_version from which search_mark's default is 1 (the migration moves an old default 3).
 #define UT_SEARCH_FRAME_SINCE 16
 // The ini_version from which owned_marks' default is 3 (the migration moves an old default 1).
@@ -206,6 +212,11 @@ struct UtConfig {
     // record outside the collection, and the ones stored stay in the journal, on no page. A
     // generation input (catalogue.stamp): a change regenerates the catalogue once.
     int collectRelics = 1;
+    // 1 = the Artifacts button shows the artifact block page (uniq-relics.txt's A blocks, the
+    // "artifact" group without records): per artifact a plain slot and one slot per completion
+    // bonus its formulae can give; 0 = the Artifacts group page. A generation input
+    // (catalogue.stamp): a change regenerates the catalogue once. Every stored row stays takeable.
+    int collectArtifactBonuses = 1;
     // 1 = the records nobody can obtain (gear worn by statues and quest people, a boss's weapon
     // he never drops, set pieces no loot table names) are in the catalogue too; 0 = they are left
     // out and the start-up log lists them. A generation input (catalogue.stamp): a change
@@ -300,6 +311,8 @@ struct UtConfig {
     int relicNames = 1;      // each block's name on the line above it
     int relicSort = 1;       // the blocks of each part: 0 game order, 1 by name
     int relicSplit = 1;      // a line between the relics and the charms
+    int relicEmptyVeil = 1;  // the dark veil over the empty (gray) slots
+    int relicOwnSlots = 0;   // OWN: only the slots that hold something (0 = the held blocks whole)
     int viewResume = 1;      // the collection comes back when the Transfer tab does
     int formulaCopies = 1;   // an arcane formula's slot keeps any number of copies
     char padScreen[48] = "";     // pad_screen: the pad pinned to a screen corner
@@ -520,6 +533,7 @@ struct UtGenSettings {
     char textLanguage[8];
     int collectMi;
     int collectRelics;
+    int collectArtifactBonuses;
     int collectUnobtainable;
 };
 bool configGameGenInputs(const char* game, UtGenSettings* out);

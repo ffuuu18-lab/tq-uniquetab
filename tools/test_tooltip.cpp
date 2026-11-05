@@ -419,6 +419,68 @@ static bool toStringRaising(const void* lines) {
     }
 }
 
+// ---- section 12: an arcane formula's reagents -------------------------------------------------
+// The formula: FakeItem's name first, then its three reagent lists (vector<string> base records,
+// prefix and suffix lists after each) at the offsets tooltipTestReagentArm hands in.
+struct FakeFormula {
+    const char* name;
+    unsigned char body[0x80];
+};
+static const unsigned kList[3] = {0x10, 0x34, 0x58};
+static void vsString(unsigned char* s, const char* text) {   // a VS2012 std::string
+    memset(s, 0, 0x18);
+    const size_t n = strlen(text);
+    const size_t res = n < 16 ? 15 : n;
+    if (n < 16) memcpy(s, text, n + 1);
+    else memcpy(s, &text, sizeof(text));
+    memcpy(s + 0x10, &n, 4);
+    memcpy(s + 0x14, &res, 4);
+}
+static void vsVec(unsigned char* at, unsigned char* first, size_t n) {   // {first, last, end}
+    unsigned char* b = n ? first : nullptr;
+    unsigned char* e = n ? first + n * 0x18 : nullptr;
+    memcpy(at, &b, 4);
+    memcpy(at + 4, &e, 4);
+    memcpy(at + 8, &e, 4);
+}
+static void textAppend(void* lines, unsigned cls, const wchar_t* text) {
+    FakeVec* v = (FakeVec*)lines;
+    if (v->end + kLine > v->cap) return;
+    makeLine((unsigned char*)v->end, cls, (const unsigned short*)text, wcslen(text), 0);
+    v->end += kLine;
+}
+// ItemArtifactFormula::GetUIDisplayText: its name, the count line, one line per reagent (1 and 2
+// grey, 3 yellow: the engine found it in Storage), the cost line.
+static void __fastcall stubReagentFormula(void*, void*, const void*, void* lines) {
+    rollAppend(lines, 0x0B);
+    textAppend(lines, 0x2C, L"Required Reagents  (1/3)");
+    textAppend(lines, 0x2E, L"Unique A");
+    textAppend(lines, 0x2E, L"Relic One");
+    textAppend(lines, 0x2D, L"Unique B (Storage Area)");
+    rollAppend(lines, 0x2F);
+}
+// LocalizationManager: the instance (its vtable +0x10 is Localize) and Localize, which formats
+// the count as the game's English text does - or lies, when a case asks.
+static int g_locCalls = 0;
+static bool g_locLie = false;
+static unsigned short g_locBuf[64];
+static const unsigned short* __cdecl stubLocalize(void*, const char* tag, ...) {
+    ++g_locCalls;
+    va_list ap;
+    va_start(ap, tag);
+    const int a = va_arg(ap, int);
+    const int b = va_arg(ap, int);
+    va_end(ap);
+    wchar_t w[64];
+    if (g_locLie || strcmp(tag, "xtagArtifactReagents") != 0) _snwprintf_s(w, 64, _TRUNCATE, L"Tag not found");
+    else _snwprintf_s(w, 64, _TRUNCATE, L"Required Reagents  (%d/%d)", a, b);
+    memcpy(g_locBuf, w, sizeof(g_locBuf));
+    return g_locBuf;
+}
+static void* g_locVt[8] = {nullptr, nullptr, nullptr, nullptr, (void*)&stubLocalize, nullptr, nullptr, nullptr};
+static void* const* g_locMgr = g_locVt;   // the object: its vtable pointer
+static void* __cdecl stubLocInstance() { return (void*)&g_locMgr; }
+
 int main() {
     printf("the tooltip line, offline (TQ x86: 0x20-byte GameTextLine, VS2012 vector)\n\n");
     printf("1. the shape of the borrowed array\n");
@@ -1003,6 +1065,177 @@ int main() {
         check(g_seenCount == 3 && textIs(2, want), "one stored piece of two shards: the same one line, (pieces 2)");
         ut::g_relicList.rows.clear();
         ut::g_relicList.byFolded.clear();
+    }
+
+    printf("\n12. an arcane formula's reagents in the collection\n");
+    {
+        // the swap's edits: in the COPY only, checked against the class they were made for
+        unsigned char* src = makeLines(6);
+        FakeVec sv = {src, src + 6 * kLine, src + 6 * kLine};
+        unsigned char mirror[6 * kLine];
+        memcpy(mirror, src, sizeof(mirror));
+        unsigned char repl[2][kLine], extra[kLine];
+        makeExtra(repl[0], 0x2D);
+        makeExtra(repl[1], 0x2C);
+        makeExtra(extra, 0x16);
+        const ut::UtTooltipEdit ed[2] = {{2, 0x0F, repl[0]}, {4, 0x0F, repl[1]}};
+        unsigned char* owned = nullptr;
+        ut::UtTooltipSwap b;
+        bool ok = ut::tooltipSwapBuildEdits(&sv, extra, 1, ed, 2, &owned, &b) &&
+                  (size_t)(b.end - b.begin) == 7 * kLine && !memcmp(owned, mirror, 2 * kLine) &&
+                  !memcmp(owned + 2 * kLine, repl[0], kLine) && !memcmp(owned + 3 * kLine, mirror + 3 * kLine, kLine) &&
+                  !memcmp(owned + 4 * kLine, repl[1], kLine) && !memcmp(owned + 5 * kLine, mirror + 5 * kLine, kLine) &&
+                  !memcmp(owned + 6 * kLine, extra, kLine) && !memcmp(src, mirror, sizeof(mirror));
+        ut::tooltipSwapFree(owned);
+        check(ok, "edits: lines 2 and 4 replaced in the copy, the rest byte for byte, the line last; the engine's untouched");
+        ok = ut::tooltipSwapBuildEdits(&sv, nullptr, 0, ed, 1, &owned, &b) && (size_t)(b.end - b.begin) == 6 * kLine &&
+             !memcmp(owned + 2 * kLine, repl[0], kLine);
+        ut::tooltipSwapFree(owned);
+        check(ok, "edits alone (no line appended): the engine's N, the edit in place");
+        const ut::UtTooltipEdit wrong[1] = {{2, 0x2E, repl[0]}};
+        const ut::UtTooltipEdit past[1] = {{6, 0x0F, repl[0]}};
+        check(!ut::tooltipSwapBuildEdits(&sv, extra, 1, wrong, 1, &owned, &b) && !owned &&
+                  !ut::tooltipSwapBuildEdits(&sv, extra, 1, past, 1, &owned, &b) && !owned &&
+                  !ut::tooltipSwapBuildEdits(&sv, nullptr, 0, nullptr, 0, &owned, &b) && !owned &&
+                  ut::tooltipSwapAllocBalance() == 0 && !memcmp(src, mirror, sizeof(mirror)),
+              "an edit over a line of another class, one past N, or no line and no edit: refused, nothing allocated");
+        free(src);
+
+        // the rule: which lines, and the count
+        const unsigned cls[3] = {0x2E, 0x2D, 0x2E}, grey[3] = {0x2E, 0x2E, 0x2E};
+        const bool every[3] = {true, true, true}, held[3] = {true, true, false}, gap[3] = {true, false, true};
+        int av = -1, tot = -1;
+        check(ut::tooltipReagentMarks(cls, every, held, &av, &tot) == 1u && av == 1 && tot == 3,
+              "a grey held reagent is marked; the engine's yellow one and a grey one not held are left: 1 of 3");
+        check(ut::tooltipReagentMarks(grey, gap, every, &av, &tot) == 5u && av == 0 && tot == 2,
+              "an empty reagent list: never marked, not in the total");
+        ut::UtRelicRowFacts rf[2];
+        memset(rf, 0, sizeof(rf));
+        rf[0].var1 = 1;   // a partial piece (no bonus: the red slot)
+        const bool red = ut::tooltipReagentRowsHold(false, rf, 1);
+        strcpy_s(rf[1].bonus, sizeof(rf[1].bonus), "records/b/one.dbr");
+        rf[1].pending = 2;
+        const bool out1 = ut::tooltipReagentRowsHold(false, rf, 2);
+        rf[1].pending = 0;
+        rf[1].unresolved = true;
+        const bool unres = ut::tooltipReagentRowsHold(false, rf, 2);
+        rf[1].unresolved = false;
+        check(!red && !out1 && !unres && ut::tooltipReagentRowsHold(false, rf, 2) && ut::tooltipReagentRowsHold(true, rf, 1),
+              "held: a completed piece (never a red, a pending-out or an unresolved row); an artifact by any row");
+
+        // the detour: reagent 1 an equipment record the journal holds, 2 a relic held only as a
+        // partial piece, 3 already yellow (the engine's)
+        ut::UtRelicRow row;
+        row.record = row.folded = "records/items/relic/r1.dbr";
+        row.shards = 3;
+        ut::g_relicList.rows.push_back(row);
+        ut::g_relicList.byFolded.push_back(0);
+        memset(ut::g_relicFacts, 0, sizeof(ut::g_relicFacts));
+        ut::g_relicFacts[0].var1 = 1;
+        ut::g_relicFactN = 1;
+        static unsigned char strs[3][0x18];
+        static FakeFormula ff;
+        memset(&ff, 0, sizeof(ff));
+        ff.name = "records/items/a/unique_a.dbr";   // the formula itself: a collected catalogue record
+        vsString(strs[0], "records/items/a/unique_a.dbr");
+        vsString(strs[1], "Records\\Items\\Relic\\R1.dbr");
+        vsString(strs[2], "records/items/b/unique_b.dbr");
+        for (int r = 0; r < 3; ++r) vsVec((unsigned char*)&ff + kList[r], strs[r], 1);
+        ut::tooltipTestArm((void*)&stubBaseText, (void*)&stubEquipText, (void*)&stubArtifactText,
+                           (void*)&stubRelicText, (void*)&stubToString, 0x16, 0x18);
+        ut::tooltipTestArmFormula((void*)&stubReagentFormula);
+        ut::tooltipTestReagentArm(kList[0], kList[1], kList[2], (void*)&stubLocInstance, (void*)&stubLocalize);
+        static unsigned char seen[8][kLine];
+        static unsigned short seenText[8][64];
+        auto textIs = [&](int i, const wchar_t* want) {
+            for (int k = 0;; ++k) {
+                if ((unsigned short)want[k] != seenText[i][k]) return false;
+                if (!want[k]) return true;
+            }
+        };
+        auto clsOf = [&](int i) { return *(const unsigned*)seen[i]; };
+        auto drive = [&](FakeVec* rv) {
+            char out[32];
+            rollReset(rv);
+            ut::tooltipTestFormulaText(&ff, nullptr, rv);
+            g_copyLines = seen;
+            g_copyText = seenText;
+            seenReset();
+            ut::tooltipTestToString(rv, out);
+            g_copyLines = nullptr;
+        };
+        FakeVec rv;
+        drive(&rv);
+        check(g_seenVec != &rv && g_seenCount == 7u && g_seenLast == 1,
+              "formula: the borrowed copy, its 6 lines and its own COLLECTED line");
+        check(clsOf(2) == 0x2Du && textIs(2, L"Unique A (Collection)"),
+              "reagent 1 (held): yellow, its name + \" (Collection)\"");
+        check(clsOf(3) == 0x2Eu && textIs(3, L"Relic One") && clsOf(4) == 0x2Du && textIs(4, L"Unique B (Storage Area)"),
+              "reagent 2 (only a partial piece held) stays grey; reagent 3 (the engine's yellow) is left alone");
+        check(clsOf(1) == 0x2Cu && textIs(1, L"Required Reagents  (2/3)") && g_locCalls == 2,
+              "the count line in the game's words (the engine's checked first): 2 of 3");
+        check(*(const unsigned*)(rv.begin + 2 * kLine) == 0x2Eu && *(const unsigned*)(rv.begin + kLine) == 0x2Cu &&
+                  lineCount(rv) == 6u && ut::tooltipSwapAllocBalance() == 0,
+              "the engine's own vector keeps its 6 lines and classes; nothing borrowed is alive");
+        drive(&rv);
+        check(textIs(2, L"Unique A (Collection)") && textIs(1, L"Required Reagents  (2/3)") && g_locCalls == 2,
+              "the next frame: the memo and the count's words reused, Localize not asked again");
+        Sleep(300);
+        strcpy_s(ut::g_relicFacts[1].bonus, sizeof(ut::g_relicFacts[1].bonus), "records/b/one.dbr");
+        ut::g_relicFactN = 2;   // a completed piece now
+        drive(&rv);
+        check(clsOf(3) == 0x2Du && textIs(3, L"Relic One (Collection)") && textIs(1, L"Required Reagents  (3/3)"),
+              "300 ms later, a completed piece held: reagent 2 marked too, 3 of 3");
+        ut::tooltipSearchCapture(true);
+        rollReset(&rv);
+        ut::tooltipTestFormulaText(&ff, nullptr, &rv);
+        ut::tooltipSearchCapture(false);
+        check(ut::tooltipTestLatchCount() == 0u, "a search capture of the formula: no latch, no edits");
+        // the engine's count line is not what Localize makes of its numbers: the count stays the
+        // engine's for the session, the lines are still marked
+        ut::tooltipTestReagentArm(kList[0], kList[1], kList[2], (void*)&stubLocInstance, (void*)&stubLocalize);
+        g_locLie = true;
+        drive(&rv);
+        g_locLie = false;
+        check(ut::tooltipTestCountOff() && logCount("count line stays the game's") == 1 &&
+                  textIs(1, L"Required Reagents  (1/3)") && textIs(2, L"Unique A (Collection)"),
+              "a count line Localize does not reproduce: ONE warning, the engine's count, the lines marked");
+        ut::tooltipTestReagentArm(kList[0], kList[1], kList[2], nullptr, nullptr);
+        drive(&rv);
+        check(textIs(1, L"Required Reagents  (1/3)") && textIs(3, L"Relic One (Collection)") && !ut::tooltipTestReagentOff(),
+              "no LocalizationManager bound: the engine's count, the lines marked");
+        // a long reagent list (SVAERA: up to 165 records, a reroll formula) reads as one
+        static unsigned char many[100][0x18];
+        vsString(many[0], "records/items/a/unique_a.dbr");
+        for (int i = 1; i < 100; ++i) vsString(many[i], "records/items/z/not_held.dbr");
+        unsigned char* first = (unsigned char*)&ff + kList[0];
+        vsVec(first, many[0], 100);
+        ut::tooltipTestReagentArm(kList[0], kList[1], kList[2], nullptr, nullptr);
+        drive(&rv);
+        check(!ut::tooltipTestReagentOff() && clsOf(2) == 0x2Du && textIs(2, L"Unique A (Collection)"),
+              "a reagent list of 100 records reads: its held record marked, the mark on");
+        vsVec(first, strs[0], 1);
+        // a reagent list that does not read as a vector: THAT formula keeps the game's lines, one
+        // line, the mark stays on for the others
+        unsigned char* bad = (unsigned char*)&ff + kList[1];
+        unsigned char* odd = strs[1] + 4;
+        memcpy(bad + 4, &odd, 4);   // a span that is not a whole number of strings
+        Sleep(300);
+        drive(&rv);
+        Sleep(300);
+        drive(&rv);
+        check(!ut::tooltipTestReagentOff() && logCount("do not read as vectors of strings") == 1 &&
+                  logCount("the reagent mark is off") == 0 && clsOf(2) == 0x2Eu && clsOf(3) == 0x2Eu &&
+                  g_seenCount == 7u && g_seenLast == 1,
+              "a list that is not a vector of strings: that formula's vanilla lines + its own, ONE line, the mark on");
+        vsVec(bad, strs[1], 1);
+        Sleep(300);
+        drive(&rv);
+        check(clsOf(2) == 0x2Du && clsOf(3) == 0x2Du && logCount("do not read as vectors of strings") == 1,
+              "the lists read again: the formula marked again, nothing more said");
+        ut::g_relicList.rows.clear();
+        ut::g_relicList.byFolded.clear();
+        ut::g_relicFactN = 0;
     }
 
     printf("\n%s (%d failure(s))\n", g_fails ? "FAILED" : "PASSED", g_fails);

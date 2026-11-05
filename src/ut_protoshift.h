@@ -43,6 +43,7 @@ struct UtProtoPlace {
     unsigned long long seq;
     unsigned var1;
     const char* bonus;
+    bool whole;   // an artifact's place: its row is the prototype as stored (never a 1-shard piece)
 };
 
 // One live prototype (ut_proto's list).

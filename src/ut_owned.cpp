@@ -103,13 +103,13 @@ bool g_gridWaitLongSaid = false;   // the INFO line after kUtGridWaitSay waits
 int g_geoW = 0, g_geoH = 0;
 float g_geoScale = 0.0f;
 bool g_marksNow = false;       // ownedMarksBegin's answer for this frame
-bool g_unveilNow = false;      // the same trust at any owned_marks: a relic slot is gray at 0 too
+bool g_unveilNow = false;      // the same trust at any owned_marks and under OWN: a relic slot is gray at 0 too
 int g_unveil = -1;             // the prototype whose slot the cursor is on (not veiled)
 // the marks are drawn from the Present detour, AFTER the engine's tooltip, so they
 // are hidden while a tooltip is likely open: the cursor is on the measured grid and either on a
 // cell a prototype covers (g_occ) or the last proven hover returned an item (g_hoverId).
 char g_occ[kGridRowsMax][kGridColsMax];
-char g_pageRelic[kUtProtoMax];   // prototype i is a relic page slot (its marks: utRelicProtoLit)
+char g_pageRelic[kUtProtoMax];   // prototype i takes the relic look (a relic slot, a formula cell: utRelicLook)
 unsigned g_pageRows[kUtProtoMax];   // prototype i's journal rows (a unique's place; formula_copies' count)
 volatile LONG g_hoverId = 0;
 
@@ -315,13 +315,14 @@ bool checkMapOnModSack() {
 void computePage() {
     g_pageN = protoCount();
     memset(g_occ, 0, sizeof(g_occ));
+    const bool artPage = liveIsArtifactPage(liveShownGroup());   // its formula cells: the relic look
     for (int i = 0; i < g_pageN && i < kUtProtoMax; ++i) {
         const char* rec = nullptr;
         const bool have = protoAt(i, &rec, nullptr, nullptr, nullptr);
         int slot = 0;
         unsigned long long seq = 0;
         const bool relic = have && protoSlotKindAt(i, &slot) && slot > 0 && protoAtSeq(i, &seq);
-        g_pageRelic[i] = (char)relic;
+        g_pageRelic[i] = (char)utRelicLook(relic, have && artPage);
         g_pageRows[i] = have && !relic ? (unsigned)storeCount(rec) : 0u;
         if (relic) {   // a relic slot that holds something is bright; its have-mark is keyed by bonus
             g_pageOwned[i] = (char)(journalSetKnown() && utRelicProtoLit(slot, seq));
@@ -346,10 +347,11 @@ void computePage() {
     g_groupOwned = 0;
     for (int i = 0; i < mn; ++i) {
         const int n = liveGroupEntries(members[i]) > 0 ? liveGroupEntries(members[i]) : 0;
-        g_groupTotal += n;
-        if (journalSetKnown())
-            for (int k = 0; k < n; ++k)
-                if (collected(liveGroupRecord(members[i], k))) ++g_groupOwned;
+        for (int k = 0; k < n; ++k) {
+            if (!liveGroupOnPage(members[i], k)) continue;   // a formula on the artifact page
+            ++g_groupTotal;
+            if (journalSetKnown() && collected(liveGroupRecord(members[i], k))) ++g_groupOwned;
+        }
     }
 }
 
@@ -830,11 +832,13 @@ int ownedMarksBegin(const PlateGeometry& g, bool cursorOk, float cx, float cy) {
         }
     }
     if (g_gridVerdict == 0) gridFeedFromFrame(g);   // no mouse move needed
-    // under the OWN filter every record shown is owned - the veil is moot.
+    // under the OWN filter every record an item page shows is owned - the veil is moot. The
+    // hovered slot's trust holds under OWN too: the relic look's empty slots stay gray there
+    // (utRelicMarksStyle), and the one under the cursor shows bright as with OWN off.
     // bright = collected (journal rows), dim = not; the self-checks (g_known) still prove
     // the page's prototypes before any mark is drawn over them.
-    g_unveilNow = g_known && journalSetKnown() && g_gridVerdict == 1 && g_pageN > 0 && !liveOwnedOnlyActive();
-    g_marksNow = g_cfg.ownedMarks != 0 && g_unveilNow;
+    g_unveilNow = g_known && journalSetKnown() && g_gridVerdict == 1 && g_pageN > 0;
+    g_marksNow = g_cfg.ownedMarks != 0 && g_unveilNow && !liveOwnedOnlyActive();
     ownedUnveilRefresh(cursorOk, cx, cy);
     return g_marksNow ? g_cfg.ownedMarks : 0;
 }
@@ -858,7 +862,7 @@ bool ownedMarkRect(int i, float* x, float* y, float* w, float* h) {
 }
 
 // the marks' style prototype i follows for its gray copy and background (ut_reliclook.h
-// utRelicMarksStyle: a relic slot needs only the journal set)
+// utRelicMarksStyle: a slot with the relic look needs only the journal set, utRelicLook)
 static int marksStyleOf(int i) {
     return utRelicMarksStyle(g_marksNow, g_pageRelic[i] != 0, g_cfg.ownedMarks, journalSetKnown());
 }

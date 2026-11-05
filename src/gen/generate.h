@@ -70,6 +70,13 @@ struct GenInputs {
     // same. A stamp input ("collect_relics=1" only while it is on): a flip regenerates once, and
     // the reason names the key.
     bool collectRelics = true;
+    // uniquetab.ini's collect_artifact_bonuses: the artifacts have their own block page - one block
+    // per catalogue artifact, its plain slot and one slot per completion bonus its formulae can
+    // give (uniq-relics.txt's A blocks, relics_gen.h); their group keeps its G line with no E line
+    // (buildLists artifactBlocks). Off: every file is what it was. A stamp input
+    // ("collect_artifact_bonuses=1" only while it is on): a flip regenerates once, and the reason
+    // names the key.
+    bool collectArtifactBonuses = false;
     // uniquetab-groups.ini beside uniquetab.ini ("" = none): the player's groups, merged IN FRONT
     // of the built-in ones (ut_groups_default.h loadGroupsFile). Read only, never written. Its
     // bytes are a stamp input ("groups=builtin:<hash>+user:<hash>"): an edit regenerates once; a

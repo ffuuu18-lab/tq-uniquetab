@@ -685,6 +685,8 @@ struct RelicFileCounts {
     std::size_t relicB = 0, charmB = 0, r = 0, badR = 0, bonuses = 0, x = 0, xNerthus = 0, xFootprint = 0;
     std::size_t nerthusRows = 0, scarabRows = 0;
     bool scarabRelic = false, orderRelic = false;
+    std::size_t artB = 0, artR = 0, artBonuses = 0, artBad = 0;   // part A (collect_artifact_bonuses=1)
+    std::size_t artF = 0;                                         // part A's F lines (its formulae)
 };
 RelicFileCounts relicFileCounts(const std::string& text) {
     RelicFileCounts c;
@@ -701,7 +703,18 @@ RelicFileCounts relicFileCounts(const std::string& text) {
             if (t == std::string::npos) break;
             a = t + 1;
         }
-        if (f[0] == "B" && f.size() == 7) {
+        if (f[0] == "B" && f.size() == 7 && f[3] == "A") {
+            ++c.artB;
+            if (f[4] != "1" || f[5] != f[6]) ++c.artBad;   // one record, its own name twice
+        } else if (f[0] == "R" && f.size() >= 7 && c.artB > 0) {   // part A is last
+            ++c.artR;
+            const std::size_t n = std::strtoul(f[6].c_str(), nullptr, 10);
+            c.artBonuses += n;
+            if (f.size() != 7 + n || f[2] != "0" || f[3] != "0" || !f[5].empty()) ++c.artBad;
+        } else if (f[0] == "F" && c.artR > 0) {   // after its artifact's R line
+            ++c.artF;
+            if (f.size() != 2 || f[1].find("/arcaneformulae/") == std::string::npos) ++c.artBad;
+        } else if (f[0] == "B" && f.size() == 7) {
             const bool relic = f[3] == "R";
             ++(relic ? c.relicB : c.charmB);
             const std::size_t rows = std::strtoul(f[4].c_str(), nullptr, 10);
@@ -1191,8 +1204,9 @@ int ensure(const std::string& dataDir, const std::string& modDir) {
 }
 
 // ---- --ensure-flag -----------------------------------------------------------------------------
-// collect_unobtainable=1 into a fresh folder, for tools\build_test_catalogue.bat to compare with
-// tools\build_catalogue.py --collect-unobtainable.
+// collect_unobtainable=1 and collect_artifact_bonuses=1 into a fresh folder, for
+// tools\build_test_catalogue.bat to compare with tools\build_catalogue.py --collect-unobtainable
+// --collect-artifact-bonuses (the option-on twin check of both).
 int ensureFlag(const std::string& modDir) {
     std::string game = gameDir();
     if (game.empty()) return fail("no Titan Quest AE folder: set TQ_GAME_DIR");
@@ -1201,9 +1215,10 @@ int ensureFlag(const std::string& modDir) {
     gen::GenReport r;
     gen::GenInputs on;
     on.collectUnobtainable = true;
+    on.collectArtifactBonuses = true;
     const bool ok = gen::ensureOutputsGuarded(game, modDir, "EN", r, nullptr, nullptr, on);
-    std::printf("[test] %s: collect_unobtainable=1 generated into %s - %s\n", ok && r.generated ? "ok  " : "FAIL",
-                modDir.c_str(), ok ? r.summary.c_str() : r.error.c_str());
+    std::printf("[test] %s: collect_unobtainable=1 collect_artifact_bonuses=1 generated into %s - %s\n",
+                ok && r.generated ? "ok  " : "FAIL", modDir.c_str(), ok ? r.summary.c_str() : r.error.c_str());
     std::vector<std::uint8_t> got;
     const RelicFileCounts c = readAll(modDir + "\\uniq-relics.txt", got)
                                   ? relicFileCounts(std::string(got.begin(), got.end()))
@@ -1211,7 +1226,19 @@ int ensureFlag(const std::string& modDir) {
     const bool relicsOk = c.nerthusRows == 3 && c.x == 2 && c.r == 255 && c.relicB + c.charmB == 93;
     std::printf("[test] %s: collect_unobtainable=1: the Power of Nerthus is a three-line block, its two "
                 "kept records still X lines (%zu rows)\n", relicsOk ? "ok  " : "FAIL", c.r);
-    return ok && r.generated && relicsOk ? 0 : 1;
+    // the artifacts' blocks: one per artifact of the group page (stock AE 2.10: 90, every one with
+    // a formula's table), and the group keeps its G line with no E line
+    std::vector<std::uint8_t> grp;
+    const std::string groups = readAll(modDir + "\\uniq-groups.txt", grp) ? std::string(grp.begin(), grp.end())
+                                                                           : std::string();
+    const bool artLine = groups.find("\tArtifacts\t8\t7\t64\t64\t0\tartifact\tART\r\n") != std::string::npos &&
+                         groups.find("E\trecords/xpack/item/artifacts/n_la_amberflask.dbr") == std::string::npos;
+    // and one F line per block: stock AE 2.10 joins its 90 artifacts to 90 catalogue formulae
+    const bool artOk = c.artB == 90 && c.artR == 90 && c.artF == 90 && !c.artBad && c.artBonuses >= 6 * 90 && artLine;
+    std::printf("[test] %s: collect_artifact_bonuses=1: %zu artifact blocks, %zu bonus slots, %zu formula lines, "
+                "the Artifacts G line with no E line%s\n", artOk ? "ok  " : "FAIL", c.artB, c.artBonuses, c.artF,
+                artLine ? "" : " (NOT)");
+    return ok && r.generated && relicsOk && artOk ? 0 : 1;
 }
 
 // ---- --peak ------------------------------------------------------------------------------------

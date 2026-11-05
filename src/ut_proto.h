@@ -265,11 +265,12 @@ TqItem* protoCreateLoose(const UtReplica& rep, unsigned* id, const char** fault 
 bool protoDestroyLoose(TqItem* item);
 // The deposit's engine reads, one ObjectManager::GetObjectList walk: the object with `itemId`
 // (must carry Item's vftable replica slot) and, when `ctrlId` is non-zero, the object with that
-// id whose vftable is ControllerPlayer's. Either may come back null.
+// id whose vftable is ControllerPlayer's. Either may come back null. Both walks read the list in
+// ONE guarded frame: a fault is one ERROR and false, nothing found (the move is refused).
 bool protoFindObjects(unsigned itemId, unsigned ctrlId, const void** item, const void** ctrl);
 // ONE object walk resolving many ids to their Item objects (read only). `ids` sorted
 // ascending; objs[i] = the Item object of ids[i], or null (no such object / not an Item).
-// False = the object list could not be read (every objs[i] null).
+// False = the object list could not be read, or its walk faulted (every objs[i] null).
 bool protoFindItems(const unsigned* ids, int n, const void** objs);
 // GetItemReplicaInfo into a canary-guarded mod buffer (the layout measured at run time), the seven strings
 // copied out, the engine's heap strings freed through MSVCR110 operator delete. `name` gets

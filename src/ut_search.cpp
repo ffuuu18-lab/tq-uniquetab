@@ -246,7 +246,7 @@ bool relicComplete() { return g_ix && g_ix->rdone >= g_ix->rtotal; }
 unsigned indexedMask() {
     unsigned m = 0;
     for (int g = 0; g < liveGroupCount() && g < 32; ++g) {
-        const bool done = g == liveRelicGroup() ? relicComplete() : groupComplete(g);
+        const bool done = liveIsRelicGroup(g) ? relicComplete() : groupComplete(g);
         if (done) m |= 1u << (unsigned)g;
     }
     return m;
@@ -1516,7 +1516,7 @@ void searchTick(bool worldUp) {
         startSync = true;
     }
     if (startSync && g_started && worldUp) {
-        if (liveWantedGroup() == liveRelicGroup() && !syncRelic(syncHow, false)) return;
+        if (liveIsRelicGroup(liveWantedGroup()) && !syncRelic(syncHow, false)) return;
         if (!syncGroup(liveWantedGroup(), syncHow, false)) return;
         int members[64];   // the other groups of the wanted page (one page per button)
         const int mn = liveMembersOf(liveWantedGroup(), members, 64);
@@ -1574,7 +1574,7 @@ void searchBeforePage(int group) {
             return;
     }
     if (!g_active) return;   // search_prebuild alone: the background builds it
-    if (group >= 0 && group == liveRelicGroup() &&
+    if (group >= 0 && liveIsRelicGroup(group) &&
         !syncRelic(g_ix->rdone == 0 ? "sync at the first query" : "sync at a switch", true))
         return;
     if (!syncGroup(group, g_ix->processed == 0 ? "sync at the first query" : "sync at a switch",

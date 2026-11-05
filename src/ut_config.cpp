@@ -48,7 +48,7 @@ static const char* const kLogLevels[] = {"error", "warn", "info", "debug", "trac
 #define UT_H kUtCfgHidden
 
 const UtCfgKey kUtCfgKeys[] = {
-    // ---- [general] - the eight keys the file shows --------------------------------------------
+    // ---- [general] - the nine keys the file shows --------------------------------------------
     UT_BOOL("general", "enabled", enabled, 1, 0,
             "0 = the mod goes quiet: no tab, nothing new collected. Nothing is lost"),
     UT_BOOL("general", "collect_mi", collectMi, 1, 0,
@@ -58,6 +58,10 @@ const UtCfgKey kUtCfgKeys[] = {
             "1 = relics and charms have their own page, one shard at a time; 0 = no relic page: "
             "they are not collected, and the ones you stored stay in the collection, hidden until "
             "it is 1 again (from the next start)"),
+    UT_BOOL("general", "collect_artifact_bonuses", collectArtifactBonuses, 1, 0,
+            "1 = the Artifacts button shows one block per artifact, as the relic page: a plain slot "
+            "and one slot per completion bonus it can get; 0 = the Artifacts page as before. Nothing "
+            "stored is lost either way (from the next start)"),
     UT_BOOL("general", "collect_unobtainable", collectUnobtainable, 0, 0,
             "1 = also collect the records no monster, chest, merchant or quest gives (gear worn by "
             "statues and quest people, a boss weapon he never drops, set pieces no loot table "
@@ -132,6 +136,10 @@ const UtCfgKey kUtCfgKeys[] = {
            "the relic pages: the blocks of each part, 0 in game order (expansion, level), 1 by name; from the next page you open"),
     UT_BOOL("advanced", "relic_split", relicSplit, 1, UT_H,
             "the relic pages: 1 = a coloured line between the relics and the charms (no space taken); 0 = none"),
+    UT_BOOL("advanced", "relic_empty_veil", relicEmptyVeil, 1, UT_H,
+            "the relic pages: 1 = a dark veil over the empty (gray) slots, so held ones stand out; 0 = gray only"),
+    UT_BOOL("advanced", "relic_own_slots", relicOwnSlots, 0, UT_H,
+            "the relic pages: OWN 1 = shows only the slots that hold something; 0 = the held blocks whole"),
     UT_BOOL("advanced", "view_resume", viewResume, 1, UT_H,
             "the Transfer tab: 1 = the collection comes back on its group and row if a tab change or closing the caravan took it away, and each group keeps its row; 0 = the real page until you click, and a group starts at its top"),
     UT_BOOL("advanced", "formula_copies", formulaCopies, 1, UT_H,
@@ -1193,7 +1201,10 @@ int keySince(const char* name) {
                   {"relic_sort", 28},
                   {"relic_split", 28},
                   {"formula_copies", 28},
-                  {"view_resume", 29}};
+                  {"view_resume", 29},
+                  {"relic_empty_veil", 30},
+                  {"relic_own_slots", 30},
+                  {"collect_artifact_bonuses", 30}};
     for (const auto& s : kSince)
         if (!_stricmp(name, s.name)) return s.ver;
     return 0;
@@ -2100,6 +2111,7 @@ bool configGameGenInputs(const char* game, UtGenSettings* out) {
     _snprintf_s(out->textLanguage, sizeof(out->textLanguage), _TRUNCATE, "%s", use.textLanguage);
     out->collectMi = use.collectMi;
     out->collectRelics = use.collectRelics;
+    out->collectArtifactBonuses = use.collectArtifactBonuses;
     out->collectUnobtainable = use.collectUnobtainable;
     return own;
 }

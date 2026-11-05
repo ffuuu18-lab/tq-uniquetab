@@ -323,6 +323,29 @@ int main(int argc, char** argv) {
               "a relic with relic2 set: not pristine");
         check(!utPartsPristineKind(affixed, names, 6, true, why, sizeof(why)) && !strncmp(why, "suffix = ", 9),
               "a relic with a suffix: not pristine");
+        // collect_pristine_only=1 and a crafted artifact (its bonus in relicBonus), whatever
+        // collect_artifact_bonuses says; a relic string on it is still a part
+        const char* crafted[6] = {"", "", "", "records/xpack/item/lootmagicalaffixes/suffix/s.dbr", "", ""};
+        check(!utPartsPristineKind(crafted, names, 6, false, why, sizeof(why)) &&
+                  utPartsPristineKind(crafted, names, 6, false, why, sizeof(why), true) && !why[0] &&
+                  !utPartsPristineKind(own, names, 6, false, why, sizeof(why), true) && !strncmp(why, "relic = ", 8),
+              "an artifact's own relicBonus is pristine (a unique's is not); a relic on it is a part");
+        // the artifact routing: a listed bonus green, anything else plain, nothing refused
+        const char* atab[2] = {"records/A/one.dbr", "records/a/two.dbr"};
+        int ai = 9;
+        check(utArtifactRoute("records\\a\\TWO.dbr", atab, 2, &ai) == kUtRelicRouteGreen && ai == 1 &&
+                  utArtifactRoute("", atab, 2, &ai) == kUtRelicRoutePlain && ai == -1 &&
+                  utArtifactRoute("records/a/three.dbr", atab, 2, &ai) == kUtRelicRoutePlain &&
+                  utArtifactRoute("records/a/one.dbr", nullptr, 0, &ai) == kUtRelicRoutePlain &&
+                  utRelicRouteAccepted(kUtRelicRoutePlain),
+              "an artifact: a listed bonus to its green slot, no bonus or an unlisted one to the plain slot");
+        UtDepositFacts af = {};
+        af.viewOn = af.mpKnown = af.tableOwns = af.bindings = af.isItem = af.inCatalogue = true;
+        af.caller = kUtDepCallerDrag;
+        af.haveCap = af.capMatches = af.relicKind = true;
+        af.rowsNow = 3;
+        af.relicRoute = kUtRelicRoutePlain;
+        check(utDepositDecide(af) == kUtDepTable, "an artifact's third row goes to its plain slot");
 
         // the routing (N = 3, a table of two bonuses; the comparison folds)
         const char* table[2] = {"records/xpack/item/relics/bonus/B_One.dbr",

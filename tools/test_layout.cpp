@@ -1526,6 +1526,30 @@ int main() {
                ut::utRelicMarksStyle(false, false, 3, true) == 0,
            "OWN on the relic page: empty slots of a held block stay gray, only slots with a count are "
            "coloured; an item page's marks still wait for the trusted ones", "");
+        // relic_empty_veil follows the gray lend (ut_viewgate utOwnedGray: not held, not hovered,
+        // style 3) - the marks trusted here, so an item slot's style is owned_marks
+        auto grayOf = [](bool held, bool hovered, bool relic, int marks, bool journal) {
+            return !held && !hovered && ut::utRelicMarksStyle(true, relic, marks, journal) == 3;
+        };
+        ok(ut::utRelicEmptyVeiled(1, true, grayOf(false, false, true, 0, true)) &&
+               ut::utRelicEmptyVeiled(1, true, grayOf(false, false, true, 1, true)) &&
+               !ut::utRelicEmptyVeiled(1, true, grayOf(true, false, true, 1, true)) &&
+               !ut::utRelicEmptyVeiled(1, true, grayOf(false, true, true, 1, true)) &&
+               !ut::utRelicEmptyVeiled(1, true, grayOf(false, false, true, 1, false)) &&
+               !ut::utRelicEmptyVeiled(0, true, grayOf(false, false, true, 1, true)) &&
+               !ut::utRelicEmptyVeiled(1, false, grayOf(false, false, false, 3, true)),
+           "relic_empty_veil: an empty relic slot is veiled at any owned_marks; a held or the hovered "
+           "slot stays bright, nothing while the journal set is unknown or at 0, never an item page's "
+           "gray slot", "");
+        // the artifact page's formula cells (unique places there) take the relic look: under OWN
+        // (the marks not trusted) a held block's formula the collection lacks is gray, not coloured
+        const bool cell = ut::utRelicLook(false, true);
+        ok(cell && ut::utRelicLook(true, false) && !ut::utRelicLook(false, false) &&
+               ut::utRelicMarksStyle(false, cell, 1, true) == 3 &&
+               ut::utRelicEmptyVeiled(1, cell, grayOf(false, false, cell, 1, true)) &&
+               ut::utRelicMarksStyle(false, ut::utRelicLook(false, false), 3, true) == 0,
+           "a formula cell of the artifact page takes the relic look: gray at any owned_marks and under "
+           "OWN, veiled by relic_empty_veil; an item page's unique place keeps the item rule", "");
     }
     {   // the block panels (relic_panels) on a 5 x 9 area (3 bonuses a line after the gap column): a
         // relic block of three rows (the second wraps), a charm block of one shard (a dead red cell),
@@ -1617,6 +1641,14 @@ int main() {
            "the ground covers every cell but the slots: the gap column, the empty line, short rows, a dead red cell",
            "");
         ok(ut::utRelicGroundRuns(occ, 6, 4, runs, 3) == 3, "the runs stop at the array's end", "");
+        // an artifact's formula cell (2 x 1 at column 0) stands on its cells and widens its block's panel
+        ut::UtRelicList fl;
+        fl.rows.resize(1);
+        fl.rows[0].block = 0;
+        ut::UtRelicPanel fpn[1] = {{0, 'A', 0, 0, 0, 2, 2}};
+        ut::utRelicFormulaCell(fl, ut::UtRelicFormulaPlace{0, 0, 0, 2, 2, 1}, 6, 4, occ, fpn, 1);
+        ok(occ[2 * 6 + 0] && occ[2 * 6 + 1] && !occ[2 * 6 + 2] && fpn[0].lines == 3 && fpn[0].cols == 2,
+           "a formula cell is no ground, and a third formula's line widens its block's panel", "");
     }
 
     printf(g_fail ? "[layout]  FAILED: %d of %d\n" : "[layout]  ALL PASS (%d checks)\n",

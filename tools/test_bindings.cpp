@@ -339,6 +339,29 @@ void runExportHalf(const std::string& game, Pe* engine, Pe* gamedll) {
            "replica's prefix / suffix (non-const __thiscall QAEPBDXZ, optional)",
            detail);
     }
+    {   // the reagent mark: the three lists out of IsReagent1/2/3Avalable, the count line's two
+        const char* const names[3] = {TQ_TIP_FORMULA_ISREAGENT1AVALABLE, TQ_TIP_FORMULA_ISREAGENT2AVALABLE,
+                                      TQ_TIP_FORMULA_ISREAGENT3AVALABLE};
+        unsigned x[3] = {0, 0, 0};
+        unsigned long rv[3] = {0, 0, 0};
+        for (int i = 0; i < 3; ++i) {
+            rv[i] = gamedll->fnRva(names[i]);
+            x[i] = ut::utReagentListOffset((const unsigned char*)gamedll->fn(names[i]));
+        }
+        const unsigned long li = engine->fnRva(TQ_LOC_INSTANCE);
+        const unsigned long ll = engine->fnRva(TQ_LOC_LOCALIZE);
+        _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                    "IsReagent1/2/3Avalable rva 0x%lX / 0x%lX / 0x%lX read this+0x%X / +0x%X / +0x%X; "
+                    "LocalizationManager::Instance rva 0x%lX, Localize rva 0x%lX",
+                    rv[0], rv[1], rv[2], x[0], x[1], x[2], li, ll);
+        ok(rv[0] == 0x1BC010 && rv[1] == 0x1BBE80 && rv[2] == 0x1BBCF0 && x[0] == 0x54C && x[1] == 0x570 &&
+               x[2] == 0x594 && li == 0x1C21D0 && ll == 0x1C1D40 && TQ_LOC_INSTANCE_CC == TQCC_CDECL &&
+               TQ_LOC_LOCALIZE_CC == TQCC_CDECL && strstr(TQ_LOC_LOCALIZE, "@UAAPBGPBDZZ") != nullptr &&
+               TQ_TIP_FORMULA_ISREAGENT1AVALABLE_REQ == 0 && TQ_LOC_LOCALIZE_REQ == 0,
+           "the reagent mark: a formula's three reagent lists 0x24 apart, decoded from IsReagentNAvalable "
+           "(read, never called); Localize a virtual __cdecl with varargs (optional)",
+           detail);
+    }
 }
 
 // ---- cases 2 and 3: the decoders and the vftable slots, over Game.dll ----------------------------

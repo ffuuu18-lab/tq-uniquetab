@@ -51,6 +51,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -100,6 +101,7 @@ struct RelicItem {
     std::string shardBitmap;
     std::int32_t shards = 0;               // completedRelicLevel: the shards that complete it
     std::vector<std::string> bonuses;      // the completion bonus records, as the table spells them
+    std::vector<std::string> formulae;     // an artifact's catalogue formulae (uniq-relics.txt's F lines)
 };
 
 struct CatalogueStats {
@@ -139,10 +141,15 @@ bool texSize(const std::vector<std::uint8_t>& d, int& w, int& h);
 // record it lists in "excluded" (sorted by record). `warnings` receives the checks the Python
 // tool asserts (they do not stop a generation). `relics` (when given) receives the relic and
 // charm records, `relicLeft` the ones the EXCLUDE rule left out (sorted by record).
+// `artifactBonuses` (when given) receives each artifact's completion bonuses, keyed by its folded
+// record (lower case, '/'): the union of the tables of every ItemArtifactFormula record whose
+// artifactName names it (artifactBonusTableName, read as relicBonuses reads a relic's table), the
+// formulae in folded-record order, a bonus kept once (folded) where it is first named.
 bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
                   std::vector<ExcludedItem>& excluded, std::vector<std::string>& warnings,
                   std::string* error, bool collectUnobtainable = false, bool collectMi = false,
-                  std::vector<RelicItem>* relics = nullptr, std::vector<ExcludedItem>* relicLeft = nullptr);
+                  std::vector<RelicItem>* relics = nullptr, std::vector<ExcludedItem>* relicLeft = nullptr,
+                  std::map<std::string, std::vector<std::string>>* artifactBonuses = nullptr);
 
 // pack_catalogue.py: items -> catalogue.bin bytes. False (with the reason) on bad input.
 bool packCatalogue(std::vector<CatalogueItem>& items, std::vector<std::uint8_t>& out,
@@ -168,10 +175,13 @@ struct ListsOutput {
     std::size_t unpaged = 0;
 };
 // hostCols x hostRows: the grid the pages are laid out on (ui_geometry.h; 16 x 15 cells, the
-// Transfer sack TQ.exe sizes).
+// Transfer sack TQ.exe sizes). `artifactBlocks` (collect_artifact_bonuses=1): the artifacts
+// (isRelic) are on the artifact block page (uniq-relics.txt's A blocks), so no E line and no
+// uniq-records.txt line takes them; their group keeps its G line (its slot from them), counting
+// the other records only - a group of artifacts alone says 0, like the relic page's.
 void buildLists(const std::vector<CatalogueItem>& items, const std::vector<ExcludedItem>& excluded,
                 ListsOutput& out, const utg::GroupSet& rules, const std::vector<std::string>& viewKeys,
-                int hostCols = 16, int hostRows = 15);
+                int hostCols = 16, int hostRows = 15, bool artifactBlocks = false);
 
 // Slot word -> the on-disk group index of model/catalogue.h (28 = Other).
 int slotGroupOf(const std::string& slot);

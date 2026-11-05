@@ -50,7 +50,10 @@ bool storeOnTake(const char* record, unsigned long long seq);
 // The relic and charm takes (several rows of one record): a whole take of the row its slot hands
 // out now (journalTakeRow), and the red slot's take of ONE shard (journalTakeShard: *outSeq = the
 // row of the shard handed out, *left = the source's shards after it). Same gate as storeOnTake.
-bool storeOnTakeRow(const char* record, unsigned long long seq);
+// An artifact's take passes its record's bonus table (`tableN` >= 0, ut_relicroute.h): the row
+// must be the one its plain or green slot hands out (utArtifactTakeChoice).
+bool storeOnTakeRow(const char* record, unsigned long long seq, const char* const* table = nullptr,
+                    int tableN = -1);
 bool storeOnTakeShard(const char* record, unsigned long long seq, unsigned long long* outSeq,
                       unsigned* left);
 

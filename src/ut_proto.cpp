@@ -294,7 +294,7 @@ bool buildOne(TqSack* s, const UtProtoPlace& p, Live* out) {
         // the table's bonus) - shown gray
         bool built = false;
         if (p.seq && journalRowBySeq(p.seq, &row, nullptr)) {
-            if (p.slot == 1) row.var1 = utRelicProtoVar1(row.var1);   // a split: the 1-shard piece
+            if (p.slot == 1 && !p.whole) row.var1 = utRelicProtoVar1(row.var1);   // a split: the 1-shard piece
             built = utReplicaFromIdentity(&rep, row);
             if (!built)
                 logW("view: the stored identity of %s (row %llu) could not be built - shown as the "
@@ -682,45 +682,82 @@ void protoObjectRecord(const void* obj, char* out, unsigned cap) {
     if (obj) objectNameFolded(obj, out, cap);
 }
 
-bool protoFindObjects(unsigned itemId, unsigned ctrlId, const void** item, const void** ctrl) {
-    if (item) *item = nullptr;
-    if (ctrl) *ctrl = nullptr;
-    if (!g_tq.ObjectManagerGet || !g_tq.ObjectManagerGetObjectList || !g_tq.ObjectGetObjectId)
-        return false;
-    TqPtrVector v = {nullptr, nullptr, nullptr};
+namespace {
+// GetObjectList into `v` (the caller frees it, also on false) and its length. The vector's
+// storage is proven readable ONCE here, so the walks below read it inside one frame for the whole
+// loop, as walkObjects does: a VirtualQuery and a frame per object cost ~45 ms a move at 40k
+// objects. False = no list, or one that does not read as one (over the bound included).
+bool objectList(TqPtrVector* v, size_t* n) {
+    *n = 0;
     bool listed = false;
     utGuardEnter();
     __try {
         void* om = g_tq.ObjectManagerGet();
         if (om) {
-            g_tq.ObjectManagerGetObjectList(om, &v);
+            g_tq.ObjectManagerGetObjectList(om, v);
             listed = true;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         listed = false;
     }
     utGuardLeave();
-    if (!listed) {
-        freeEngineVector(&v);
+    if (!listed || !v->first) return listed && !v->last;   // an empty list reads as one
+    if (v->last < v->first || v->last - v->first >= 4000000) return false;
+    *n = (size_t)(v->last - v->first);
+    return readable(v->first, *n * sizeof(*v->first));
+}
+
+// Item's vftable replica slot (isItemObject's test) for an object of the list. PURE READS, inside
+// the walk's frame.
+bool itemVftIn(const void* obj) {
+    const unsigned char* vt = *(const unsigned char* const*)obj;
+    return vt && *(const void* const*)(vt + g_tq.itemSlotReplica) ==
+                     (const void*)g_tq.ItemGetItemReplicaInfo;
+}
+
+// A walk that faulted: nothing it read counts (the caller refuses the move). Said after the frame.
+void walkFaulted(const char* who, size_t n) {
+    logE("proto: %s: the walk of %u engine objects faulted - nothing was read (a move is refused)",
+         who, (unsigned)n);
+}
+}  // namespace
+
+bool protoFindObjects(unsigned itemId, unsigned ctrlId, const void** item, const void** ctrl) {
+    if (item) *item = nullptr;
+    if (ctrl) *ctrl = nullptr;
+    if (!g_tq.ObjectManagerGet || !g_tq.ObjectManagerGetObjectList || !g_tq.ObjectGetObjectId)
         return false;
-    }
-    const size_t n = v.first && v.last >= v.first ? (size_t)(v.last - v.first) : 0;
-    for (size_t k = 0; k < n && n < 4000000; ++k) {
-        const void* obj = nullptr;
-        if (!safeRead(v.first + k, &obj, sizeof(obj)) || !obj) continue;
-        const unsigned id = objectId(obj);
-        if (!id) continue;
-        if (item && id == itemId && isItemObject(obj)) *item = obj;
-        if (ctrl && ctrlId && id == ctrlId) {
-            const void* vt = nullptr;
-            if (g_tq.ControllerPlayerVftable && safeRead(obj, &vt, sizeof(vt)) &&
-                vt == g_tq.ControllerPlayerVftable)
-                *ctrl = obj;
+    TqPtrVector v = {nullptr, nullptr, nullptr};
+    size_t n = 0;
+    bool ok = objectList(&v, &n);
+    const bool itemTest = item && g_tq.itemSlotReplica >= 0 && g_tq.ItemGetItemReplicaInfo;
+    const void* foundItem = nullptr;
+    const void* foundCtrl = nullptr;
+    if (ok && n) {
+        utGuardEnter();
+        __try {   // pure reads and the id getter: no lock, no log in here
+            for (size_t k = 0; k < n; ++k) {
+                const void* obj = v.first[k];
+                if (!obj) continue;
+                const unsigned id = g_tq.ObjectGetObjectId(obj);
+                if (!id) continue;
+                if (itemTest && id == itemId && itemVftIn(obj)) foundItem = obj;
+                if (ctrl && ctrlId && id == ctrlId && g_tq.ControllerPlayerVftable &&
+                    *(const void* const*)obj == g_tq.ControllerPlayerVftable)
+                    foundCtrl = obj;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ok = false;
         }
+        utGuardLeave();
+        if (!ok) walkFaulted("protoFindObjects", n);
     }
     utGuardEnter();
     freeEngineVector(&v);
     utGuardLeave();
+    if (!ok) return false;
+    if (item) *item = foundItem;
+    if (ctrl) *ctrl = foundCtrl;
     return true;
 }
 
@@ -733,28 +770,26 @@ bool protoFindItems(const unsigned* ids, int n, const void** objs) {
         g_tq.itemSlotReplica < 0 || !g_tq.ItemGetItemReplicaInfo)
         return false;
     TqPtrVector v = {nullptr, nullptr, nullptr};
-    bool listed = false;
-    utGuardEnter();
-    __try {
-        void* om = g_tq.ObjectManagerGet();
-        if (om) {
-            g_tq.ObjectManagerGetObjectList(om, &v);
-            listed = true;
+    size_t cnt = 0;
+    bool listed = objectList(&v, &cnt);   // over the bound = nothing compared
+    if (listed && cnt) {
+        utGuardEnter();
+        __try {   // pure reads and the id getter: no lock, no log in here
+            for (size_t k = 0; k < cnt; ++k) {
+                const void* obj = v.first[k];
+                if (!obj) continue;
+                const unsigned id = g_tq.ObjectGetObjectId(obj);
+                if (!id) continue;
+                const unsigned* at = std::lower_bound(ids, ids + n, id);
+                if (at != ids + n && *at == id && itemVftIn(obj)) objs[at - ids] = obj;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            listed = false;
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        listed = false;
-    }
-    utGuardLeave();
-    if (listed) {
-        const size_t cnt = v.first && v.last >= v.first ? (size_t)(v.last - v.first) : 0;
-        if (cnt >= 4000000) listed = false;   // over the bound = nothing compared
-        for (size_t k = 0; listed && k < cnt; ++k) {
-            const void* obj = nullptr;
-            if (!safeRead(v.first + k, &obj, sizeof(obj)) || !obj) continue;
-            const unsigned id = objectId(obj);
-            if (!id) continue;
-            const unsigned* at = std::lower_bound(ids, ids + n, id);
-            if (at != ids + n && *at == id && isItemObject(obj)) objs[at - ids] = obj;
+        utGuardLeave();
+        if (!listed) {
+            for (int i = 0; i < n; ++i) objs[i] = nullptr;
+            walkFaulted("protoFindItems", cnt);
         }
     }
     utGuardEnter();

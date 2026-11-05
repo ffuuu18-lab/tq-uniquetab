@@ -90,6 +90,8 @@ struct UtDepositFacts {
     bool relicKind;      // the record is a relic or charm of the relic list: any number of rows
     bool manyKind;       // an arcane formula with formula_copies=1: any number of rows too
     int relicRoute;      // utRelicRoute of the capture (UtRelicRoute; relicKind only)
+    // Appended after it, so an aggregate that leaves it out means "not an artifact":
+    bool artifactKind;   // an artifact record (the list's part A, or the "artifact" group's)
 };
 
 // ---- collect_pristine_only ----------------------------------------------------------------------
@@ -116,14 +118,16 @@ inline bool utPartsPristine(const char* const* parts, const char* const* names, 
 // The same test PER KIND. `parts` are the six strings after the base in replica order (prefix,
 // suffix, relic, relicBonus, relic2, relicBonus2). A relic or charm item's own relic and
 // relicBonus strings (parts 2 and 3) are its identity - its completion bonus - not a part beyond
-// its record; the others must still be empty. A unique keeps the whole test.
+// its record; the others must still be empty. An artifact's relicBonus is its completion bonus
+// too (a crafted one keeps it there; whatever collect_artifact_bonuses says), its relic must be
+// empty. A unique keeps the whole test.
 const int kUtPartRelic = 2, kUtPartRelicBonus = 3;
 inline bool utPartsPristineKind(const char* const* parts, const char* const* names, int n,
-                                bool relicKind, char* why, size_t whyCap) {
-    if (!relicKind) return utPartsPristine(parts, names, n, why, whyCap);
+                                bool relicKind, char* why, size_t whyCap, bool artifactKind = false) {
+    if (!relicKind && !artifactKind) return utPartsPristine(parts, names, n, why, whyCap);
     if (why && whyCap) why[0] = 0;
     for (int i = 0; parts && i < n; ++i) {
-        if (i == kUtPartRelic || i == kUtPartRelicBonus) continue;
+        if (i == kUtPartRelicBonus || (i == kUtPartRelic && !artifactKind)) continue;
         if (!utPartsPristine(parts + i, names ? names + i : nullptr, 1, why, whyCap)) return false;
     }
     return true;
@@ -472,6 +476,29 @@ inline unsigned utReplicaGetterOffset(const unsigned char* b) {
     unsigned r = 0;
     memcpy(&r, b + 2, 4);
     return r;
+}
+
+// ItemArtifactFormula::IsReagent1/2/3Avalable (Game.dll 0x1BC010 / 0x1BBE80 / 0x1BBCF0): where a
+// formula keeps reagent N's three lists (the reagent mark of the formula's rollover reads them;
+// the three functions are never called). Each opens `mov esi,ecx` and `mov eax,0x2AAAAAAB` (+0x06:
+// the /24 of a vector<string>'s span, a VS2012 std::string being 0x18 bytes), then
+// `mov ecx,[esi+X+4]` / `sub ecx,[esi+X]` (+0x22: the base-record list's last / first),
+// `lea ebp,[esi+X+0x18]` (+0x57: the suffix list), `mov edi,[esi+X]` (+0x5F) and
+// `lea eax,[esi+X+0x0C]` (+0x68: the prefix list). Returns X, 0 = not that shape. Reads 0x70 bytes.
+inline unsigned utReagentListOffset(const unsigned char* b) {
+    static const unsigned char kHead[7] = {0x8B, 0xF1, 0xB8, 0xAB, 0xAA, 0xAA, 0x2A};
+    if (!b || memcmp(b + 0x06, kHead, sizeof(kHead)) != 0 || b[0x22] != 0x8B || b[0x23] != 0x8E ||
+        b[0x28] != 0x2B || b[0x29] != 0x8E || b[0x57] != 0x8D || b[0x58] != 0xAE ||
+        b[0x5F] != 0x8B || b[0x60] != 0xBE || b[0x68] != 0x8D || b[0x69] != 0x86)
+        return 0;
+    unsigned last = 0, x = 0, suffix = 0, again = 0, prefix = 0;
+    memcpy(&last, b + 0x24, 4);
+    memcpy(&x, b + 0x2A, 4);
+    memcpy(&suffix, b + 0x59, 4);
+    memcpy(&again, b + 0x61, 4);
+    memcpy(&prefix, b + 0x6A, 4);
+    const bool same = last == x + 4 && again == x && prefix == x + 0x0C && suffix == x + 0x18;
+    return x && x < 0x10000 && same ? x : 0;
 }
 
 }  // namespace ut

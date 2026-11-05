@@ -287,11 +287,11 @@ bool storeOnTake(const char* record, unsigned long long seq) {
     return journalTakeCommit(key, seq, &rolledBack);
 }
 
-bool storeOnTakeRow(const char* record, unsigned long long seq) {
+bool storeOnTakeRow(const char* record, unsigned long long seq, const char* const* table, int tableN) {
     char key[256];
     if (!record || !utJournalKey(record, key, sizeof(key)) || !storeTakeAllowed()) return false;
     bool rolledBack = false;
-    return journalTakeRow(key, seq, &rolledBack);
+    return journalTakeRow(key, seq, &rolledBack, table, tableN);
 }
 
 bool storeOnTakeShard(const char* record, unsigned long long seq, unsigned long long* outSeq,

@@ -480,7 +480,7 @@ int main() {
     {
         const UtConfig d;
         check(d.ownedMarks == 3, "the default: owned_marks=3");
-        check(UT_INI_VERSION == 29 && UT_GRAY_ICONS_SINCE == 13, "ini_version 25, the gray default since 13");
+        check(UT_INI_VERSION == 30 && UT_GRAY_ICONS_SINCE == 13, "ini_version 25, the gray default since 13");
         char old[512];
         _snprintf_s(old, sizeof(old), _TRUNCATE,
                     "ini_version=11\r\n[display]\r\nowned_marks=1\r\nslot_plates=2\r\n");
@@ -489,12 +489,12 @@ int main() {
         ut::configReload(ini);
         check(ut::g_cfg.ownedMarks == 3 && ut::g_cfg.slotPlates == 2,
               "ini_version 11 reading owned_marks=1 (the old default) -> 3, the rest kept");
-        check(logHas("owned_marks=1 was the old default") && logHas("migrated from ini_version=11 to 29"),
+        check(logHas("owned_marks=1 was the old default") && logHas("migrated from ini_version=11 to 30"),
               "and the log says so");
         DWORD len = 0;
         char* text = readAll(ini, &len);
-        check(text && hasKeyLine(text, "owned_marks=3") && strstr(text, "ini_version=29") != nullptr,
-              "the rewritten file says owned_marks=3 and ini_version=29");
+        check(text && hasKeyLine(text, "owned_marks=3") && strstr(text, "ini_version=30") != nullptr,
+              "the rewritten file says owned_marks=3 and ini_version=30");
         check(text && patchKey(text, &len, "owned_marks=3", "owned_marks=1"),
               "the user sets owned_marks=1 (the veil) in the current file");
         if (text) {
@@ -511,7 +511,7 @@ int main() {
         logClear();
         ut::configReload(ini);
         check(ut::g_cfg.ownedMarks == 3 && logHas("owned_marks=1 was the old default") &&
-                  logHas("migrated from ini_version=12 to 29"),
+                  logHas("migrated from ini_version=12 to 30"),
               "the merge rule: a branch's ini_version 12 with owned_marks=1 is moved to 3 once (12 is before the gray default)");
         for (int v = 0; v <= 2; v += 2) {
             _snprintf_s(old, sizeof(old), _TRUNCATE, "ini_version=11\r\n[display]\r\nowned_marks=%d\r\n", v);
@@ -532,7 +532,7 @@ int main() {
     // ---- 5y. ini_version 12 (13 after the merge) changes no value; it rewrites mp_collect's comment ----
     printf("\n5y. an ini_version 11 file (the old mp_collect comment) is rewritten, every value kept\n");
     {
-        check(UT_INI_VERSION == 29, "ini_version 25 (13: the comment bump merged with 12; 14: the search keys)");
+        check(UT_INI_VERSION == 30, "ini_version 25 (13: the comment bump merged with 12; 14: the search keys)");
         writeText(ini,
                   "ini_version=11\r\n[collection]\r\n"
                   "; read and kept (GD's key); in this version deposits and takes are ALWAYS refused "
@@ -540,7 +540,7 @@ int main() {
                   "[display]\r\nslot_plates=1\r\nhave_marks=1\r\ngrid_cover=0\r\n");
         logClear();
         ut::configReload(ini);
-        check(ut::g_cfg.iniVersion == 29 && logHas("migrated from ini_version=11 to 29"),
+        check(ut::g_cfg.iniVersion == 30 && logHas("migrated from ini_version=11 to 30"),
               "ini_version 11 is migrated to 24, and the log says so");
         check(ut::g_cfg.mpCollect == 0 && ut::g_cfg.slotPlates == 1 && ut::g_cfg.haveMarks == 1 &&
                   ut::g_cfg.gridCover == 0,
@@ -551,8 +551,8 @@ int main() {
         char* text = readAll(ini, &len);
         check(text && strstr(text, "ALWAYS refused") == nullptr &&
                   strstr(text, "; 1 = deposits and takes work in a multiplayer game too (hosted or joined)") != nullptr &&
-                  hasKeyLine(text, "mp_collect=0") && strstr(text, "ini_version=29") != nullptr,
-              "the file now carries the new mp_collect comment, the kept value and ini_version=29");
+                  hasKeyLine(text, "mp_collect=0") && strstr(text, "ini_version=30") != nullptr,
+              "the file now carries the new mp_collect comment, the kept value and ini_version=30");
         free(text);
         logClear();
         ut::configReload(ini);
@@ -565,7 +565,7 @@ int main() {
         logClear();
         ut::configReload(ini);
         text = readAll(ini, &len);
-        check(ut::g_cfg.iniVersion == 29 && logHas("migrated from ini_version=12 to 29") &&
+        check(ut::g_cfg.iniVersion == 30 && logHas("migrated from ini_version=12 to 30") &&
                   ut::g_cfg.mpCollect == 1 && ut::g_cfg.ownedMarks == 2 && text &&
                   strstr(text, "ALWAYS refused") == nullptr,
               "the merge: a branch ini_version 12 (the old comment) gets the new comment too, values kept");
@@ -598,7 +598,7 @@ int main() {
         check(!ut::configTakeTooltipCarry(&k), "taken once");
         logClear();
         ut::configTooltipCarryDone();
-        check(logHas("rewritten at ini_version=29 - the rollover keys left it"),
+        check(logHas("rewritten at ini_version=30 - the rollover keys left it"),
               "the words written: configTooltipCarryDone rewrites the file at 21");
         logClear();
         ut::configTooltipCarryDone();
@@ -607,10 +607,10 @@ int main() {
         DWORD len = 0;
         char* text = readAll(ini, &len);
         check(text && !strstr(text, "tooltip_text") && !strstr(text, "tooltip_class") &&
-                  hasKeyLine(text, "ini_version=29"),
-              "the rewritten file has no rollover key and says ini_version=29");
+                  hasKeyLine(text, "ini_version=30"),
+              "the rewritten file has no rollover key and says ini_version=30");
         free(text);
-        writeText(ini, "ini_version=29\r\n[general]\r\ntooltip_text_no=Nope\r\ntooltip_class_yes=22\r\n");
+        writeText(ini, "ini_version=30\r\n[general]\r\ntooltip_text_no=Nope\r\ntooltip_class_yes=22\r\n");
         logClear();
         ut::configReload(ini);
         check(logHas("tooltip_text_no=Nope is not read from uniquetab.ini any more - its value belongs in "
@@ -743,7 +743,7 @@ int main() {
         writeText(ini, "ini_version=13\r\n[display]\r\nowned_marks=2\r\n");
         logClear();
         ut::configReload(ini);
-        check(ut::g_cfg.iniVersion == 29 && logHas("migrated from ini_version=13 to 29") &&
+        check(ut::g_cfg.iniVersion == 30 && logHas("migrated from ini_version=13 to 30") &&
                   ut::g_cfg.ownedMarks == 2 && ut::g_cfg.search == 1 && ut::g_cfg.searchButtons == 1 &&
                   ut::g_cfg.searchLore == 0 && ut::g_cfg.searchPrebuild == 0 &&
                   ut::g_cfg.searchDebugQuery[0] == 0,
@@ -775,7 +775,7 @@ int main() {
         writeText(ini, "ini_version=14\r\n[display]\r\nsearch_buttons=0\r\n");
         logClear();
         ut::configReload(ini);
-        check(ut::g_cfg.iniVersion == 29 && logHas("migrated from ini_version=14 to 29") &&
+        check(ut::g_cfg.iniVersion == 30 && logHas("migrated from ini_version=14 to 30") &&
                   ut::g_cfg.searchButtons == 0 && ut::g_cfg.searchMark == 1,
               "a file from 14 is migrated: its values kept, search_mark at its default");
         text = readAll(ini, &len);
@@ -787,7 +787,7 @@ int main() {
     printf("\n5za. search_mark=1 by default, search_mark_color, a 15 file migrated once\n");
     {
         const UtConfig d;
-        check(d.collectMi == 1 && d.collectUnobtainable == 0 && d.searchMark == 1 && !strcmp(d.searchMarkColor, "gold") && UT_INI_VERSION == 29 &&
+        check(d.collectMi == 1 && d.collectUnobtainable == 0 && d.searchMark == 1 && !strcmp(d.searchMarkColor, "gold") && UT_INI_VERSION == 30 &&
                   UT_SEARCH_FRAME_SINCE == 16,
               "the defaults: collect_mi=1, collect_unobtainable=0, search_mark=1 (a thin frame), search_mark_color=gold; ini_version 25");
         char cur[512];
@@ -838,8 +838,8 @@ int main() {
                   "search_lore=1\r\n[advanced]\r\npad_y=8\r\nplate_label_size=16\r\nsearch_debug_query=fire\r\n");
         logClear();
         ut::configReload(ini);
-        check(ut::g_cfg.iniVersion == 29 && ut::g_cfg.searchMark == 1 &&
-                  logHas("search_mark=3 was the old default") && logHas("migrated from ini_version=15 to 29"),
+        check(ut::g_cfg.iniVersion == 30 && ut::g_cfg.searchMark == 1 &&
+                  logHas("search_mark=3 was the old default") && logHas("migrated from ini_version=15 to 30"),
               "a 15 file reading search_mark=3 (the old default) -> 1, and the log says so");
         check(ut::g_cfg.searchButtons == 0 && ut::g_cfg.ownedMarks == 2 && ut::g_cfg.searchLore == 1 &&
                   logHas("the file had pad_y=8, not carried") && ut::g_cfg.plateLabelSize == 16 &&
@@ -848,8 +848,8 @@ int main() {
         DWORD len = 0;
         char* text = readAll(ini, &len);
         check(text && hasKeyLine(text, "search_mark=1") &&
-                  hasKeyLine(text, "search_mark_color=gold") && strstr(text, "ini_version=29") != nullptr,
-              "the rewritten file says search_mark=1, search_mark_color=gold and ini_version=29");
+                  hasKeyLine(text, "search_mark_color=gold") && strstr(text, "ini_version=30") != nullptr,
+              "the rewritten file says search_mark=1, search_mark_color=gold and ini_version=30");
         check(text && patchKey(text, &len, "search_mark=1", "search_mark=3"),
               "the user sets search_mark=3 (the frame and the wash) in the current file");
         if (text) {
@@ -866,7 +866,7 @@ int main() {
             logClear();
             ut::configReload(ini);
             check(ut::g_cfg.searchMark == v && !logHas("search_mark=3 was the old default") &&
-                      logHas("migrated from ini_version=15 to 29"),
+                      logHas("migrated from ini_version=15 to 30"),
                   v == 1 ? "a 15 file with search_mark=1 (the player's) stays 1"
                          : "a 15 file with search_mark=2 (the player's) stays 2");
         }
@@ -876,7 +876,7 @@ int main() {
     printf("\n5zb. search_transfer=1 by default, read, and a 16 file migrated keeping every value\n");
     {
         const UtConfig d;
-        check(d.searchTransfer == 1 && UT_INI_VERSION == 29,
+        check(d.searchTransfer == 1 && UT_INI_VERSION == 30,
               "the default: search_transfer=1 (the field on the real Transfer page too); ini_version 25");
         char cur[256];
         _snprintf_s(cur, sizeof(cur), _TRUNCATE, "ini_version=%d\r\n[display]\r\nsearch_transfer=0\r\n",
@@ -891,7 +891,7 @@ int main() {
                   "search_buttons=0\r\nsearch_lore=1\r\n[advanced]\r\npad_y=8\r\nsearch_debug_query=fire\r\n");
         logClear();
         ut::configReload(ini);
-        check(ut::g_cfg.iniVersion == 29 && logHas("migrated from ini_version=16 to 29") &&
+        check(ut::g_cfg.iniVersion == 30 && logHas("migrated from ini_version=16 to 30") &&
                   !logHas("was the old default") && ut::g_cfg.searchTransfer == 1,
               "a 16 file is migrated to 24 and gains search_transfer=1");
         check(ut::g_cfg.searchMark == 3 && !strcmp(ut::g_cfg.searchMarkColor, "#40e0ff") &&
@@ -900,14 +900,14 @@ int main() {
               "every value of the 16 file is kept (a 3 set in a 16 file is the player's)");
         DWORD len = 0;
         char* text = readAll(ini, &len);
-        check(text && hasKeyLine(text, "search_transfer=1") && strstr(text, "ini_version=29") != nullptr &&
+        check(text && hasKeyLine(text, "search_transfer=1") && strstr(text, "ini_version=30") != nullptr &&
                   hasKeyLine(text, "search_mark=3"),
-              "the rewritten file says search_transfer=1, search_mark=3 and ini_version=29");
+              "the rewritten file says search_transfer=1, search_mark=3 and ini_version=30");
         if (text) free(text);
         writeText(ini, "ini_version=16\r\n[display]\r\nsearch_transfer=0\r\n");
         logClear();
         ut::configReload(ini);
-        check(ut::g_cfg.searchTransfer == 0 && logHas("migrated from ini_version=16 to 29"),
+        check(ut::g_cfg.searchTransfer == 0 && logHas("migrated from ini_version=16 to 30"),
               "a 0 already in a 16 file (a hand edit) is kept");
     }
 
@@ -972,11 +972,11 @@ int main() {
         ut::configReload(ini);
         char want36[128];
         _snprintf_s(want36, sizeof(want36), _TRUNCATE,
-                    "migrated from ini_version=36 to %d - 12 setting(s) kept, 38 new one(s) defaulted",
+                    "migrated from ini_version=36 to %d - 12 setting(s) kept, 41 new one(s) defaulted",
                     UT_INI_VERSION);
         check(logHas(want36),
               "10 of its keys are settings here (GD's label keys; "
-              "search_buttons; export_csv; tooltip_mark), 30 are new (enabled; edit_button; relic_block_gap; relic_bonus_gap; collect_mi; collect_relics; collect_unobtainable; slot_plates; "
+              "search_buttons; export_csv; tooltip_mark), 30 are new (enabled; edit_button; relic_block_gap; relic_bonus_gap; collect_mi; collect_relics; collect_artifact_bonuses; collect_unobtainable; slot_plates; "
               "grid_cover; the other search keys, search_transfer among them; pad_screen, label_screen)");
         check(ut::g_cfg.searchButtons == 1, "search_buttons (GD's key) keeps the value the GD file had");
         check(ut::g_cfg.tooltipMark == 1, "GD's tooltip_mark keeps the value the GD file had");
@@ -1160,14 +1160,15 @@ int main() {
     // ---- 11. the shorter file (GD's renderer) ------------------------------------------------
     printf("\n11. the shorter file: eight keys on top, every other one commented line\n");
     {
-        static const char* const kTop[] = {"enabled", "collect_mi", "collect_relics", "collect_unobtainable",
-                                           "tooltip_mark", "log_level", "view_hotkey", "search"};
+        static const char* const kTop[] = {"enabled", "collect_mi", "collect_relics", "collect_artifact_bonuses",
+                                           "collect_unobtainable", "tooltip_mark", "log_level", "view_hotkey",
+                                           "search"};
         const int nTop = (int)(sizeof(kTop) / sizeof(kTop[0]));
         static char buf[16384];
         const UtConfig d;
         const size_t n = ut::configRender(buf, sizeof(buf), d);
         check(n > 0 && n == ut::configTemplateBytes(), "the template renders");
-        // the template: [general] holds exactly the eight, live, in this order; [advanced] the rest
+        // the template: [general] holds exactly the nine, live, in this order; [advanced] the rest
         const char* gen = strstr(buf, "\r\n[general]\r\n");
         const char* lay = strstr(buf, "\r\n[layout]\r\n");
         const char* adv = strstr(buf, "\r\n[advanced]\r\n");
@@ -1183,7 +1184,7 @@ int main() {
             if (at && at > last) ++order;
             if (at) last = at;
         }
-        check(top == nTop && order == nTop, "[general] has the eight keys live, in the order of the top set");
+        check(top == nTop && order == nTop, "[general] has the nine keys live, in the order of the top set");
         int hidden = 0, liveHidden = 0, bad = 0, whenSet = 0;
         for (int i = 0; i < ut::kUtCfgKeyCount; ++i) {
             const ut::UtCfgKey& k = ut::kUtCfgKeys[i];
@@ -1286,8 +1287,8 @@ int main() {
             {"page_y", "advanced"}, {"log_flush_each_line", "advanced"}, {"search_prebuild", "advanced"},
             {"search_debug_query", "advanced"}, {"text_language", "advanced"}};
         const int n19 = (int)(sizeof(k19) / sizeof(k19[0]));
-        check(n19 == ut::kUtCfgKeyCount - 19 + 4,
-              "the 19 file names every key but the new enabled, layout_outline, layout_edit, edit_button, relic_block_gap, relic_bonus_gap, relic_panels, collect_relics, pad_screen and label_screen, "
+        check(n19 == ut::kUtCfgKeyCount - 22 + 4,
+              "the 19 file names every key but the new enabled, layout_outline, layout_edit, edit_button, relic_block_gap, relic_bonus_gap, relic_panels, collect_relics, collect_artifact_bonuses, pad_screen and label_screen, "
               "the four keys of 23, and the four retired pad keys");
         DeleteFileW(state);
         UtConfig want;   // what the migration must keep
@@ -1329,7 +1330,7 @@ int main() {
         writeText(ini, old);
         logClear();
         ut::configReload(ini);
-        check(ut::g_cfg.iniVersion == 29 && logHas("migrated from ini_version=19 to 29 - 31 setting(s) kept, 19 new one(s) defaulted"),
+        check(ut::g_cfg.iniVersion == 30 && logHas("migrated from ini_version=19 to 30 - 31 setting(s) kept, 22 new one(s) defaulted"),
               "a 19 file is migrated to 25: 31 kept, enabled, layout_outline, layout_edit, edit_button, the two relic gaps, pad_screen, label_screen "
               "and the four keys of 23 new");
         check(ut::g_cfg.ownedOnly == 1 && logHas("moved to uniquetab.state (group=-1 row=0 owned_only=1)"),
@@ -1602,7 +1603,7 @@ int main() {
                        "pad_h=16 ; mine\r\npad_gap=2\r\nplate_label_size=15\r\n");
         logClear();
         ut::configReload(ini);
-        check(ut::g_cfg.iniVersion == 29 && logHas("migrated from ini_version=21 to 29") &&
+        check(ut::g_cfg.iniVersion == 30 && logHas("migrated from ini_version=21 to 30") &&
                   logHas("the file had pad_x=-3, pad_y=8, pad_h=16, pad_gap=2, not carried") &&
                   !logHas("no longer has were dropped"),
               "21 -> 22: the four retired keys named with their values in one INFO line, none silently dropped");
@@ -1613,7 +1614,7 @@ int main() {
                   ut::g_cfg.tooltipMark == 0 && ut::g_cfg.plateLabelSize == 15,
               "the rewritten file: every other value kept, the pad keys gone, a [layout] block");
         free(text);
-        writeText(ini, "ini_version=29\r\n[general]\r\n[layout]\r\npad_565x637=27,40,512,40\r\n"
+        writeText(ini, "ini_version=30\r\n[general]\r\n[layout]\r\npad_565x637=27,40,512,40\r\n"
                        "label_565x637 = 27,22,512,16 ; above the pad\r\npad_640x480=1,2,3\r\n"
                        "label_800x600=\r\npad_x=5\r\n[advanced]\r\nlayout_outline=1\r\n");
         logClear();
@@ -1661,7 +1662,7 @@ int main() {
               "an empty family: GD's commented example row under [layout], with the family's comment");
         // the editor's SAVE: the line inserted UNDER [layout] (GD's insertion), not at the file's end;
         // a NULL value removes a line
-        writeText(ini, "ini_version=29\r\n[general]\r\ntooltip_mark=0\r\n\r\n[layout]\r\n; a blurb\r\n"
+        writeText(ini, "ini_version=30\r\n[general]\r\ntooltip_mark=0\r\n\r\n[layout]\r\n; a blurb\r\n"
                        ";pad_565x637=33,606,500,31\t; the example\r\n\r\n[advanced]\r\n;layout_outline=0\r\n");
         ut::configReload(ini);
         {
@@ -1694,7 +1695,7 @@ int main() {
         ut::configReload(ini);
         check(ut::configFamilyValue(ut::g_cfg, "pad_565x637") == nullptr, "read back: the derived pad");
         // layout_edit: the one-shot key, a hidden [advanced] row, written back to 0 by the editor
-        writeText(ini, "ini_version=29\r\n[general]\r\n[layout]\r\n[advanced]\r\nlayout_edit=1\r\n");
+        writeText(ini, "ini_version=30\r\n[general]\r\n[layout]\r\n[advanced]\r\nlayout_edit=1\r\n");
         ut::configReload(ini);
         check(ut::g_cfg.layoutEdit == 1, "layout_edit=1 is read");
         {
@@ -1708,7 +1709,7 @@ int main() {
         free(st);
         ut::configReload(ini);
         check(ut::g_cfg.layoutEdit == 0, "read back: 0");
-        writeText(ini, "ini_version=29\r\n[general]\r\n");
+        writeText(ini, "ini_version=30\r\n[general]\r\n");
         ut::configReload(ini);
     }
 
@@ -1760,17 +1761,17 @@ int main() {
                        ";text_language=EN\t\t\t; lang\r\n");
         logClear();
         ut::configReload(ini);
-        check(ut::g_cfg.iniVersion == 29 && logHas("migrated from ini_version=22 to 29") &&
+        check(ut::g_cfg.iniVersion == 30 && logHas("migrated from ini_version=22 to 30") &&
                   !logHas("no longer has were dropped") && !logHas("retired"),
               "22 -> 25: migrated, nothing dropped, nothing named retired");
         DWORD len = 0;
         char* text = readAll(ini, &len);
-        check(text && strstr(text, "\r\nini_version=29\r\n") && completeFile(text) &&
+        check(text && strstr(text, "\r\nini_version=30\r\n") && completeFile(text) &&
                   hasLiveLine(text, "pad_screen=bl,242,107,631,57") &&
                   hasLiveLine(text, "label_screen=br,1066,66,259,89") &&
                   hasLiveLine(text, "grid_565x637=0,112,544,512\r\n") &&
                   hasLiveLine(text, "log_level=trace") && hasLiveLine(text, "view_hotkey=117"),
-              "the rewritten file: ini_version=29, complete, the screen keys, the grid line and every value kept");
+              "the rewritten file: ini_version=30, complete, the screen keys, the grid line and every value kept");
         check(text && strstr(text, "\r\n;search_debug_query=") && !hasLiveLine(text, "search_debug_query=") &&
                   strstr(text, "\r\n;pad_565x637=33,606,500,31") && strstr(text, "\r\n;label_565x637=270,622,260,12"),
               "the commented rows stay commented (search_debug_query, the two example rows)");
@@ -1787,7 +1788,7 @@ int main() {
         // read back: a current file, no second migration
         logClear();
         free(text);
-        writeText(ini, "ini_version=29\r\n[general]\r\n[advanced]\r\nui_scale_pct=150\r\ncollect_pristine_only=1\r\n"
+        writeText(ini, "ini_version=30\r\n[general]\r\n[advanced]\r\nui_scale_pct=150\r\ncollect_pristine_only=1\r\n"
                        "pad_caption_max=20\r\njournal_dir=my saves\\tq   ; mine\r\n");
         ut::configReload(ini);
         check(!logHas("migrated") && ut::g_cfg.uiScalePct == 150 && ut::g_cfg.collectPristineOnly == 1 &&
@@ -1798,14 +1799,19 @@ int main() {
         check(n23 > 0 && hasLiveLine(r23, "ui_scale_pct=150\t") && hasLiveLine(r23, "collect_pristine_only=1\t") &&
                   hasLiveLine(r23, "pad_caption_max=20\t") && hasLiveLine(r23, "journal_dir=my saves\\tq\t"),
               "the renderer writes a set key live, its comment beside it");
-        writeText(ini, "ini_version=29\r\n[advanced]\r\nui_scale_pct=400\r\npad_caption_max=3\r\n");
+        writeText(ini, "ini_version=30\r\n[advanced]\r\nui_scale_pct=400\r\npad_caption_max=3\r\n");
         ut::configReload(ini);
         check(ut::g_cfg.uiScalePct == 300 && ut::g_cfg.padCaptionMax == 6,
               "out of range: ui_scale_pct=400 -> 300, pad_caption_max=3 -> 6 (clamped)");
+        // 1.1.2: relic_own_slots (default 0) is read from a 29 file's [advanced]
+        writeText(ini, "ini_version=29\r\n[advanced]\r\nrelic_own_slots=1\r\n");
+        ut::configReload(ini);
+        check(ut::g_cfg.relicOwnSlots == 1 && UtConfig().relicOwnSlots == 0 && ut::g_cfg.iniVersion == 30,
+              "relic_own_slots=1 kept from a 29 file (default 0), the file migrated to 30");
 
         // journal_dir in a mod's own file: a commented line naming the main file; a live line there
         // is ignored with one WARN, and the main file's value stays in force
-        writeText(ini, "ini_version=29\r\n[advanced]\r\njournal_dir=my saves\\tq\r\n");
+        writeText(ini, "ini_version=30\r\n[advanced]\r\njournal_dir=my saves\\tq\r\n");
         ut::configReload(ini);
         wchar_t gIni[MAX_PATH], gState[MAX_PATH], gDir[MAX_PATH], gMods[MAX_PATH];
         _snwprintf_s(gMods, _TRUNCATE, L"%s\\mods", dir);
@@ -1837,7 +1843,7 @@ int main() {
         // a mod's own 22 file with a commented grid row, no label_screen and a commented [advanced]
         // row; the main file has all three live and two of the new keys set: after the step the
         // mod's file keeps its own layout and rows, and only the new keys come from the main file
-        writeText(ini, "ini_version=29\r\n[layout]\r\nlabel_screen=br,1066,66,259,89\r\n"
+        writeText(ini, "ini_version=30\r\n[layout]\r\nlabel_screen=br,1066,66,259,89\r\n"
                        "grid_565x637=0,112,544,512\r\n[advanced]\r\nexport_csv=1\r\nui_scale_pct=150\r\n"
                        "pad_caption_max=20\r\n");
         ut::configReload(ini);
@@ -1851,7 +1857,7 @@ int main() {
                         "pad_screen=bl,10,10,300,40\r\n\r\n[advanced]\r\n;export_csv=0\t\t\t\t; csv\r\n");
         logClear();
         ut::configSetGame("h1mod");
-        check(logHas("(ini_version=22) migrated to a complete file, ini_version=29") &&
+        check(logHas("(ini_version=22) migrated to a complete file, ini_version=30") &&
                   logHas("the keys that version did not have copied once from the main uniquetab.ini"),
               "a mod's own 22 file: migrated, only the keys 22 did not have copied from the main file");
         text = readAll(gIni, &len);
@@ -1872,7 +1878,7 @@ int main() {
         DeleteFileW(gState);
         RemoveDirectoryW(gDir);
         RemoveDirectoryW(gMods);
-        writeText(ini, "ini_version=29\r\n[general]\r\n");
+        writeText(ini, "ini_version=30\r\n[general]\r\n");
         ut::configReload(ini);
     }
 
@@ -1882,7 +1888,7 @@ int main() {
         int row = -1;
         for (int i = 0; i < ut::kUtCfgKeyCount; ++i)
             if (!strcmp(ut::kUtCfgKeys[i].name, "edit_button")) row = i;
-        check(UT_INI_VERSION == 29 && dc.editButton == 1 && row >= 0 && !strcmp(ut::kUtCfgKeys[row].section, "advanced") &&
+        check(UT_INI_VERSION == 30 && dc.editButton == 1 && row >= 0 && !strcmp(ut::kUtCfgKeys[row].section, "advanced") &&
                   ut::kUtCfgKeys[row].def == 1 && ut::kUtCfgKeys[row].type == ut::kUtCfgBool,
               "edit_button: [advanced], a 0/1 row, default 1; ini_version 24");
         // a 23 file: migrated, every line kept, edit_button gained commented at its default
@@ -1892,13 +1898,13 @@ int main() {
         ut::configReload(ini);
         DWORD len = 0;
         char* text = readAll(ini, &len);
-        check(ut::g_cfg.iniVersion == 29 && logHas("migrated from ini_version=23 to 29") && ut::g_cfg.editButton == 1 &&
-                  ut::g_cfg.uiScalePct == 150 && text && strstr(text, "\r\nini_version=29\r\n") &&
+        check(ut::g_cfg.iniVersion == 30 && logHas("migrated from ini_version=23 to 30") && ut::g_cfg.editButton == 1 &&
+                  ut::g_cfg.uiScalePct == 150 && text && strstr(text, "\r\nini_version=30\r\n") &&
                   strstr(text, "\r\n;edit_button=1") && !hasLiveLine(text, "edit_button=") &&
                   hasLiveLine(text, "pad_565x637=27,560,512,40") && hasLiveLine(text, "ui_scale_pct=150"),
               "23 -> 25: migrated, every value and line kept, ;edit_button=1 gained (commented at its default)");
         free(text);
-        writeText(ini, "ini_version=29\r\n[general]\r\n[advanced]\r\nedit_button=0\r\n");
+        writeText(ini, "ini_version=30\r\n[general]\r\n[advanced]\r\nedit_button=0\r\n");
         logClear();
         ut::configReload(ini);
         text = readAll(ini, &len);
@@ -1918,7 +1924,7 @@ int main() {
         logClear();
         ut::configSetGame("e1mod");
         text = readAll(eIni, &len);
-        check(logHas("(ini_version=23) migrated to a complete file, ini_version=29") && ut::g_cfg.editButton == 0 &&
+        check(logHas("(ini_version=23) migrated to a complete file, ini_version=30") && ut::g_cfg.editButton == 0 &&
                   ut::g_cfg.exportCsv == 0 && text && hasLiveLine(text, "edit_button=0") &&
                   strstr(text, "\r\n;export_csv=0") && !hasLiveLine(text, "export_csv="),
               "a mod's own 23 file takes the main file's edit_button=0 (the key it did not have); its commented "
@@ -1929,7 +1935,7 @@ int main() {
         DeleteFileW(eState);
         RemoveDirectoryW(eDir);
         RemoveDirectoryW(eMods);
-        writeText(ini, "ini_version=29\r\n[general]\r\n");
+        writeText(ini, "ini_version=30\r\n[general]\r\n");
         ut::configReload(ini);
     }
 
@@ -1941,7 +1947,7 @@ int main() {
             if (!strcmp(ut::kUtCfgKeys[i].name, "relic_block_gap")) rb = i;
             if (!strcmp(ut::kUtCfgKeys[i].name, "relic_bonus_gap")) rg = i;
         }
-        check(UT_INI_VERSION == 29 && rb >= 0 && rg >= 0 && dc.relicBlockGap == 1 && dc.relicBonusGap == 1 &&
+        check(UT_INI_VERSION == 30 && rb >= 0 && rg >= 0 && dc.relicBlockGap == 1 && dc.relicBonusGap == 1 &&
                   !strcmp(ut::kUtCfgKeys[rb].section, "advanced") && ut::kUtCfgKeys[rb].type == ut::kUtCfgInt &&
                   ut::kUtCfgKeys[rb].def == 1 && ut::kUtCfgKeys[rb].lo == 0 && ut::kUtCfgKeys[rb].hi == 2 &&
                   !strcmp(ut::kUtCfgKeys[rg].section, "advanced") && ut::kUtCfgKeys[rg].type == ut::kUtCfgInt &&
@@ -1960,9 +1966,9 @@ int main() {
         ut::configReload(ini);
         DWORD len = 0;
         char* text = readAll(ini, &len);
-        check(ut::g_cfg.iniVersion == 29 && logHas("migrated from ini_version=24 to 29") &&
+        check(ut::g_cfg.iniVersion == 30 && logHas("migrated from ini_version=24 to 30") &&
                   ut::g_cfg.relicBlockGap == 1 && ut::g_cfg.relicBonusGap == 1 && ut::g_cfg.editButton == 0 &&
-                  ut::g_cfg.layRelics.count == 0 && text && strstr(text, "\r\nini_version=29\r\n") &&
+                  ut::g_cfg.layRelics.count == 0 && text && strstr(text, "\r\nini_version=30\r\n") &&
                   strstr(text, "\r\n;relic_block_gap=1") && strstr(text, "\r\n;relic_bonus_gap=1") &&
                   strstr(text, "\r\n;relics_565x637=27,126,512,480") && !hasLiveLine(text, "relic_block_gap=") &&
                   !hasLiveLine(text, "relic_bonus_gap=") && !hasLiveLine(text, "relics_") &&
@@ -1972,7 +1978,7 @@ int main() {
               "(no new live line)");
         free(text);
         // the relic area per window size, the two gaps read and clamped
-        writeText(ini, "ini_version=29\r\n[general]\r\n[layout]\r\nrelics_565x637=40,150,480,416\r\n"
+        writeText(ini, "ini_version=30\r\n[general]\r\n[layout]\r\nrelics_565x637=40,150,480,416\r\n"
                        "relics_660x699=0,59,640,640\r\n[advanced]\r\nrelic_block_gap=5\r\nrelic_bonus_gap=0\r\n");
         logClear();
         ut::configReload(ini);
@@ -1988,7 +1994,7 @@ int main() {
         free(text);
         // a mod's own 24 file takes the main file's two gaps (the keys it did not have) and keeps its
         // own [layout]: the main file's relics_ line is not its own
-        writeText(ini, "ini_version=29\r\n[general]\r\n[layout]\r\nrelics_565x637=40,150,480,416\r\n"
+        writeText(ini, "ini_version=30\r\n[general]\r\n[layout]\r\nrelics_565x637=40,150,480,416\r\n"
                        "[advanced]\r\nrelic_block_gap=2\r\n");
         ut::configReload(ini);
         wchar_t rIni[MAX_PATH], rState[MAX_PATH], rDir[MAX_PATH], rMods[MAX_PATH];
@@ -2003,7 +2009,7 @@ int main() {
         logClear();
         ut::configSetGame("r1mod");
         text = readAll(rIni, &len);
-        check(logHas("(ini_version=24) migrated to a complete file, ini_version=29") && ut::g_cfg.relicBlockGap == 2 &&
+        check(logHas("(ini_version=24) migrated to a complete file, ini_version=30") && ut::g_cfg.relicBlockGap == 2 &&
                   ut::g_cfg.relicBonusGap == 1 && ut::g_cfg.layRelics.count == 0 && text &&
                   hasLiveLine(text, "relic_block_gap=2") && strstr(text, "\r\n;relic_bonus_gap=1") &&
                   !hasLiveLine(text, "relics_") && hasLiveLine(text, "grid_565x637=11,91,544,448"),
@@ -2015,7 +2021,7 @@ int main() {
         DeleteFileW(rState);
         RemoveDirectoryW(rDir);
         RemoveDirectoryW(rMods);
-        writeText(ini, "ini_version=29\r\n[general]\r\n");
+        writeText(ini, "ini_version=30\r\n[general]\r\n");
         ut::configReload(ini);
     }
 
@@ -2041,7 +2047,7 @@ int main() {
             if (!strcmp(ut::kUtCfgKeys[i].name, "collect_relics")) cr = i;
             if (!strcmp(ut::kUtCfgKeys[i].name, "collect_mi")) cm = i;
         }
-        check(UT_INI_VERSION == 29 && cr >= 0 && cr == cm + 1 && dc.collectRelics == 1 &&
+        check(UT_INI_VERSION == 30 && cr >= 0 && cr == cm + 1 && dc.collectRelics == 1 &&
                   !strcmp(ut::kUtCfgKeys[cr].section, "general") && ut::kUtCfgKeys[cr].def == 1 &&
                   ut::kUtCfgKeys[cr].flags == ut::kUtCfgKeys[cm].flags &&
                   strstr(ut::kUtCfgKeys[cr].comment, "1 = relics and charms have their own page") != nullptr &&
@@ -2056,15 +2062,15 @@ int main() {
         char* text = readAll(ini, &len);
         check(ut::g_cfg.collectRelics == 1 && ut::g_cfg.collectMi == 0 && ut::g_cfg.search == 0 && text &&
                   hasLiveLine(text, "collect_relics=1") && hasLiveLine(text, "collect_mi=0") &&
-                  hasLiveLine(text, "search=0") && hasKeyLine(text, "ini_version=29"),
-              "a main file from 26: collect_mi=0 and search=0 kept, collect_relics=1 gained live, ini_version=29");
+                  hasLiveLine(text, "search=0") && hasKeyLine(text, "ini_version=30"),
+              "a main file from 26: collect_mi=0 and search=0 kept, collect_relics=1 gained live, ini_version=30");
         const char* gl = text ? strstr(text, "collect_mi=0") : nullptr;
         const char* rl = text ? strstr(text, "collect_relics=1") : nullptr;
         const char* ul = text ? strstr(text, "collect_unobtainable=") : nullptr;
         check(gl && rl && ul && gl < rl && rl < ul, "its line stands between collect_mi and collect_unobtainable");
         free(text);
         // the main file says 0; a game's own file from 26 has no line: the main file's 0 at its entry
-        writeText(ini, "ini_version=29\r\n[general]\r\ncollect_relics=0\r\n");
+        writeText(ini, "ini_version=30\r\n[general]\r\ncollect_relics=0\r\n");
         ut::configReload(ini);
         check(ut::g_cfg.collectRelics == 0, "collect_relics=0 in the main file is in force");
         wchar_t gMods[MAX_PATH], gDir[MAX_PATH], gIni[MAX_PATH], gState[MAX_PATH];
@@ -2085,12 +2091,12 @@ int main() {
         text = readAll(gIni, &len);
         check(ut::g_cfg.collectRelics == 0 && ut::g_cfg.tooltipMark == 0 && text &&
                   hasLiveLine(text, "collect_relics=0") && hasLiveLine(text, "tooltip_mark=0") &&
-                  hasKeyLine(text, "ini_version=29"),
-              "its entry: the main file's collect_relics=0 taken (the key it did not have), its own values kept, ini_version=29");
+                  hasKeyLine(text, "ini_version=30"),
+              "its entry: the main file's collect_relics=0 taken (the key it did not have), its own values kept, ini_version=30");
         free(text);
         ut::configSetGame("");
         // a game's own file at 27 keeps its own value whatever the main file says
-        writeText(gIni, "ini_version=29\r\n[general]\r\ncollect_relics=1\r\n");
+        writeText(gIni, "ini_version=30\r\n[general]\r\ncollect_relics=1\r\n");
         memset(&gs, 0, sizeof(gs));
         check(ut::configGameGenInputs("relicgame", &gs) && gs.collectRelics == 1,
               "a game file at 27 with collect_relics=1: its own 1 while the main file says 0");
@@ -2101,7 +2107,7 @@ int main() {
         DeleteFileW(gState);
         RemoveDirectoryW(gDir);
         RemoveDirectoryW(gMods);
-        writeText(ini, "ini_version=29\r\n[general]\r\n");
+        writeText(ini, "ini_version=30\r\n[general]\r\n");
         ut::configReload(ini);
     }
 
@@ -2205,7 +2211,7 @@ int main() {
                 FindClose(h);
             }
             printf("  %d game file(s) of the player's migrated\n", games);
-            writeText(ini, "ini_version=29\r\n[general]\r\n");
+            writeText(ini, "ini_version=30\r\n[general]\r\n");
             ut::configReload(ini);
         }
     }

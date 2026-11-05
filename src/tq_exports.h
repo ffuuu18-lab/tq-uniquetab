@@ -25,7 +25,7 @@
 #define TQCC_STDCALL 3
 #define TQCC_FASTCALL 4
 
-#define TQ_EXPORT_COUNT 134
+#define TQ_EXPORT_COUNT 139
 #define TQ_EXPORT_REQUIRED_COUNT 30
 
 // ---------------------------------------------------------------------------------------------
@@ -1129,6 +1129,52 @@
 #define TQ_TIP_GAMETEXTLINE_CTOR_REQ 0
 
 // ---------------------------------------------------------------------------------------------
+// Arcane formula - the reagents' collection mark   [Game.dll]
+// ---------------------------------------------------------------------------------------------
+// public: bool __thiscall GAME::ItemArtifactFormula::IsReagent1Avalable(class GAME::Character const &)const 
+//   member, __thiscall, optional
+#define TQ_TIP_FORMULA_ISREAGENT1AVALABLE "?IsReagent1Avalable@ItemArtifactFormula@GAME@@QBE_NABVCharacter@2@@Z"
+#define TQ_TIP_FORMULA_ISREAGENT1AVALABLE_MOD "Game.dll"
+#define TQ_TIP_FORMULA_ISREAGENT1AVALABLE_CC TQCC_THISCALL
+#define TQ_TIP_FORMULA_ISREAGENT1AVALABLE_SRET 0
+#define TQ_TIP_FORMULA_ISREAGENT1AVALABLE_REQ 0
+
+// public: bool __thiscall GAME::ItemArtifactFormula::IsReagent2Avalable(class GAME::Character const &)const 
+//   member, __thiscall, optional
+#define TQ_TIP_FORMULA_ISREAGENT2AVALABLE "?IsReagent2Avalable@ItemArtifactFormula@GAME@@QBE_NABVCharacter@2@@Z"
+#define TQ_TIP_FORMULA_ISREAGENT2AVALABLE_MOD "Game.dll"
+#define TQ_TIP_FORMULA_ISREAGENT2AVALABLE_CC TQCC_THISCALL
+#define TQ_TIP_FORMULA_ISREAGENT2AVALABLE_SRET 0
+#define TQ_TIP_FORMULA_ISREAGENT2AVALABLE_REQ 0
+
+// public: bool __thiscall GAME::ItemArtifactFormula::IsReagent3Avalable(class GAME::Character const &)const 
+//   member, __thiscall, optional
+#define TQ_TIP_FORMULA_ISREAGENT3AVALABLE "?IsReagent3Avalable@ItemArtifactFormula@GAME@@QBE_NABVCharacter@2@@Z"
+#define TQ_TIP_FORMULA_ISREAGENT3AVALABLE_MOD "Game.dll"
+#define TQ_TIP_FORMULA_ISREAGENT3AVALABLE_CC TQCC_THISCALL
+#define TQ_TIP_FORMULA_ISREAGENT3AVALABLE_SRET 0
+#define TQ_TIP_FORMULA_ISREAGENT3AVALABLE_REQ 0
+
+// ---------------------------------------------------------------------------------------------
+// LocalizationManager - the formula's count line   [Engine.dll]
+// ---------------------------------------------------------------------------------------------
+// public: static class GAME::LocalizationManager & __cdecl GAME::LocalizationManager::Instance(void)
+//   static member, __cdecl, optional
+#define TQ_LOC_INSTANCE "?Instance@LocalizationManager@GAME@@SAAAV12@XZ"
+#define TQ_LOC_INSTANCE_MOD "Engine.dll"
+#define TQ_LOC_INSTANCE_CC TQCC_CDECL
+#define TQ_LOC_INSTANCE_SRET 0
+#define TQ_LOC_INSTANCE_REQ 0
+
+// public: virtual unsigned short const * __cdecl GAME::LocalizationManager::Localize(char const *,...)
+//   virtual member, __cdecl, optional
+#define TQ_LOC_LOCALIZE "?Localize@LocalizationManager@GAME@@UAAPBGPBDZZ"
+#define TQ_LOC_LOCALIZE_MOD "Engine.dll"
+#define TQ_LOC_LOCALIZE_CC TQCC_CDECL
+#define TQ_LOC_LOCALIZE_SRET 0
+#define TQ_LOC_LOCALIZE_REQ 0
+
+// ---------------------------------------------------------------------------------------------
 // MSVCR110 - the game's C runtime   [MSVCR110.dll]
 // ---------------------------------------------------------------------------------------------
 // void __cdecl operator delete(void *)
@@ -1274,4 +1320,9 @@
     X(TQ_TIP_ITEMARTIFACTFORMULA_GETUIDISPLAYTEXT, TQ_TIP_ITEMARTIFACTFORMULA_GETUIDISPLAYTEXT_MOD, TQ_TIP_ITEMARTIFACTFORMULA_GETUIDISPLAYTEXT, TQ_TIP_ITEMARTIFACTFORMULA_GETUIDISPLAYTEXT_REQ) \
     X(TQ_TIP_GAMETEXTLINETOSTRING, TQ_TIP_GAMETEXTLINETOSTRING_MOD, TQ_TIP_GAMETEXTLINETOSTRING, TQ_TIP_GAMETEXTLINETOSTRING_REQ) \
     X(TQ_TIP_GAMETEXTLINE_CTOR, TQ_TIP_GAMETEXTLINE_CTOR_MOD, TQ_TIP_GAMETEXTLINE_CTOR, TQ_TIP_GAMETEXTLINE_CTOR_REQ) \
+    X(TQ_TIP_FORMULA_ISREAGENT1AVALABLE, TQ_TIP_FORMULA_ISREAGENT1AVALABLE_MOD, TQ_TIP_FORMULA_ISREAGENT1AVALABLE, TQ_TIP_FORMULA_ISREAGENT1AVALABLE_REQ) \
+    X(TQ_TIP_FORMULA_ISREAGENT2AVALABLE, TQ_TIP_FORMULA_ISREAGENT2AVALABLE_MOD, TQ_TIP_FORMULA_ISREAGENT2AVALABLE, TQ_TIP_FORMULA_ISREAGENT2AVALABLE_REQ) \
+    X(TQ_TIP_FORMULA_ISREAGENT3AVALABLE, TQ_TIP_FORMULA_ISREAGENT3AVALABLE_MOD, TQ_TIP_FORMULA_ISREAGENT3AVALABLE, TQ_TIP_FORMULA_ISREAGENT3AVALABLE_REQ) \
+    X(TQ_LOC_INSTANCE, TQ_LOC_INSTANCE_MOD, TQ_LOC_INSTANCE, TQ_LOC_INSTANCE_REQ) \
+    X(TQ_LOC_LOCALIZE, TQ_LOC_LOCALIZE_MOD, TQ_LOC_LOCALIZE, TQ_LOC_LOCALIZE_REQ) \
     X(TQ_CRT_OPERATORDELETE, TQ_CRT_OPERATORDELETE_MOD, TQ_CRT_OPERATORDELETE, TQ_CRT_OPERATORDELETE_REQ)

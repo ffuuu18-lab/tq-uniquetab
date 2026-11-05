@@ -332,6 +332,24 @@ SELECTION = [
         ("GAMETEXTLINE_CTOR", "??0GameTextLine@GAME@@QAE@W4GameTextClass@1@ABV?$basic_string@GU?$char_"
          "traits@G@std@@V?$allocator@G@2@@std@@_N@Z", OPT),
     ]),
+    # the reagents in the collection on a formula's rollover (ut_tooltip.cpp): the three
+    # IsReagentNAvalable are READ for the offsets of the formula's reagent lists, never called and
+    # never detoured (their one caller is the formula's GetUIDisplayText; the Enchanter never
+    # calls them); the count line is rebuilt in the game's own words. All optional: a miss turns
+    # the mark (or only the count) off, never the line.
+    ("Arcane formula - the reagents' collection mark", "Game.dll", "TQ_TIP", [
+        ("FORMULA_ISREAGENT1AVALABLE",
+         "?IsReagent1Avalable@ItemArtifactFormula@GAME@@QBE_NABVCharacter@2@@Z", OPT),
+        ("FORMULA_ISREAGENT2AVALABLE",
+         "?IsReagent2Avalable@ItemArtifactFormula@GAME@@QBE_NABVCharacter@2@@Z", OPT),
+        ("FORMULA_ISREAGENT3AVALABLE",
+         "?IsReagent3Avalable@ItemArtifactFormula@GAME@@QBE_NABVCharacter@2@@Z", OPT),
+    ]),
+    ("LocalizationManager - the formula's count line", "Engine.dll", "TQ_LOC", [
+        ("INSTANCE", "?Instance@LocalizationManager@GAME@@SAAAV12@XZ", OPT),
+        # a virtual __cdecl with varargs: (this, tag, ...) -> the manager's own buffer
+        ("LOCALIZE", "?Localize@LocalizationManager@GAME@@UAAPBGPBDZZ", OPT),
+    ]),
     # The game's CRT. Every std::string the engine fills is freed through ITS operator delete,
     # never through the mod's own static CRT (/MT). No dump: tools/test_bindings.cpp checks it
     # against the MSVCR110.dll the game loads.

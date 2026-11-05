@@ -30,6 +30,8 @@
 
 namespace ut {
 
+struct UtRelicRowFacts;   // ut_relicroute.h
+
 // Worker thread, once, before hooksInstall(). Resolves the SIX Game.dll exports - the four
 // `GetUIDisplayText` overrides that get a detour (Item, ItemEquipment, ItemArtifact, ItemRelic),
 // `GameTextLineToString` (the fifth detour) and the `GameTextLine` constructor, which is CALLED
@@ -80,6 +82,38 @@ void tooltipSwapFree(unsigned char* owned);
 // records.
 bool tooltipSwapBuildN(const void* vec, const unsigned char* extraLines, unsigned k,
                        unsigned char** ownedOut, UtTooltipSwap* out);
+
+// One engine line replaced in the borrowed copy (never in the engine's vector): the line at
+// `index` of the engine's N, which must still be of class `expectClass`, becomes the 0x20-byte
+// `line`. An arcane formula's reagent mark carries up to four (its three reagent lines and its
+// count line) with its latch.
+struct UtTooltipEdit {
+    unsigned index;
+    unsigned expectClass;
+    const unsigned char* line;
+};
+const unsigned kUtTooltipEditMax = 4;
+// tooltipSwapBuildN with `editN` edits applied to the copy; `k` may be 0 when there are edits.
+// Refuses, having allocated nothing, what tooltipSwapBuildN refuses, and an edit past the
+// engine's N or whose line there is not of its expected class.
+bool tooltipSwapBuildEdits(const void* vec, const unsigned char* extraLines, unsigned k,
+                           const UtTooltipEdit* edits, unsigned editN, unsigned char** ownedOut,
+                           UtTooltipSwap* out);
+
+// ---- the reagents in the collection (an arcane formula's rollover) -------------------------------
+// GAME THREAD (ut_panel.cpp, with the other words): [tab] tooltip.reagent of the buttons file,
+// UTF-8; nullptr or "" = the built-in "(Collection)". Put after a marked line's name and a blank.
+void tooltipReagentWordsRefresh(const char* words);
+const char* tooltipReagentWords();
+// The lines' rule, pure: `cls` = the classes of the three reagent lines after the count line
+// (0x2D yellow, 0x2E grey), `listed` = the reagent has a base record (the engine's total counts
+// only those), `held` = the collection holds a full copy. Returns the lines to mark (bit r =
+// reagent r+1: grey, listed and held); `*avail` = the engine's yellow ones, `*total` the listed ones.
+unsigned tooltipReagentMarks(const unsigned cls[3], const bool listed[3], const bool held[3],
+                             int* avail, int* total);
+// A relic, charm or artifact reagent's journal rows hold a full, usable copy: a row neither
+// pending out nor unresolved that is an artifact's (any slot) or a completed piece (never red).
+bool tooltipReagentRowsHold(bool artifact, const UtRelicRowFacts* rows, int n);
 
 // The ItemReplicaInfo's offset inside an Item (decoded from Item::GetItemReplicaInfo at start),
 // 0 = not decoded. Lock-free; the owned set reads a carried relic's bonus there.
@@ -142,6 +176,12 @@ unsigned tooltipTestLatchCount();   // the pending latch's line count, 0 = none
 const unsigned char* tooltipTestLine(bool yes);
 const unsigned char* tooltipTestRollLine();   // the "(another roll)" marker line
 void tooltipTestRollReplica(unsigned rr);     // the replica's offset rollInit would decode
+// the reagent mark armed: the three lists' offsets reagentInit would decode, and the two
+// LocalizationManager functions (nullptr = the count line off); the memos and latches reset
+void tooltipTestReagentArm(unsigned list1, unsigned list2, unsigned list3, void* locInstance,
+                           void* localize);
+bool tooltipTestReagentOff();
+bool tooltipTestCountOff();
 #endif
 
 }  // namespace ut

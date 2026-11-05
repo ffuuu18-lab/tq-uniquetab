@@ -209,7 +209,10 @@ size_t journalRowsOf(const char* key, UtRelicRowFacts* out, size_t cap);
 // (utRelicGreenChoice for a completed row, utRelicShardSource with no split for a partial one),
 // else the page is stale and nothing changes. Then today's take: a settled row becomes "out", a
 // row pending in is erased. On a failed write the pre-image is put back.
-bool journalTakeRow(const char* key, unsigned long long seq, bool* rolledBack);
+// An artifact's row (`tableN` >= 0: its record's bonus table, ut_relicroute.h): the row its plain
+// or green slot hands out (utArtifactTakeChoice), never a split.
+bool journalTakeRow(const char* key, unsigned long long seq, bool* rolledBack,
+                    const char* const* table = nullptr, int tableN = -1);
 // The red slot's take of ONE shard, in one all-or-nothing write. Row `seq` must be the record's
 // shard source now (utRelicShardSource), else the page is stale and nothing changes. A 1-shard
 // source is taken whole (journalTakeRow's rule; *outSeq = seq). A source of k >= 2 shards is
@@ -277,6 +280,14 @@ void journalSetCsvExport(bool on) = delete;
 const char* journalPath();
 const char* journalCsvPath();
 long journalWrites();
+// The rows' facts generation: moves at every change of the rows (a commit, its rollback, a set
+// opened, a settle or a verdict), NOT at a take's touch (journalTouchOut changes only takenAt). The
+// relic page relists on it, so a take rebuilds the page once. Display only: every commit checks the
+// rows themselves.
+long journalFactsGen();
+// The tests' oracle (tools\test_journal.cpp): true = journalRowsOf / journalNewest ignore the
+// index and scan every row, as 1.1.1 did. The mod never calls it.
+void journalIndexBypass(bool on);
 // The CSV's relic cells: `fn(key)` answers a relic / charm record's tier (0..3) and shards N; a
 // record it does not know (a unique) gets two empty cells. Null = every row's cells are empty.
 typedef bool (*UtRelicCellsFn)(const char* key, int* tier, unsigned* shards);

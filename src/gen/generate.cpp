@@ -5,6 +5,7 @@
 #include "gen/ut_groups.h"
 #include "gen/ut_groups_default.h"
 #include "gen/arc_reader.h"   // the gray pass reads whole icons
+#include "gen/arz_reader.h"   // ArzArchive::normKey: the artifacts' bonus tables by folded record
 #include "model/catalogue.h"
 #include "ut_graytex.h"   // the gray copy of each icon (pure)
 #include "gen/relics_gen.h"   // uniq-relics.txt
@@ -17,6 +18,7 @@
 #include <chrono>
 #include <cstdio>
 #include <exception>
+#include <map>
 #include <new>
 #include <set>
 
@@ -185,6 +187,8 @@ std::string stampMismatch(const std::string& old, const std::string& now) {
          "the monster infrequents are left out of the catalogue"},
         {"collect_relics=1\n", "collect_relics", "the relics and charms have their page",
          "no relic page: the relics and charms are left out"},
+        {"collect_artifact_bonuses=1\n", "collect_artifact_bonuses",
+         "the artifacts have their block page", "the artifacts are on their group page"},
         {"collect_unobtainable=1\n", "collect_unobtainable",
          "the records nobody can obtain are put back in the catalogue",
          "the records nobody can obtain are left out of the catalogue"},
@@ -291,7 +295,8 @@ std::string fingerprintOf(const std::string& gameDir, const std::string& lang,
     // 12 the relic and charm list (uniq-relics.txt, relics_gen.h) and the gray copies of its icons.
     // 13 the relic page's group (uniq-groups.txt's G line "relics", no E line).
     // 14 the relic list's B lines name their first and last tier (the block's name on the page).
-    std::string fp = "GDUT-STAMP 14\nlang=" + lang + "\n";
+    // 15 the artifact page's formulae (uniq-relics.txt's F lines, collect_artifact_bonuses=1).
+    std::string fp = "GDUT-STAMP 15\nlang=" + lang + "\n";
     // a custom game: its leaf (the start-up game's stamp has no such line, so it reads as before)
     if (!v.startup()) fp += "game=" + v.name() + "\n";
     fp += groupsLine;
@@ -299,6 +304,7 @@ std::string fingerprintOf(const std::string& gameDir, const std::string& lang,
     // way regenerates once.
     if (in.collectMi) fp += "collect_mi=1\n";
     if (in.collectRelics) fp += "collect_relics=1\n";
+    if (in.collectArtifactBonuses) fp += "collect_artifact_bonuses=1\n";
     if (in.collectUnobtainable) fp += "collect_unobtainable=1\n";
     for (const std::string& r : rel) fp += stampLine(gameDir + "\\" + r, r);
     if (!v.startup()) {   // the game's own archives after the base game's
@@ -495,6 +501,7 @@ bool ensureOutputs(const std::string& gameDir, const std::string& modDir,
     std::vector<ExcludedItem> excluded;
     std::vector<RelicItem> relics;
     std::vector<ExcludedItem> relicLeft;
+    std::map<std::string, std::vector<std::string>> artBonuses;   // collect_artifact_bonuses
     std::string err;
     UiGeometry geo;
     {
@@ -506,7 +513,8 @@ bool ensureOutputs(const std::string& gameDir, const std::string& modDir,
             return false;
         }
         if (!collectItems(g, items, excluded, report.warnings, &err, in.collectUnobtainable,
-                          in.collectMi, &relics, &relicLeft)) {
+                          in.collectMi, &relics, &relicLeft,
+                          in.collectArtifactBonuses ? &artBonuses : nullptr)) {
             report.error = "the collection rule: " + err;
             return false;
         }
@@ -516,6 +524,26 @@ bool ensureOutputs(const std::string& gameDir, const std::string& modDir,
         }
         writeGrayIcons(g, items, modDir, report);   // while the archives are open
         writeGrayRelicIcons(g, relics, modDir, report);
+        // the artifacts' blocks after it: their gray icons are the catalogue's (writeGrayIcons);
+        // each with the catalogue formulae whose artifactName names it, in folded-record order
+        std::map<std::string, std::vector<std::pair<std::string, std::string>>> artFormulae;
+        for (const CatalogueItem& it : items)
+            if (in.collectArtifactBonuses && !it.craftsRecord.empty())
+                artFormulae[ArzArchive::normKey(it.craftsRecord)].push_back({ArzArchive::normKey(it.record), it.record});
+        for (const CatalogueItem& it : items) {
+            if (!in.collectArtifactBonuses || !it.isRelic) continue;
+            RelicItem r;
+            r.item = it;
+            const std::string key = ArzArchive::normKey(it.record);
+            const auto b = artBonuses.find(key);
+            if (b != artBonuses.end()) r.bonuses = b->second;
+            auto f = artFormulae.find(key);
+            if (f != artFormulae.end()) {
+                std::sort(f->second.begin(), f->second.end());
+                for (const auto& p : f->second) r.formulae.push_back(p.second);
+            }
+            relics.push_back(std::move(r));
+        }
         // the caravan geometry through the same merged view; the base game's when it cannot be read
         std::string gerr;
         if (!deriveGeometry(g, geo, &gerr)) {
@@ -540,7 +568,7 @@ bool ensureOutputs(const std::string& gameDir, const std::string& modDir,
     // catalogue and no block pages one
     std::vector<std::string> viewKeys = utg::viewKeysFor(v.name());
     if (in.collectMi) viewKeys.push_back(utg::kCollectMiViewKey);
-    buildLists(items, excluded, lists, groupSet, viewKeys, geo.cols, geo.rows);
+    buildLists(items, excluded, lists, groupSet, viewKeys, geo.cols, geo.rows, in.collectArtifactBonuses);
     const std::string geoText = geo.fileText();
     RelicListCounts rc;
     const std::string relicsText = relicsListText(relics, relicLeft, &rc);
@@ -613,6 +641,12 @@ bool ensureOutputs(const std::string& gameDir, const std::string& modDir,
         report.summary += line;
     }
     if (!in.collectRelics) report.summary += " (collect_relics=0: no relic page)";
+    if (in.collectArtifactBonuses) {
+        std::snprintf(line, sizeof line,
+                      " (collect_artifact_bonuses=1: %zu artifact block(s), %zu bonus slot(s), %zu formula cell(s))",
+                      rc.artifactBlocks, rc.artifactBonuses, rc.artifactFormulae);
+        report.summary += line;
+    }
     double wsAfter = 0.0, peakMb = 0.0;
     if (workingSetMb(&wsAfter, &peakMb) && peakMb > 0.0) {
         const double added = peakMb > wsBefore ? peakMb - wsBefore : 0.0;

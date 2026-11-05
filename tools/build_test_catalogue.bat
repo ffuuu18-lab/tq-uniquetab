@@ -12,8 +12,9 @@ rem         data\oracle, the stamp, temporary names, the rename, the error paths
 rem pass 4: one generation in a fresh process (--peak): the time and the 200 MB budget.
 rem         With collect_mi=1 (the default) every pass includes the monster infrequents; pass 2
 rem         and pass 3 also check collect_mi=0 against data\oracle\nomi (the uniques alone).
-rem pass 5: collect_unobtainable=1 (--ensure-flag) byte for byte against
-rem         tools\build_catalogue.py --collect-unobtainable --collect-mi (the three lists, and catalogue.bin
+rem pass 5: collect_unobtainable=1 and collect_artifact_bonuses=1 (--ensure-flag) byte for byte against
+rem         tools\build_catalogue.py --collect-unobtainable --collect-mi --collect-artifact-bonuses (the
+rem         lists, uniq-relics.txt's artifact blocks among them, and catalogue.bin
 rem         through tools\pack_catalogue.py), and tools\reach_scan.py --assert-rule:
 rem         the records EXCLUDE rule 7 drops are exactly the ones no level, quest, monster, chest
 rem         or merchant can give (Python; a game update that adds a holder is caught here).
@@ -82,8 +83,8 @@ rem ---- pass 5: collect_unobtainable=1 against the Python reference, and the re
 if not exist "%OUT%\gen-flag" mkdir "%OUT%\gen-flag"
 "%OUT%\test_catalogue.exe" --ensure-flag "%OUT%\gen-flag"
 if errorlevel 1 set RC=1
-python "%ROOT%\tools\build_catalogue.py" --collect-unobtainable --collect-mi --out "%OUT%\py-flag" >nul
-if errorlevel 1 (echo [test] FAIL: build_catalogue.py --collect-unobtainable --collect-mi & set RC=1)
+python "%ROOT%\tools\build_catalogue.py" --collect-unobtainable --collect-mi --collect-artifact-bonuses --out "%OUT%\py-flag" >nul
+if errorlevel 1 (echo [test] FAIL: build_catalogue.py --collect-unobtainable --collect-mi --collect-artifact-bonuses & set RC=1)
 for %%F in (uniq-records.txt uniq-groups.txt uniq-excluded.txt uniq-geometry.txt uniq-relics.txt) do (
     %SystemRoot%\System32\fc.exe /b "%OUT%\gen-flag\%%F" "%OUT%\py-flag\%%F" >nul && (echo [test] ok  : collect_unobtainable=1 %%F is byte-identical to the Python reference) || (echo [test] FAIL: collect_unobtainable=1 %%F differs from the Python reference & set RC=1)
 )

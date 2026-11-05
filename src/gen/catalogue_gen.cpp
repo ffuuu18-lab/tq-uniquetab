@@ -364,11 +364,13 @@ bool isMiCandidate(const std::string& /*key*/, const std::string& cls,
 bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
                   std::vector<ExcludedItem>& excluded, std::vector<std::string>& warnings,
                   std::string* error, bool collectUnobtainable, bool collectMi,
-                  std::vector<RelicItem>* relics, std::vector<ExcludedItem>* relicLeft) {
+                  std::vector<RelicItem>* relics, std::vector<ExcludedItem>* relicLeft,
+                  std::map<std::string, std::vector<std::string>>* artifactBonuses) {
     items.clear();
     excluded.clear();
     if (relics) relics->clear();
     if (relicLeft) relicLeft->clear();
+    if (artifactBonuses) artifactBonuses->clear();
     if (!g.db || !g.res) { if (error) *error = "game data not loaded"; return false; }
     std::map<std::string, std::string> setNames;
     auto setDisplayName = [&](const std::string& setRec) -> std::string {
@@ -459,6 +461,8 @@ bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
     std::vector<std::uint8_t> templ;                            // per candidate: a template word
     std::vector<RelicItem> relicCands;                          // the relic and charm records
     std::vector<std::uint8_t> relicTempl;                       // per relic candidate: a template word
+    struct Formula { std::string key, artifact, table; };
+    std::vector<Formula> formulae;                              // artifactBonuses: every formula
     ArzRecord rec;
     std::string winnerKey;   // the key of the winner in hand (its capacity reused)
     for (std::size_t wi = 0; wi < winners.size(); ++wi) {
@@ -509,6 +513,9 @@ bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
             }
         }
         if (!skipped && loot) lootEnd[wi] = lootEdges.size();
+        if (artifactBonuses && cls == "ItemArtifactFormula")
+            formulae.push_back({key, ArzArchive::normKey(rec.str("artifactName")),
+                                rec.str("artifactBonusTableName")});
         if (isRelicClass(cls)) {
             if (relics && isShipped(key, rec, cls, g)) {
                 std::vector<std::string> bonuses;
@@ -700,6 +707,19 @@ bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
             if (reason.empty() || kept) relics->push_back(std::move(r));
         }
         if (relicLeft) std::sort(relicLeft->begin(), relicLeft->end(), byRecord);
+    }
+    if (artifactBonuses) {   // the union of every formula's table, per crafted artifact
+        std::sort(formulae.begin(), formulae.end(),
+                  [](const Formula& a, const Formula& b) { return a.key < b.key; });
+        std::map<std::string, std::set<std::string>> seen;
+        std::vector<std::string> bonuses;
+        for (const Formula& f : formulae) {
+            if (f.artifact.empty()) continue;
+            relicBonuses(g, f.table, bonuses);
+            for (const std::string& b : bonuses)
+                if (seen[f.artifact].insert(ArzArchive::normKey(b)).second)
+                    (*artifactBonuses)[f.artifact].push_back(b);
+        }
     }
 
     for (const CatalogueItem& it : items) {
@@ -994,7 +1014,7 @@ std::string fmt(const char* f, int a, int b = 0) {
 
 void buildLists(const std::vector<CatalogueItem>& items, const std::vector<ExcludedItem>& excluded,
                 ListsOutput& out, const utg::GroupSet& rules, const std::vector<std::string>& viewKeys,
-                int hostCols, int hostRows) {
+                int hostCols, int hostRows, bool artifactBlocks) {
     out = ListsOutput();
     std::vector<utg::Item> gitems;
     gitems.reserve(items.size());
@@ -1039,11 +1059,13 @@ void buildLists(const std::vector<CatalogueItem>& items, const std::vector<Exclu
         gl.index = int(gi);
         gl.label = def.label;
         gl.cols = cols; gl.rows = rows; gl.cellW = gr.cw * kCellPx; gl.cellH = gr.ch * kCellPx;
-        gl.count = int(gr.items.size());
+        gl.count = 0;
+        for (const Picked* p : gr.items) gl.count += artifactBlocks && p->it->isRelic ? 0 : 1;
         gl.id = def.id;
         gl.tag = def.tag;
         out.groups += utg::formatGLine(gl) + "\r\n";
         for (const Picked* p : gr.items) {
+            if (artifactBlocks && p->it->isRelic) continue;   // on the artifact block page
             out.records += p->it->record + "\r\n";
             out.groups += "E\t" + p->it->record + fmt("\t%d\t%d\r\n", p->it->footW, p->it->footH);
         }

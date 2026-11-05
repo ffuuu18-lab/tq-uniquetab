@@ -116,6 +116,7 @@ void generateMain(HMODULE selfModule) {
     in.collectUnobtainable = g_cfg.collectUnobtainable != 0;
     in.collectMi = g_cfg.collectMi != 0;
     in.collectRelics = g_cfg.collectRelics != 0;
+    in.collectArtifactBonuses = g_cfg.collectArtifactBonuses != 0;
     // uniquetab-groups.ini beside the main uniquetab.ini: the start-up game's catalogue is
     // generated here, under the main game's settings; every custom game's right after, under its
     // own (generateGamesStart)
@@ -188,6 +189,7 @@ void generateArenaReserve(HMODULE selfModule) {
         in.collectUnobtainable = g_cfg.collectUnobtainable != 0;
         in.collectMi = g_cfg.collectMi != 0;
         in.collectRelics = g_cfg.collectRelics != 0;
+        in.collectArtifactBonuses = g_cfg.collectArtifactBonuses != 0;
         in.groupsPath = groupsPath;
         in.mayGenerate = &neverHere;
         gen::GenReport r;
@@ -212,6 +214,7 @@ void generateArenaReserve(HMODULE selfModule) {
             gi.collectUnobtainable = gs.collectUnobtainable != 0;
             gi.collectMi = gs.collectMi != 0;
             gi.collectRelics = gs.collectRelics != 0;
+            gi.collectArtifactBonuses = gs.collectArtifactBonuses != 0;
             gen::GenReport gr;
             gen::ensureOutputsGuarded(gameDir, std::string(modDir) + "\\" + rel, textLanguageOf(gs.textLanguage, false),
                                       gr, nullptr, nullptr, gi, &g.spec);
@@ -386,6 +389,7 @@ void buildGame(const char* gameDir, const char* modDir, const char* groupsPath,
     in.collectUnobtainable = gs.collectUnobtainable != 0;
     in.collectMi = gs.collectMi != 0;
     in.collectRelics = gs.collectRelics != 0;
+    in.collectArtifactBonuses = gs.collectArtifactBonuses != 0;
     in.groupsPath = groupsPath;
     gen::GenReport report;
     StartCtx ctx = {gameDir, dir.c_str(), &lang};
@@ -768,6 +772,7 @@ bool gameBeforeEntry(HMODULE selfModule, const char* root, const char* name, UtG
     in.collectUnobtainable = g_cfg.collectUnobtainable != 0;
     in.collectMi = g_cfg.collectMi != 0;
     in.collectRelics = g_cfg.collectRelics != 0;
+    in.collectArtifactBonuses = g_cfg.collectArtifactBonuses != 0;
     char groupsPath[MAX_PATH] = {0};   // ONE groups file for every game; [view:<leaf>] blocks
     utModPathA(selfModule, "uniquetab-groups.ini", groupsPath, sizeof(groupsPath));
     in.groupsPath = groupsPath;

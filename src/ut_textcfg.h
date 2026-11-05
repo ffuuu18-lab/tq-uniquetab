@@ -47,6 +47,8 @@
 //   tooltip.roll         the words after tooltip.yes on a monster infrequent the collection holds
 //                        in another roll, 1..96 units, appended as written (built in
 //                        " (another roll)" - quote a value to keep its leading blank)
+//   tooltip.reagent      the word after a formula's reagent line the collection holds, 1..96
+//                        units, after one blank (built in "(Collection)")
 // [style]:
 //   language             the [text.<lang>] section to apply ([a-z0-9_-]{1,16}, any case);
 //                        unset = no language section applies (they are ignored, one DEBUG line)
@@ -265,6 +267,7 @@ enum UtTextKind {
     kTextTooltipYes,      // tooltip.yes
     kTextTooltipNo,       // tooltip.no
     kTextTooltipRoll,     // tooltip.roll (merge-MI fit: the "(another roll)" words)
+    kTextTooltipReagent,  // tooltip.reagent (a formula's reagent the collection holds)
     kTextKindCount
 };
 
@@ -273,14 +276,15 @@ enum UtTextFont { kFontCaption = 0, kFontLabel, kFontTooltip };
 
 inline UtTextFont utTextFontOf(UtTextKind k) {
     if (k == kTextCaption) return kFontCaption;
-    if (k == kTextTooltipYes || k == kTextTooltipNo || k == kTextTooltipRoll) return kFontTooltip;
+    if (k == kTextTooltipYes || k == kTextTooltipNo || k == kTextTooltipRoll || k == kTextTooltipReagent)
+        return kFontTooltip;
     return kFontLabel;
 }
 
 // Length limits in UTF-16 units.
 inline void utTextLimits(UtTextKind k, std::size_t* minU, std::size_t* maxU) {
-    static const std::size_t kMin[kTextKindCount] = {1, 1, 1, 0, 1, 1, 1, 1};
-    static const std::size_t kMax[kTextKindCount] = {12, 48, 160, 48, 8, 96, 96, 96};
+    static const std::size_t kMin[kTextKindCount] = {1, 1, 1, 0, 1, 1, 1, 1, 1};
+    static const std::size_t kMax[kTextKindCount] = {12, 48, 160, 48, 8, 96, 96, 96, 96};
     *minU = kMin[k];
     *maxU = kMax[k];
 }
@@ -312,6 +316,7 @@ inline bool utTextParseKey(const std::string& key, UtTextKind* kind, std::string
     if (k == "tooltip.yes") { *kind = kTextTooltipYes; return true; }
     if (k == "tooltip.no") { *kind = kTextTooltipNo; return true; }
     if (k == "tooltip.roll") { *kind = kTextTooltipRoll; return true; }
+    if (k == "tooltip.reagent") { *kind = kTextTooltipReagent; return true; }
     return false;
 }
 
@@ -497,6 +502,7 @@ inline const char* utTextBuiltinPlain(UtTextKind k) {
     case kTextTooltipYes: return "In your collection";
     case kTextTooltipNo: return "Not in your collection";
     case kTextTooltipRoll: return " (another roll)";
+    case kTextTooltipReagent: return "(Collection)";
     default: return nullptr;
     }
 }
@@ -960,6 +966,7 @@ inline std::string utTextKeyName(UtTextKind kind, const std::string& id) {
     case kTextTooltipYes: return "tooltip.yes";
     case kTextTooltipNo: return "tooltip.no";
     case kTextTooltipRoll: return "tooltip.roll";
+    case kTextTooltipReagent: return "tooltip.reagent";
     default: return std::string();
     }
 }

@@ -348,6 +348,75 @@ int main(int argc, char** argv) {
                ut::utRelicWindowPlaces(l, empty, 0, opl, 512) == 0,
            "OWN: nothing held - no page, no place");
 
+        // relic_own_slots: only the slots that hold something (holes: each on its table cell)
+        bool stateSame = rst.size() == l.rows.size() + (size_t)l.bonusSlots;
+        for (size_t r = 0; r < l.rows.size() && stateSame; ++r) stateSame = l.rows[r].state == first[r];
+        ok(stateSame, "relic_own_slots: a row's state index is its first state in the per-state tables");
+        std::vector<unsigned char> slots(rst.size(), 9);
+        const int b5row1 = first[(size_t)lastRow] + 1;
+        ok(ut::utRelicSlotsHeld(rst.data(), (int)rst.size(), slots.data()) == 2 && slots[b5row1] == 1 &&
+               slots[(size_t)first[(size_t)l.blocks[ob1].firstRow]] == 1 && slots[(size_t)(b5row1 + 1)] == 0,
+           "relic_own_slots: a slot is held when it counts at least one");
+        {
+            ut::UtRelicLayout same;
+            ut::utRelicLayoutBuild(l, g16, &same, keep.data(), nullptr);
+            ok(same.rowLines == own.rowLines && same.blockLines == own.blockLines &&
+                   same.pageStart == own.pageStart && same.blockOf == own.blockOf && same.shown.empty() &&
+                   same.wrappedRows == own.wrappedRows && same.tallBlocks == own.tallBlocks,
+               "relic_own_slots=0: the layout is today's (no slot flags)");
+        }
+        ut::UtRelicLayout sl;
+        ok(ut::utRelicLayoutBuild(l, g16, &sl, keep.data(), slots.data()) && sl.blockOf == own.blockOf &&
+               sl.shown.size() == rst.size() && sl.blockLines[0] == allY.rowLines[(size_t)l.blocks[ob1].firstRow] &&
+               sl.blockLines[1] == 1 &&
+               sl.rowLines[(size_t)(l.blocks[ob1].firstRow + 1)] == 0 && ut::utRelicPageCount(sl) == 1,
+           "relic_own_slots: the held blocks stay, a row with nothing gets no line");
+        const int ns = ut::utRelicWindowPlaces(l, sl, 0, opl, 512);
+        // block 1's first row: its red (shards) at column 0; block 5's last row: a dead column 0
+        // (its red is empty) and bonus 1 on its table cell, after block 1's lines and the gap
+        const int b5line = sl.blockLines[0] + ut::utRelicGapLines(g16);
+        ok(ns == 3 && opl[0].row == l.blocks[ob1].firstRow && opl[0].slot == 0 &&
+               opl[0].kind == ut::kUtRelicSlotRed && opl[0].col == 0 && opl[0].line == 0 &&
+               opl[1].row == lastRow && opl[1].slot == 0 && opl[1].kind == ut::kUtRelicSlotDead &&
+               opl[1].col == 0 && opl[1].line == b5line && opl[2].slot == 1 &&
+               opl[2].kind == ut::kUtRelicSlotGreen && opl[2].col == 1 + g16.bonusGap && opl[2].line == b5line,
+           "relic_own_slots: only the held slots - a red with shards, an empty red dead at column 0, the bonus on its cell");
+        {
+            std::vector<unsigned char> slotNone(rst.size(), 0);
+            ut::UtRelicLayout sn;
+            ok(ut::utRelicLayoutBuild(l, g16, &sn, nullptr, slotNone.data()) && ut::utRelicPageCount(sn) == 0 &&
+                   ut::utRelicWindowPlaces(l, sn, 0, opl, 512) == 0 && ut::utRelicWheelStep(sn, 0, 1) == 0,
+               "relic_own_slots: nothing held - no block, no page, no place");
+            // a wrapped row: only its 15th bonus (the second line's first) - the row keeps both lines
+            int wr = -1;
+            for (size_t r = 0; r < l.rows.size() && wr < 0; ++r)
+                if ((int)l.rows[r].bonuses.size() > allY.perLine) wr = (int)r;
+            if (wr >= 0) slotNone[(size_t)(first[(size_t)wr] + 1 + allY.perLine)] = 1;
+            const int nw = wr >= 0 && ut::utRelicLayoutBuild(l, g16, &sn, nullptr, slotNone.data())
+                               ? ut::utRelicWindowPlaces(l, sn, 0, opl, 512)
+                               : 0;
+            ok(nw == 2 && sn.blockOf.size() == 1u && sn.rowLines[(size_t)wr] == 2 &&
+                   opl[0].kind == ut::kUtRelicSlotDead && opl[1].slot == 1 + allY.perLine &&
+                   opl[1].col == 1 + g16.bonusGap && opl[1].line == opl[0].line + 1,
+               "relic_own_slots: a wrapped row's bonus keeps its wrapped cell");
+        }
+        {   // the search under relic_own_slots: block 1's first row, its red and its bonus 3 held
+            std::vector<ut::UtRelicPlaceState> rs(rst);
+            for (ut::UtRelicPlaceState& e : rs) e.count = 0;
+            const int r1 = l.blocks[ob1].firstRow;
+            rs[(size_t)first[(size_t)r1]].count = 2;
+            rs[(size_t)(first[(size_t)r1] + 3)].count = 1;
+            std::vector<unsigned char> k1(l.blocks.size(), 0), s1(rs.size(), 0), m1(rs.size(), 0);
+            ut::utRelicBlocksHeld(l, first.data(), rs.data(), k1.data());
+            ut::utRelicSlotsHeld(rs.data(), (int)rs.size(), s1.data());
+            m1[(size_t)(first[(size_t)r1] + 2)] = 1;   // a match in a held block, its slot empty
+            m1[(size_t)(first[(size_t)r1] + 3)] = 1;   // a match on the held slot
+            ok(ut::utRelicSearchFound(l, first.data(), m1.data(), k1.data()) == 2 &&
+                   ut::utRelicSearchFound(l, first.data(), m1.data(), k1.data(), s1.data()) == 1 &&
+                   ut::utRelicGreenSlots(l, k1.data(), s1.data()) == 1 && ut::utRelicGreenSlots(l, k1.data()) > 1,
+               "relic_own_slots: found and of count only the shown green slots");
+        }
+
         std::vector<unsigned char> match(rst.size(), 0);
         const int sr0 = l.blocks[ob1].firstRow;
         match[(size_t)(first[(size_t)sr0] + 2)] = 1;   // bonus 2 of block 1's first trow
@@ -503,6 +572,162 @@ int main(int argc, char** argv) {
         for (int i = 0; i < pn; ++i)
             if (first[(size_t)i].line > lineMax) lineMax = first[(size_t)i].line;
         ok(pn > 0 && first[0].line == 1 && lineMax < 15, "the window's first block starts on line 1, its name on line 0");
+    }
+
+    // ---- the artifact page (collect_artifact_bonuses=1): part A after the charms, 2 x 2 places
+    {
+        std::string at2 = text;   // two artifact blocks, numbered after the oracle's
+        const int nbl = (int)l.blocks.size();
+        snprintf(d, sizeof(d), "B\t%d\tx/a/one\tA\t1\tThe Orb of Things\tThe Orb of Things\r\n", nbl + 1);
+        at2 += d;
+        at2 += "R\tx/a/One.dbr\t0\t0\tx/a/one.tex\t\t8\tb/1\tb/2\tb/3\tb/4\tb/5\tb/6\tb/7\tb/8\r\n";
+        at2 += "F\tx/f/One_Formula.dbr\r\n";
+        snprintf(d, sizeof(d), "B\t%d\tx/a/two\tA\t1\tLoot Only\tLoot Only\r\n", nbl + 2);
+        at2 += d;
+        at2 += "R\tx/a/two.dbr\t0\t0\tx/a/two.tex\t\t0\r\n";
+        at2 += "F\tx/f/two_a.dbr\r\nF\tx/f/two_b.dbr\r\nF\tx/f/two_c.dbr\r\n";   // a custom game's three
+        snprintf(d, sizeof(d), "B\t%d\tx/a/six\tA\t1\tSix Ways\tSix Ways\r\n", nbl + 3);
+        at2 += d;
+        at2 += "R\tx/a/six.dbr\t0\t0\tx/a/six.tex\t\t6\tb/1\tb/2\tb/3\tb/4\tb/5\tb/6\r\n";
+        ut::UtRelicList a;
+        err.clear();
+        const bool ar = ut::utRelicListRead(at2, &a, &err);
+        const int r1 = ar ? ut::utRelicFind(a, "x/a/one.dbr") : -1, r2 = ar ? ut::utRelicFind(a, "x/a/two.dbr") : -1;
+        const int r3 = ar ? ut::utRelicFind(a, "x/a/six.dbr") : -1;
+        ok(ar && a.artifactBlocks == 3 && r1 >= 0 && r2 >= 0 && r3 >= 0 && a.rows[(size_t)r1].artifact &&
+               a.rows[(size_t)r1].shards == 0u && a.rows[(size_t)r2].bonuses.empty() &&
+               a.blocks[(size_t)a.rows[(size_t)r1].block].name == "The Orb of Things",
+           "part A reads: shards 0, no bonus allowed, the artifact's whole name", err.c_str());
+        ok(ar && a.formulae == 4 && a.rows[(size_t)r1].formulae.size() == 1u &&
+               a.rows[(size_t)r1].formulaFolded[0] == "x/f/one_formula.dbr" && a.rows[(size_t)r2].formulae.size() == 3u &&
+               a.rows[(size_t)r2].formulaFirst == a.rows[(size_t)r1].formulaFirst + 1 && a.rows[(size_t)r3].formulae.empty() &&
+               l.formulae == 0,
+           "the F lines: each artifact's formulae after its R line, folded, numbered in list order (none on the oracle's)");
+        {
+            ut::UtRelicList nope;
+            std::string e1, e2;
+            const bool f1 = ut::utRelicListRead(text + "F\tx/f/early.dbr\r\n", &nope, &e1);
+            const bool f2 = ut::utRelicListRead(at2 + "F\t\r\n", &nope, &e2);
+            ok(!f1 && !f2 && e1.find("not a B, R, F or X line") != std::string::npos,
+               "an F line after a relic's R line, or naming no record, is refused", e1.c_str());
+        }
+        if (ar) {
+            std::vector<unsigned char> kr(a.blocks.size()), ka(a.blocks.size());
+            ut::utRelicPartKeep(a, false, nullptr, kr.data());
+            ut::utRelicPartKeep(a, true, nullptr, ka.data());
+            ut::UtRelicLayout yr, yo, ya;
+            ok(ut::utRelicLayoutBuild(a, ut::utRelicGeometryOf(16, 15, 1, 1, 1), &yr, kr.data()) &&
+                   ut::utRelicLayoutBuild(l, ut::utRelicGeometryOf(16, 15, 1, 1, 1), &yo) &&
+                   yr.pageStart == yo.pageStart && yr.blockLines == yo.blockLines,
+               "the relic page lays out parts R and C only: the same pages as without the artifacts");
+            ok(ut::utRelicLayoutBuild(a, ut::utRelicGeometryOf(16, 15, 1, 1, 1, 2), &ya, ka.data()) &&
+                   ya.perLine == 6 && ya.blockLines.size() == 3u && ya.blockLines[0] == 4 && ya.blockLines[1] == 3 &&
+                   ya.blockLines[2] == 4,
+               "the artifact page: 6 slots of 2 x 2 a line at 16 cells, 8 bonuses and the plain slot wrap onto a "
+               "second slot line, 6 bonuses too (the plain slot is always last), a third formula adds a line");
+            std::vector<ut::UtRelicPlace> ap(64);
+            ut::UtRelicFormulaPlace fp[8];
+            int fn = 0;
+            const int an = ut::utRelicWindowPlaces(a, ya, 0, ap.data(), (int)ap.size(), fp, 8, &fn);
+            ok(an == 20 && ap[0].kind == ut::kUtRelicSlotDead && ap[0].col == 0 && ap[0].line == 1 &&
+                   ap[0].size == 2 && ap[1].col == 3 && ap[6].col == 13 && ap[7].col == 3 && ap[7].line == 3 &&
+                   ap[9].kind == ut::kUtRelicSlotPlain && ap[9].slot == 0 && ap[9].col == 7 && ap[9].line == 3 &&
+                   ap[10].kind == ut::kUtRelicSlotDead && ap[10].line == 6 && ap[11].kind == ut::kUtRelicSlotPlain &&
+                   ap[11].col == 3 && ap[11].line == 6 && ap[19].kind == ut::kUtRelicSlotPlain && ap[19].col == 3 &&
+                   ap[19].line == 12,
+               "its places: column 0 dead (the formulae's), the bonus gap, 2 x 2 green slots wrapping, the plain slot "
+               "last in the flow (slot 0), the next block's name line");
+            ok(fn == 4 && fp[0].row == r1 && fp[0].col == 0 && fp[0].line == 1 && fp[0].w == 2 && fp[0].h == 1 &&
+                   fp[1].row == r2 && fp[1].line == 6 && fp[2].line == 7 && fp[3].line == 8 &&
+                   fp[3].index == a.rows[(size_t)r2].formulaFirst + 2,
+               "the formula cells: 2 x 1 in column 0, one line each from the row's first, in their own array");
+            // the plain slot holds every row no green slot takes; a take is a whole row, the oldest settled first
+            ut::UtRelicRowFacts af[4];
+            memset(af, 0, sizeof(af));
+            af[0].seq = 1; af[0].deposited = 30; snprintf(af[0].bonus, sizeof(af[0].bonus), "b/3");
+            af[1].seq = 2; af[1].deposited = 20; af[1].var1 = 5;   // no bonus, var1 above 1: still whole
+            af[2].seq = 3; af[2].deposited = 10; snprintf(af[2].bonus, sizeof(af[2].bonus), "b/gone");
+            af[3].seq = 4; af[3].deposited = 5; af[3].pending = ut::kUtRelicPendIn;
+            ut::UtRelicPlaceState sp, sg;
+            const ut::UtRelicRow& arow = a.rows[(size_t)r1];
+            ut::utRelicPlaceState(arow, 0, af, 4, &sp);
+            ut::utRelicPlaceState(arow, 3, af, 4, &sg);
+            const char* tab[8] = {"b/1", "b/2", "b/3", "b/4", "b/5", "b/6", "b/7", "b/8"};
+            ok(sp.count == 3u && !sp.empty && sp.seq == 3u && !sp.split && sp.protoVar1 == 0u && sg.count == 1u &&
+                   sg.seq == 1u && ut::utArtifactTakeChoice(af, 4, 2, tab, 8) == 2 &&
+                   ut::utArtifactTakeChoice(af, 4, 1, tab, 8) == 2 && ut::utArtifactTakeChoice(af, 4, 0, tab, 8) == 0,
+               "the plain slot: 3 rows (none, an unlisted bonus, pending in), the oldest settled one handed out whole");
+            ok(ut::utRelicTakeCallOf(true, 1, true) == ut::kUtRelicTakeRow &&
+                   ut::utRelicTakeCallOf(true, 1, false) == ut::kUtRelicTakeShard &&
+                   ut::utRelicTakeCallOf(true, 4, true) == ut::kUtRelicTakeRow,
+               "every artifact take is a whole row (never journalTakeShard)");
+            ut::UtRelicTip tp, tg, tn;
+            ut::utRelicTipOf(arow, 0, "", af, 4, &tp);
+            ut::utRelicTipOf(arow, 0, "b/3", af, 4, &tg);
+            ut::utRelicTipOf(arow, 0, "b/4", af, 4, &tn);
+            ok(tp.state == 1 && tp.pieces == 0u && tg.state == 1 && tn.state == 3,
+               "the rollover: a plain one in, a listed bonus held in, another bonus (another roll)");
+            // relic_own_slots on the artifact page: block 1 holds its bonuses 3 and 8 only, block 2
+            // its plain slot
+            const int r1s = a.rows[(size_t)r1].state, r2s = a.rows[(size_t)r2].state;
+            std::vector<unsigned char> as(a.rows.size() + (size_t)a.bonusSlots, 0);
+            as[(size_t)(r1s + 3)] = as[(size_t)(r1s + 8)] = as[(size_t)r2s] = 1;
+            ut::UtRelicLayout yas;
+            std::vector<unsigned char> fz((size_t)a.formulae, 0);   // no formula stored
+            const int asn = ut::utRelicLayoutBuild(a, ut::utRelicGeometryOf(16, 15, 1, 1, 1, 2), &yas, ka.data(),
+                                                   as.data(), fz.data())
+                                ? ut::utRelicWindowPlaces(a, yas, 0, ap.data(), (int)ap.size(), fp, 8, &fn)
+                                : 0;
+            ok(asn == 5 && fn == 0 && ap[0].row == r1 && ap[0].slot == 0 && ap[0].kind == ut::kUtRelicSlotDead &&
+                   ap[0].col == 0 && ap[0].size == 2 && ap[3].row == r2 && ap[3].kind == ut::kUtRelicSlotDead &&
+                   ap[4].row == r2 && ap[4].kind == ut::kUtRelicSlotPlain && ap[4].col == 3 &&
+                   yas.blockLines.size() == 2u && yas.rowLines[(size_t)r2] == 3,
+               "relic_own_slots: an empty plain slot and an empty formula are ground, a held plain slot stays last, "
+               "the row keeps its lines, a block with nothing is out");
+            ok(asn == 5 && yas.rowLines[(size_t)r1] == 4 && ap[1].slot == 3 && ap[1].col == 7 && ap[1].line == 1 &&
+                   ap[2].slot == 8 && ap[2].col == 5 && ap[2].line == 3 && ap[2].size == 2 && ap[4].line == 6,
+               "relic_own_slots: a held green keeps its 2 x 2 cell, the wrapped one too (the row keeps both lines)");
+            // a stored formula alone keeps its block (OWN), and under relic_own_slots is its block's one cell
+            as[(size_t)r2s] = 0;
+            fz[(size_t)(a.rows[(size_t)r2].formulaFirst + 1)] = 1;
+            std::vector<ut::UtRelicPlaceState> zs(as.size());
+            for (ut::UtRelicPlaceState& q : zs) memset(&q, 0, sizeof(q));
+            std::vector<int> sf(a.rows.size());
+            for (size_t r = 0; r < a.rows.size(); ++r) sf[r] = a.rows[r].state;
+            std::vector<unsigned> frows((size_t)a.formulae, 0u);
+            frows[(size_t)(a.rows[(size_t)r2].formulaFirst + 1)] = 2u;
+            std::vector<unsigned char> held(a.blocks.size(), 0);
+            const int hb = ut::utRelicBlocksHeld(a, sf.data(), zs.data(), held.data(), frows.data());
+            const int fsn = ut::utRelicLayoutBuild(a, ut::utRelicGeometryOf(16, 15, 1, 1, 1, 2), &yas, ka.data(),
+                                                   as.data(), fz.data())
+                                ? ut::utRelicWindowPlaces(a, yas, 0, ap.data(), (int)ap.size(), fp, 8, &fn)
+                                : 0;
+            ok(hb == 1 && held[(size_t)a.rows[(size_t)r2].block] && fsn == 4 && fn == 1 && fp[0].row == r2 &&
+                   fp[0].line == 7 && ap[3].row == r2 && ap[3].kind == ut::kUtRelicSlotDead,
+               "a stored formula alone keeps its artifact's block; relic_own_slots shows that one cell");
+            // both settings off: the relic page is 1.1.1's (the part keep of a list without part A, no
+            // slot flags), every place one cell on the 1.1.1 columns
+            std::vector<unsigned char> k0(l.blocks.size());
+            ut::utRelicPartKeep(l, false, nullptr, k0.data());
+            ut::UtRelicLayout y0;
+            bool same = ut::utRelicLayoutBuild(l, ut::utRelicGeometryOf(16, 15, 1, 1, 1), &y0, k0.data(), nullptr) &&
+                        ut::utRelicLayoutBuild(l, ut::utRelicGeometryOf(16, 15, 1, 1, 1), &yo) &&
+                        y0.rowLines == yo.rowLines && y0.blockLines == yo.blockLines && y0.pageStart == yo.pageStart &&
+                        y0.blockOf == yo.blockOf && y0.shown.empty() && y0.perLine == yo.perLine;
+            std::vector<ut::UtRelicPlace> p0(512), p1(512);
+            for (size_t pg = 0; pg < y0.pageStart.size() && same; ++pg) {
+                const int w0 = ut::utRelicWindowPlaces(l, y0, y0.pageStart[pg], p0.data(), (int)p0.size());
+                const int w1 = ut::utRelicWindowPlaces(l, yo, yo.pageStart[pg], p1.data(), (int)p1.size());
+                same = w0 == w1 && w0 > 0;
+                for (int i = 0; i < w0 && same; ++i)
+                    same = p0[(size_t)i].row == p1[(size_t)i].row && p0[(size_t)i].slot == p1[(size_t)i].slot &&
+                           p0[(size_t)i].kind == p1[(size_t)i].kind && p0[(size_t)i].line == p1[(size_t)i].line &&
+                           p0[(size_t)i].size == 1 && p0[(size_t)i].kind != ut::kUtRelicSlotPlain &&
+                           p0[(size_t)i].col ==
+                               (p0[(size_t)i].slot == 0 ? 0 : 1 + y0.geo.bonusGap + (p0[(size_t)i].slot - 1) % y0.perLine);
+            }
+            ok(same, "both settings off: the relic layout and every page's places are 1.1.1's");
+        }
     }
 
     printf("%s: %d passed, %d failed\n", g_fail ? "RELICPAGE TESTS FAILED" : "RELICPAGE TESTS PASSED",

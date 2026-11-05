@@ -62,7 +62,8 @@ bool ownedMarkRect(int i, float* x, float* y, float* w, float* h);   // prototyp
 // same trust as the veil), the record is uncollected and the slot is not the hovered one (the earlier
 // un-veil rule: the item under the cursor shows its colours). Game thread; no allocation.
 bool ownedGrayWanted(int i);
-// Prototype i is a slot of the relic page (no veil there: an empty slot shows its gray copy).
+// Prototype i takes the relic look: a slot of the relic page, or a formula cell of the artifact page
+// (ut_reliclook.h utRelicLook; no veil there: an empty slot shows its gray copy).
 bool ownedRelicSlot(int i);
 unsigned ownedPageRows(int i);   // prototype i's journal rows (a unique's place), taken with the page
 // prototype i's background draw (the engine's red, class tint, rarity border) is to be

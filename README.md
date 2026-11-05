@@ -18,12 +18,24 @@ block per relic or charm, its shards and each of its completion bonuses a slot o
 (`collect_relics`). It is a place to put the uniques you want to keep, one copy of each, and a
 way to see at a glance what you have found and what you have not.
 
-**The arcane formulae** have their page after the Artifacts, each in a cell two squares wide.
-Hovering a formula says whether the formula itself is in your collection; the artifact it makes
+**The arcane formulae** have their page after the Artifacts, each in a cell two squares wide
+(with the artifact page of `collect_artifact_bonuses=1`, the default, each formula sits in its
+artifact's block there instead, and this page keeps the formulae that make no artifact: the three
+Lupine Necklace Designs in the base game). Hovering a formula says whether the formula itself is in your collection; the artifact it makes
 keeps its own line on its own tooltip, never on the formula's. A formula's cell keeps any number
 of single copies (`formula_copies=1`, the default): a corner number counts them from two up, and
 a take gives back the newest. A stack of two or more is refused like any stack, and a formula
 your own group in `uniquetab-groups.ini` takes off this page keeps one copy.
+
+**A formula's reagents in your collection.** On a formula's tooltip, a grey reagent line whose
+reagent your collection holds turns yellow and reads *(Collection)* after its name (the buttons
+file's `tooltip.reagent`), and *Required Reagents (n/3)* counts it, in the game's own words. Only
+a full, usable copy counts: a completed relic or charm (never the pieces of the red slot), an
+artifact of any of its slots, an equipment item - never one you are taking out. A reagent the game
+already shows yellow (in your inventory, Storage, Transfer or the Relic Vault) is left as it is.
+It is text only: the Enchanter still needs the reagents put into its window by hand, so take
+them out of the collection first. A formula outside the collection's records keeps the game's
+lines.
 
 **Your items do not go into a caravan file.** The collection lives in the mod's own file next to
 the mod. The mod never writes `Player.chr`, the Transfer's `winsys.dxb` or any other save file:
@@ -88,7 +100,7 @@ game that runs with no log in either place never loaded the plugin. Check the lo
 There is nothing to do by hand. Your collection and your settings stay where they are, and the
 first start does the rest, once:
 
-- `uniquetab.ini` is rewritten as `ini_version 29` with every value you set kept and a `[layout]`
+- `uniquetab.ini` is rewritten as `ini_version 30` with every value you set kept and a `[layout]`
   part added; a setting that moved (where the collection was left goes to `uniquetab.state`, the
   rollover words to `[tab]` of the buttons file) is carried there, and the log names each move;
 - every catalogue is rebuilt from your game files, because what goes into it changed; on a page
@@ -172,6 +184,8 @@ lines back: the base game's 16 x 15 area holds 27 pages with names, 24 without).
 Each part's blocks stand in order of name, the relics still before the charms (`relic_sort=1`, the
 default; 0 = the game's order, from the next page you open). A coloured line marks where the relics
 end and the charms start, in the gap that is already there (`relic_split=1`, the default). An empty slot on this page is gray whatever `owned_marks` says.
+A dark veil lies over the empty slots, so the ones you hold stand out also where a relic has little
+colour (`relic_empty_veil=1`, the default; 0 = gray only).
 
 On the **Relic** page every relic or charm tooltip speaks of its slot there. A
 completed relic or charm says **In your collection** when its record with that completion bonus is
@@ -180,7 +194,10 @@ stored, **In your collection (another roll)** when only other bonuses of that re
 line: **In your collection (pieces 15)** - the shards stored there, the slot's own number - or
 **Not in your collection**. The same lines show on the pieces in your
 inventory, stash and Relic Vault. **OWN** on the Relic page shows only the blocks that hold
-something, every slot of such a block in its place. With `have_marks=1` an empty bonus slot gets
+something, every slot of such a block in its place. With `relic_own_slots=1` OWN goes further: only
+the slots that hold something are shown, each where it always is (the others are bare ground), a
+row or block with nothing is left out, and a slot you empty goes at the next page build. Found and
+"of" in the search then count only the shown bonus slots. With `have_marks=1` an empty bonus slot gets
 the corner tick when you carry that relic or charm with that bonus somewhere (the shard slot never
 does).
 
@@ -188,6 +205,33 @@ The Relic page's label is short and names no page (the pressed **Relic** button 
 `61-63/93  page 18/27  8/1971  pieces 50` - the blocks shown of all blocks, the fixed page, the bonus
 slots holding something of all bonus slots, and the shards stored. A narrower label box drops the
 page, then the blocks, then the pieces; a search adds `found N` (`=N` in a narrow box).
+
+### The artifact page (`collect_artifact_bonuses=1`)
+
+With `collect_artifact_bonuses=1` under `[general]` (the default) the **Artifacts** button opens a
+page laid out like the Relic page: one block per artifact, its name on the line above it, its
+**arcane formula** in the first column (a cell two squares wide; a custom game whose artifact has
+two or three formulae stacks them there), then one **bonus slot** per completion bonus its formulae
+can give (6 to 16 in the base game, 828 in all over 90 artifacts), wrapping onto the next line, and
+last the **plain slot**, always there, wrapping like a bonus slot. The slots are the artifacts' own
+size, 2 x 2 cells, so the base game's 16 x 15 area holds 36 pages. A crafted artifact goes to the
+slot of its bonus; one with no bonus (a quest reward or a chest's, which 45 of the 90 can be) or
+with a bonus its formulae do not list goes to the plain slot, so every artifact you stored is on
+the page. Every slot keeps any number and gives back its oldest artifact, whole. The formula's
+cell is the Arcane Formulae page's: it shows the newest copy, gives them back one at a time
+(`formula_copies`), counts them from two up and says "In your collection" on its tooltip; while
+the collection has none it is gray like an empty slot, OWN on or off. The
+label's bonus slot figures count the bonus slots only, and the search's `found` and `of` the bonus
+slots and the formula cells: the plain slot is in no total. The label says `plain N` (the
+artifacts in the plain slots) where the Relic page says `pieces`; the tooltips, OWN, the search,
+the counts and the gray empty slots work as on the Relic page, `relic_own_slots=1` too: under OWN
+an artifact whose formula alone is stored keeps its block, with `relic_own_slots=1` only the slots
+and formulae that hold something are shown, an empty plain slot or formula cell is bare ground like
+an empty bonus slot, and an artifact with nothing stored is left out. A change of the setting
+rebuilds the game's files once at the next start. Back at 0 (or with a groups file that has no
+group of the id `artifact`) the Artifacts page is the one item per artifact it was and the Arcane
+Formulae page shows every formula: an artifact stored several times shows its newest and is taken
+one at a time, and a second copy is refused as before.
 
 ### Searching
 
@@ -297,6 +341,9 @@ It comes back as the item you put in, not as a fresh roll: the same prefix, suff
 charm, the same seed. On the Relic page a shard slot gives one shard at a time, and a bonus slot
 the oldest piece stored there.
 
+In a big collection (thousands of rows) a take or a deposit still costs a short pause: the whole
+journal is written and flushed to disk before the item moves, so a crash can never lose it.
+
 ### One collection per save set
 
 Titan Quest keeps separate characters and a separate Transfer for the main campaign, for custom
@@ -351,15 +398,19 @@ under `[advanced]` at the end, commented out at its default.
 | `enabled` | 1 | 0 = the mod goes quiet: no tab, nothing new collected. Nothing is lost. The collection view cannot be switched on (a shown one goes back to the Transfer page), the view key is the game's again, and no pad, mark, tooltip line or search field is drawn; what you stored stays in the journal, and `enabled=1` brings it all back |
 | `collect_mi` | 1 | 1 = monster infrequents are collected, one roll per item; 0 = they are not, and the ones you stored stay in the collection, hidden until it is 1 again (from the next start) |
 | `collect_relics` | 1 | 1 = relics and charms have their own page, one shard at a time; 0 = no relic page: no Relic button (a section of the buttons file that names `relics` simply gives none, the rest of the file stays in force), a relic or charm is refused like any item outside the collection, and the ones you stored stay in the collection, hidden until it is 1 again (from the next start; the CSV export still lists them, with empty tier and shards cells) |
+| `collect_artifact_bonuses` | 1 | 1 = the Artifacts button shows one block per artifact, as the Relic page: its arcane formula, one slot per completion bonus it can get and a plain slot (see *The artifact page*), and the Arcane Formulae page keeps only the formulae that make no artifact; 0 = both pages as before. Nothing stored is lost either way (from the next start) |
 | `collect_unobtainable` | 0 | 1 = also collect the records no monster, chest, merchant or quest gives (gear worn by statues and quest people, a boss weapon he never drops, set pieces no loot table names); 0 = they are left out, the start-up log lists them, and the ones you stored stay in the collection, hidden until it is 1 again (from the next start) |
 | `tooltip_mark` | 1 | 1 = every item tooltip says whether it is in your collection |
 | `log_level` | info | how much goes in the log: error, warn, info, debug, trace |
 | `view_hotkey` | 117 | the key that switches the Transfer page to the collection and back, as a Windows virtual-key code (117 = F6, the default; 0 = the Transfer button only) |
 | `search` | 1 | 1 = the search field on the collection page; 0 = no field, no marks, no key taken (if the game started with 0, a 1 works from the next start) |
 
-The file says `ini_version=29`. An older file is carried over on the first start with every value
-kept. A file from 27 keeps every line and takes the defaults of `relic_names`, `relic_sort`,
-`relic_split`, `formula_copies` and `view_resume`; a mod's own file from 27 takes the main file's
+The file says `ini_version=30`. An older file is carried over on the first start with every value
+kept. A file from 29 keeps every line, gains `collect_artifact_bonuses=1` under `[general]` and
+takes the defaults of `relic_empty_veil` and `relic_own_slots`; a mod's own file from 29 takes the
+main file's values of those keys once, at its first entry. A file from 27 keeps every line and takes the defaults of `relic_names`, `relic_sort`,
+`relic_split`, `formula_copies`, `view_resume`, `relic_empty_veil` and `relic_own_slots` and gains
+`collect_artifact_bonuses=1`; a mod's own file from 27 takes the main file's
 values of those keys once, at its first entry. A file from 26 keeps every line and gains `collect_relics=1` under `[general]`; a mod's own
 file from 26 takes the main file's `collect_relics` once, at its first entry. A file from 22
 keeps every line - your `[layout]` lines, `pad_screen` and `label_screen`,
@@ -381,7 +432,7 @@ does beside it. Remove the `;` in front of one to change it; the line keeps its 
 | --- | --- | --- |
 | `ui_scale_pct` | 0 | 0 = follow the game's UI scale, else force one in percent (50..300): the buttons, the label, the outlines and the marks the mod draws are placed at it. For a display where the measured scale comes out wrong; the game's own window and items do not change, so set it to the game's own UI scale: any other value moves the marks and outlines off the game's items (a deposit still lands in the cell under the cursor) |
 | `mp_collect` | 1 | 1 = deposits and takes work in a multiplayer game, hosted or joined, for you only; 0 = the page shows there but every move is refused |
-| `collect_pristine_only` | 0 | 1 = refuse items with affixes, relics or charms: a unique with a relic or charm in a socket (or its completion bonus), or an item with a prefix or a suffix, is not taken, and the log names the part (`deposit ... REFUSED - the item is not pristine: <record> [relic = "..."]`). The slot still shows such an item as one it takes: the refusal comes at the drop |
+| `collect_pristine_only` | 0 | 1 = refuse items with affixes, relics or charms: a unique with a relic or charm in a socket (or its completion bonus), or an item with a prefix or a suffix, is not taken, and the log names the part (`deposit ... REFUSED - the item is not pristine: <record> [relic = "..."]`). A crafted artifact's own completion bonus is not such a part: it is taken whatever `collect_artifact_bonuses` says. The slot still shows such an item as one it takes: the refusal comes at the drop |
 | `group_buttons` | 1 | draw the pad of group buttons and let it be clicked |
 | `page_hotkeys` | 1 | the wheel scrolls rows, PageUp/PageDown turn pages, Ctrl changes group |
 | `plate_label` | 1 | draw the group label beside the buttons |
@@ -407,6 +458,8 @@ does beside it. Remove the `;` in front of one to change it; the line keeps its 
 | `relic_names` | 1 | the Relic page: 1 = each block's name on the line above it (the gap between two blocks is then at least that line); 0 = no names |
 | `relic_sort` | 1 | the Relic page: 0 = the game's order; 1 = each part's blocks by name, the relics before the charms (from the next page you open) |
 | `relic_split` | 1 | the Relic page: 1 = a coloured line between the relics and the charms, taking no space; 0 = none |
+| `relic_empty_veil` | 1 | the Relic page: 1 = a dark veil over the empty (gray) slots, so the ones you hold stand out; 0 = gray only |
+| `relic_own_slots` | 0 | the Relic page (and the artifact page) under OWN: 1 = only the slots that hold something (the shard slot only with shards in it), each in its place; 0 = the held blocks whole |
 | `view_resume` | 1 | the Transfer tab: 1 = the collection comes back on its group and row if a tab change or closing the caravan took it away, and each group keeps its row; 0 = the real page until you click, and a group starts at its top |
 | `formula_copies` | 1 | 1 = a formula's cell keeps any number of single copies; 0 = one copy, as any other item (copies already stored stay, keep their number and can be taken) |
 | `plate_label_size` | 13 | the height of the label line's text, 8..32 (the button captions are fitted to their buttons; `size.label` in the buttons file wins over it) |
@@ -662,7 +715,9 @@ template may use any alphabet (see "Alphabets" below; the rollover lines take an
     count the mod does not know yet (`?`).
   - `tooltip.yes`, `tooltip.no`: the rollover lines (*In your collection* / *Not in your
     collection*); `tooltip.roll`: the words after `tooltip.yes` on a monster infrequent you hold in
-    another roll (quote it to keep its leading blank); `tooltip.class_yes`, `tooltip.class_no`:
+    another roll (quote it to keep its leading blank); `tooltip.reagent`: the word after a
+    formula's reagent line your collection holds, after one blank (*(Collection)*; not written into
+    the generated file, set it to change it); `tooltip.class_yes`, `tooltip.class_no`:
     their colours, a game text style number (0..57; 22 and 24). These were `tooltip_text_yes`,
     `tooltip_text_no`, `tooltip_class_yes` and `tooltip_class_no` in `uniquetab.ini`: a value you
     had set there is carried into the main game's `[tab]` once.

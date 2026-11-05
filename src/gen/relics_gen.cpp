@@ -95,7 +95,12 @@ std::string relicsListText(const std::vector<RelicItem>& relics, const std::vect
         Row row;
         row.key = foldKey(r.item.record);
         std::string bid;
-        row.tier = relicBlockOf(row.key, &bid);
+        if (r.item.cls == "ItemArtifact") {   // an artifact is a block of its own, tier 0
+            row.tier = 0;
+            bid = endsWithDbr(row.key) ? row.key.substr(0, row.key.size() - 4) : row.key;
+        } else {
+            row.tier = relicBlockOf(row.key, &bid);
+        }
         row.r = &r;
         blocks[{r.item.cls, bid}].push_back(std::move(row));
     }
@@ -107,7 +112,7 @@ std::string relicsListText(const std::vector<RelicItem>& relics, const std::vect
         std::sort(b.rows.begin(), b.rows.end(), [](const Row& x, const Row& y) {
             return x.tier != y.tier ? x.tier < y.tier : x.key < y.key;
         });
-        b.part = kv.first.first == "ItemRelic" ? 0 : 1;
+        b.part = kv.first.first == "ItemRelic" ? 0 : kv.first.first == "ItemCharm" ? 1 : 2;
         b.exp = relicExpansionOf(b.rows[0].key);
         b.lvl = b.rows[0].r->item.levelRequirement;
         b.bid = kv.first.second;
@@ -123,17 +128,28 @@ std::string relicsListText(const std::vector<RelicItem>& relics, const std::vect
     std::string out;
     std::size_t n = 0;
     for (const Block& b : order) {
-        out += "B\t" + std::to_string(++n) + "\t" + b.bid + "\t" + (b.part == 0 ? "R" : "C") + "\t" +
+        out += "B\t" + std::to_string(++n) + "\t" + b.bid + "\t" + (b.part == 0 ? "R" : b.part == 1 ? "C" : "A") + "\t" +
                std::to_string(b.rows.size()) + "\t" + b.rows.front().r->item.name + "\t" +
                b.rows.back().r->item.name + "\r\n";
-        ++(b.part == 0 ? c.relicBlocks : c.charmBlocks);
-        if (b.rows.size() == 1) ++c.oneLineBlocks;
+        if (b.part == 2) {
+            ++c.artifactBlocks;
+        } else {
+            ++(b.part == 0 ? c.relicBlocks : c.charmBlocks);
+            if (b.rows.size() == 1) ++c.oneLineBlocks;
+        }
         for (const Row& row : b.rows) {
             const RelicItem& r = *row.r;
             out += "R\t" + r.item.record + "\t" + std::to_string(row.tier) + "\t" + std::to_string(r.shards) +
                    "\t" + r.item.bitmap + "\t" + r.shardBitmap + "\t" + std::to_string(r.bonuses.size());
             for (const std::string& bonus : r.bonuses) out += "\t" + bonus;
             out += "\r\n";
+            if (b.part == 2) {
+                for (const std::string& f : r.formulae) out += "F\t" + f + "\r\n";
+                ++c.artifactRows;
+                c.artifactBonuses += r.bonuses.size();
+                c.artifactFormulae += r.formulae.size();
+                continue;
+            }
             ++c.rows;
             c.bonuses += r.bonuses.size();
         }
