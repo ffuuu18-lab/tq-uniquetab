@@ -6,7 +6,7 @@
 #
 # The guard cases: a journal with one row, a pending-out row, a line that is not a TQ-1 header, a
 # file held open, a hidden file, each under mods\x\ -> REFUSE; a copy named tq-uniq-items123.jsonl
-# beside the main journal with a row -> REFUSE; -OutDir wins over %UNIQUETAB_OUT%; every journal
+# beside the main journal with a row -> REFUSE; a backup in mods\x\backup\ -> REFUSE; -OutDir wins over %UNIQUETAB_OUT%; every journal
 # empty (the .bad- copies and other names ignored) -> allowed; no journal, no folder -> allowed.
 # journal_dir in the mod folder's uniquetab.ini: a row in that folder's mods\x\, or one left in the
 # mod folder -> REFUSE; both empty -> allowed; a folder that does not exist or a commented line ->
@@ -116,6 +116,10 @@ Check ((Guard $d) -eq 1) "a copy named 'tq-uniq-items-x copy.jsonl' in mods\x\ w
 $d = Fresh "main"; CleanSet $d
 Journal (Join-Path $d "tq-uniq-items.jsonl") @($row)
 Check ((Guard $d) -eq 1) "the main journal with a row -> refused"
+
+$d = Fresh "backup"; CleanSet $d
+Journal (Join-Path $d "mods\x\backup\tq-uniq-items-x-10000101-120000.jsonl") @($row)
+Check ((Guard $d) -eq 1) "a backup in mods\x\backup\ with every journal empty -> refused"
 
 $d = Fresh "nojournal"
 Put (Join-Path $d "uniquetab.ini") "[general]`n"

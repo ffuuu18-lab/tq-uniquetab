@@ -125,8 +125,10 @@ PROCESS = [
     # so) and their dumps' prefix.
     ("an investigation script", re.compile(r"(?<![A-Za-z0-9_])[abv][0-9]?_[a-z0-9_]+\.py|\ba_ex[p]_")),
 ]
-# The rules for comments only: never applied to the binary's strings.
-COMMENT_ONLY = ("a clock time", "a short process label", "a log line label")
+# The rules for comments only: never applied to the binary's strings (instruction bytes spell
+# such a label by chance: "Qh`H4" is a push of an address). The sources those strings come from
+# are held to every rule.
+COMMENT_ONLY = ("a clock time", "a short process label", "a log line label", "an item label")
 # The markers of the .gitignore block tools/publish.ps1 drops.
 DEV_BLOCK_START = "# ---- development tree only"
 DEV_BLOCK_END = "# ---- end of the development tree block"

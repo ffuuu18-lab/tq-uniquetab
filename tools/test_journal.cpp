@@ -10,7 +10,8 @@
 // always parses), the folded key, duplicate identities kept as separate rows, a take removes the
 // NEWEST row, the crash window (pending in / out, the restore at load, the save observation, the
 // cancel of an unsaved take), the round trip of every field, the capture validation, a share-locked
-// file, a bad line costing one row with the copy aside, and the CSV export.
+// file, a bad line costing one row with the copy aside, and the CSV export; section Q: a move
+// short of memory, the writer's floor, the backups and the move's memory check.
 #include <windows.h>
 
 #include <stdio.h>
@@ -26,9 +27,45 @@
 #define UT_PROTO_PURE_ONLY
 #include "../src/ut_proto.h"          // the take's row -> replica -> row (utReplicaFromIdentity)
 
+#include <stdlib.h>
+
+#include <algorithm>
+#include <new>
 #include <vector>
 
+// Section Q's failing allocations: every request of g_failLo..g_failHi bytes fails once g_failSkip
+// of them went through (g_failLo 0 = every allocation succeeds). An exhausted 32-bit address space
+// fails the larger blocks first.
+static size_t g_failLo = 0, g_failHi = 0;
+static int g_failSkip = 0, g_failHits = 0;
+
+void* operator new(size_t n) {
+    if (g_failLo && n >= g_failLo && n <= g_failHi) {
+        if (g_failSkip > 0) {
+            --g_failSkip;
+        } else {
+            ++g_failHits;
+            throw std::bad_alloc();
+        }
+    }
+    void* p = malloc(n ? n : 1);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+void* operator new[](size_t n) { return operator new(n); }
+void operator delete(void* p) noexcept { free(p); }
+void operator delete(void* p, size_t) noexcept { free(p); }
+void operator delete[](void* p) noexcept { free(p); }
+void operator delete[](void* p, size_t) noexcept { free(p); }
+
 namespace {
+
+void failSizes(size_t lo, size_t hi = (size_t)-1, int skip = 0) {
+    g_failLo = lo;
+    g_failHi = hi;
+    g_failSkip = skip;
+    g_failHits = 0;
+}
 
 int g_pass = 0, g_fail = 0;
 char g_dir[MAX_PATH];
@@ -98,6 +135,21 @@ int countBad(const char* leaf) {
 }
 
 bool exists(const char* p) { return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES; }
+
+// The rows of the file on disk (its lines after the header), and a number of its header.
+unsigned fileRows(const char* path) {
+    const std::string t = readAll(path);
+    unsigned n = 0;
+    for (char ch : t)
+        if (ch == '\n') ++n;
+    return n ? n - 1 : 0;
+}
+unsigned headerNum(const char* path, const char* key) {
+    const std::string t = readAll(path);
+    const std::string k = std::string("\"") + key + "\":";
+    const size_t at = t.find(k);
+    return at == std::string::npos || at > t.find('\n') ? ~0u : (unsigned)strtoul(t.c_str() + at + k.size(), nullptr, 10);
+}
 
 ut::UtReplicaCapture cap(const char* base, unsigned seed, const char* prefix = "",
                          const char* relic = "") {
@@ -1624,6 +1676,214 @@ int main(int argc, char** argv) {
               "the index, step 5: reloaded (a crash: the pending rows wait for the check): the same, the generation moved");
         check(journalUnresolvedFallback("test") > 0 && sameAsScan(), "the index, step 5: the load rule applied: the same");
         journalOpenSet(nullptr);
+    }
+
+    printf("\nQ. a move short of memory (1.1.3): nothing lost, nothing written short\n");
+    {
+        using namespace ut;
+        wchar_t qlog[MAX_PATH];
+        _snwprintf_s(qlog, MAX_PATH, _TRUNCATE, L"%S\\test_journal_q.log", g_dir);
+        logInit(qlog);   // the log above was shut down: this section's lines go to their own file
+        logSetLevel("debug");
+        const char* L = "tq-uniq-items-qa";
+        clean(L);
+        char p[MAX_PATH];
+        pathOf(L, "jsonl", p);
+        bool rb = false, ok = journalOpenSet(L);
+        unsigned long long seq = 0;
+        for (int i = 0; i < 300 && ok; ++i) ok = journalDepositCommit(cap(kRing, 1000u + (unsigned)i), &seq, &rb);
+        ok = ok && journalSaveObserved(now() + 10) == 300 && journalFlushNow();
+        const std::string before = readAll(p);
+        check(ok && fileRows(p) == 300, "memory: 300 rows deposited, saved and written");
+        unsigned long long newest = 0;
+        journalNewest(kRingKey, nullptr, &newest);
+        failSizes(100000);   // the file's text (~108 KB) cannot be had, the rows' copy (~77 KB) can
+        const bool t1 = journalTakeCommit(kRingKey, newest, &rb);
+        failSizes(0);
+        check(!t1 && rb && journalRows(kRingKey) == 300 && journalPendingOut() == 0 && readAll(p) == before,
+              "memory: the write fails: the take is refused and rolled back, rows and file as before");
+        failSizes(20000);    // then the rows' copy cannot be had either (1.1.2 emptied the rows here)
+        rb = true;
+        const bool t2 = journalTakeCommit(kRingKey, newest, &rb);
+        const int hits2 = g_failHits;
+        failSizes(0);
+        check(!t2 && !rb && hits2 > 0 && journalCount() == 300 && journalRows(kRingKey) == 300 && readAll(p) == before,
+              "memory: the move's copy of the rows cannot be made: refused, rows and file as before");
+        journalService();    // the worker's next pass: the failed write left the journal dirty
+        check(fileRows(p) == 300 && headerNum(p, "entries") == 300 && headerNum(p, "collected") == 300,
+              "memory: ... and the worker's next pass writes every row");
+        // the rollback swapped the exact copy in (capacity = size): a deposit's push_back must grow
+        failSizes(50000, (size_t)-1, 1);   // the rows' copy goes through, the push_back's block does not
+        unsigned long long s3 = 0;
+        const bool d3 = journalDepositCommit(cap(kRing, 2000), &s3, &rb);
+        const int hits3 = g_failHits;
+        failSizes(0);
+        check(!d3 && !rb && hits3 == 1 && journalCount() == 300 && journalRows(kRingKey) == 300 && fileRows(p) == 300,
+              "memory: the deposit's change throws midway (its push_back): refused, rows as before");
+        failSizes(32, 32);   // the index's map node (nothing else of a deposit's commit is 32 bytes)
+        unsigned long long s4 = 0, nw = 0;
+        const bool d4 = journalDepositCommit(cap(kRing, 2001), &s4, &rb);
+        const int hits4 = g_failHits;
+        failSizes(0);
+        check(d4 && hits4 > 0 && journalRows(kRingKey) == 301 && journalCollectedTotal() == 301 &&
+                  journalNewest(kRingKey, nullptr, &nw) && nw == s4 && headerNum(p, "collected") == 301,
+              "memory: the index rebuild throws: the deposit is written, the counts and the newest row right");
+
+        // the writer's floor: rows lost in memory are never written over the file
+        const std::string qlogPath = std::string(g_dir) + "\\test_journal_q.log";
+        auto logText = [&]() {   // the open log (fopen cannot share it with the logger's handle)
+            logFlush();
+            std::string s;
+            const HANDLE h = CreateFileA(qlogPath.c_str(), GENERIC_READ,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE) return s;
+            char buf[4096];
+            DWORD got = 0;
+            while (ReadFile(h, buf, sizeof(buf), &got, nullptr) && got) s.append(buf, got);
+            CloseHandle(h);
+            return s;
+        };
+        auto logMark = [&]() { return logText().size(); };
+        auto logHas = [&](size_t from, const char* what) {
+            const std::string t = logText();
+            int n = 0;
+            for (size_t at = t.find(what, from); at != std::string::npos; at = t.find(what, at + 1)) ++n;
+            return n;
+        };
+        const char* LB = "tq-uniq-items-qb";
+        clean(LB);
+        pathOf(LB, "jsonl", p);
+        ok = journalOpenSet(LB);
+        for (int i = 0; i < 30 && ok; ++i) ok = journalDepositCommit(cap(kRing, 3000u + (unsigned)i), &seq, &rb);
+        ok = ok && journalSaveObserved(now() + 10) == 30 && journalFlushNow();
+        const std::string b30 = readAll(p);
+        size_t mark = logMark();
+        journalTestDropRows(5);
+        journalService();
+        journalService();
+        check(ok && journalReadOnly() && readAll(p) == b30 && logHas(mark, " E] ") == 1 &&
+                  logHas(mark, "hold 25 settled row(s) and 30 were") == 1,
+              "floor: 5 rows dropped in memory: nothing written (the file byte-identical), READ-ONLY, one ERROR naming 25 and 30");
+        // the legal sequences still write
+        const char* LC = "tq-uniq-items-qc";
+        const char* kRelic = "records\\xpack\\item\\relics\\01_act4_test.dbr";
+        const char* kRelicKey = "records/xpack/item/relics/01_act4_test.dbr";
+        clean(LC);
+        pathOf(LC, "jsonl", p);
+        ok = journalOpenSet(LC);
+        for (int i = 0; i < 10 && ok; ++i) ok = journalDepositCommit(cap(kRing, 4000u + (unsigned)i), &seq, &rb);
+        UtReplicaCapture relic = cap(kRelic, 4100);
+        relic.var1 = 3;
+        unsigned long long rs = 0, nq = 0, shard = 0;
+        unsigned left = 0;
+        ok = ok && journalDepositCommit(relic, &rs, &rb) && journalSaveObserved(now() + 10) == 11 && journalFlushNow();
+        mark = logMark();
+        bool legal = ok && journalNewest(kRingKey, nullptr, &nq) && journalTakeCommit(kRingKey, nq, &rb) &&
+                     journalSaveObserved(now() + 10) == 1 && journalFlushNow();
+        for (int i = 0; i < 3 && legal; ++i) legal = journalNewest(kRingKey, nullptr, &nq) && journalTakeCommit(kRingKey, nq, &rb);
+        legal = legal && journalSaveObserved(now() + 10) == 3 && journalFlushNow();
+        legal = legal && journalTakeShard(kRelicKey, rs, &shard, &left, &rb) && left == 2;
+        check(legal && !journalReadOnly() && fileRows(p) == 8 && logHas(mark, " E] ") == 0,
+              "floor: a take and its save, three takes and one save erasing them, a shard split: all written");
+        for (int i = 0; i < 2 && legal; ++i) legal = journalNewest(kRingKey, nullptr, &nq) && journalTakeCommit(kRingKey, nq, &rb);
+        const long w0 = journalWrites();
+        legal = legal && journalOpenSet("tq-uniq-items-qz") && journalOpenSet(LC, now() + 10, 1);
+        journalService();
+        check(legal && journalWrites() > w0 && !journalReadOnly() && journalCount() == 5 && fileRows(p) == 5 &&
+                  logHas(mark, " E] ") == 0,
+              "floor: the load's settle erases the three rows taken out: written");
+
+        // the backups: <the journal's folder>\backup\<leaf>-<yyyymmdd-hhmmss>.jsonl
+        const std::string bdir = std::string(g_dir) + "\\backup";
+        CreateDirectoryA(bdir.c_str(), nullptr);
+        auto backups = [&](const char* leaf) {   // every file named <leaf>-* there, by name
+            std::vector<std::string> v;
+            WIN32_FIND_DATAA fd;
+            const HANDLE h = FindFirstFileA((bdir + "\\" + leaf + "-*").c_str(), &fd);
+            if (h == INVALID_HANDLE_VALUE) return v;
+            do v.push_back(fd.cFileName); while (FindNextFileA(h, &fd));
+            FindClose(h);
+            std::sort(v.begin(), v.end());
+            return v;
+        };
+        auto inBackup = [&](const std::string& name) { return bdir + "\\" + name; };
+        const char* LD = "tq-uniq-items-qd";
+        clean(LD);
+        pathOf(LD, "jsonl", p);
+        for (const std::string& f : backups(LD)) DeleteFileA(inBackup(f).c_str());
+        ok = journalOpenSet(LD) && journalDepositCommit(cap(kRing, 5000), &seq, &rb);
+        check(ok && backups(LD).empty(), "backup: a set's first file: no backup (nothing was there)");
+        const std::string one = readAll(p);
+        ok = journalOpenSet("tq-uniq-items-qz") && journalOpenSet(LD) && journalDepositCommit(cap(kRing, 5001), &seq, &rb) &&
+             journalDepositCommit(cap(kRing, 5002), &seq, &rb);
+        std::vector<std::string> b = backups(LD);
+        check(ok && b.size() == 1 && readAll(inBackup(b[0]).c_str()) == one,
+              "backup: the opened set's first write keeps the file as it was, its second write none");
+        if (!b.empty()) DeleteFileA(inBackup(b[0]).c_str());
+        for (int i = 0; i < 10; ++i) {
+            char n[80];
+            _snprintf_s(n, sizeof(n), _TRUNCATE, "%s-1000010%d-000000.jsonl", LD, i);
+            writeAll(inBackup(n).c_str(), one);
+        }
+        const std::string notes = inBackup(std::string(LD) + "-notes.jsonl");
+        writeAll(notes.c_str(), one);   // not a backup's name: never deleted
+        ok = journalOpenSet("tq-uniq-items-qz") && journalOpenSet(LD) && journalDepositCommit(cap(kRing, 5003), &seq, &rb);
+        b = backups(LD);
+        check(ok && b.size() == 11 && !exists(inBackup(std::string(LD) + "-10000100-000000.jsonl").c_str()) &&
+                  exists(inBackup(std::string(LD) + "-10000101-000000.jsonl").c_str()) && exists(notes.c_str()),
+              "backup: the 11th deletes the oldest; a file of another name in the folder stays");
+        const std::string emptyHeader = "{\"journal\":\"titan quest uniquetab\",\"format\":1,\"entries\":0}\n";
+        const char* LE = "tq-uniq-items-qe";
+        clean(LE);
+        pathOf(LE, "jsonl", p);
+        writeAll(p, emptyHeader);
+        ok = journalOpenSet(LE) && journalDepositCommit(cap(kRing, 5100), &seq, &rb);
+        check(ok && backups(LE).empty(), "backup: a journal with no rows: no backup");
+        const char* LF = "tq-uniq-items-qf";
+        clean(LF);
+        pathOf(LF, "jsonl", p);
+        for (const std::string& f : backups(LF)) DeleteFileA(inBackup(f).c_str());
+        writeAll(inBackup(std::string(LF) + "-10000101-000000.jsonl").c_str(),
+                 "{\"journal\":\"titan quest uniquetab\",\"format\":1,\"entries\":25}\n");
+        writeAll(p, emptyHeader);
+        mark = logMark();
+        ok = journalOpenSet(LF);
+        check(ok && journalCount() == 0 && logHas(mark, "qf.jsonl holds 0 row(s) and its newest backup") == 1 &&
+                  logHas(mark, "qf-10000101-000000.jsonl holds 25 - if the collection was not emptied") == 1 &&
+                  logHas(mark, "in the collection twice") == 1,
+              "backup: an empty journal and a backup of 25 rows: one WARN at the open, nothing restored");
+        mark = logMark();
+        ok = ok && journalOpenSet("tq-uniq-items-qz") && journalOpenSet(LF);
+        check(ok && journalCount() == 0 && logHas(mark, "its newest backup") == 0,
+              "backup: the same empty journal and backup opened again: no second WARN");
+        for (int i = 0; i < 10 && ok; ++i) ok = journalDepositCommit(cap(kRing, 5200u + (unsigned)i), &seq, &rb);
+        writeAll(inBackup(std::string(LF) + "-10000102-000000.jsonl").c_str(),
+                 "{\"journal\":\"titan quest uniquetab\",\"format\":1,\"entries\":40}\n");
+        mark = logMark();
+        ok = ok && journalOpenSet("tq-uniq-items-qz") && journalOpenSet(LF);
+        check(ok && journalCount() == 10 && logHas(mark, "its newest backup") == 0,
+              "backup: 10 rows and a backup of 40 (taken out since): no WARN");
+
+        // the move's memory check: no room -> every move refused before anything moves
+        const char* LG = "tq-uniq-items-qg";
+        clean(LG);
+        pathOf(LG, "jsonl", p);
+        ok = journalOpenSet(LG) && journalDepositCommit(cap(kRing, 6000), &seq, &rb);
+        const std::string g1 = readAll(p);
+        mark = logMark();
+        journalTestMoveRoom(0);
+        unsigned long long s5 = 0;
+        const bool d5 = journalDepositCommit(cap(kRing, 6001), &s5, &rb);
+        const bool t5 = journalNewest(kRingKey, nullptr, &nq) && journalTakeCommit(kRingKey, nq, &rb);
+        check(ok && !d5 && !t5 && journalCount() == 1 && journalRows(kRingKey) == 1 && readAll(p) == g1 &&
+                  logHas(mark, "the game is out of memory") == 1,
+              "memory check: no room: a deposit and a take refused, rows and file as before, one WARN");
+        journalTestMoveRoom(-1);
+        check(journalDepositCommit(cap(kRing, 6002), &s5, &rb) && journalCount() == 2,
+              "memory check: the real one: the deposit goes through");
+        journalOpenSet(nullptr);
+        logShutdown();
     }
 
     printf("\n%s - %d passed, %d failed\n", g_fail ? "JOURNAL TESTS FAILED" : "ALL PASS", g_pass,

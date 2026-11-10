@@ -3,6 +3,28 @@
 What changed in each release, newest first. `README.md` says how everything works; this file says
 when it arrived.
 
+## 1.1.3 - 10 November 2026
+
+Requires Titan Quest Anniversary Edition 2.10 (the 32-bit `TQ.exe`) with the x86 build of
+Ultimate ASI Loader, as 1.1.2.
+
+### Fixed
+
+- The collection could be emptied when the game ran out of memory during a take or a deposit (versions 1.1.0 to 1.1.2). A move that cannot keep its copy of the collection is now refused, and nothing is lost.
+- The journal is never written with items missing that no take explains: the file is left as it is, the mod stops writing for the session and the log says to restart the game.
+- Deposits and takes are refused, with one line in the log, while the game is nearly out of memory; the collection file stays intact. Restart the game to move items again.
+- A journal write that keeps failing is logged once, then once a minute, not every second.
+
+### New
+
+- Backups: before a session first changes a collection, the file is copied to `backup\` beside it; the newest 10 are kept (README "Backups").
+- The log warns when a collection opens empty while its newest backup holds items, and says how to restore it.
+- The uninstall script refuses to purge while a backup is kept.
+
+### Upgrading
+
+Replace `scripts\uniquetab.asi`. Your settings and your collection are kept.
+
 ## 1.1.2 - 5 November 2026
 
 Requires Titan Quest Anniversary Edition 2.10 (the 32-bit `TQ.exe`) with the x86 build of

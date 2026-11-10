@@ -44,7 +44,8 @@ These are release blockers, not preferences.
 1. **The mod writes only its own files**, all inside its own folder (`scripts\uniquetab\` beside
    the `.asi`, or the Documents fallback): `uniquetab.ini`, `uniquetab.state`, `uniquetab.log`
    (+3 archives), the journals `tq-uniq-items*.jsonl` and their `.csv` copies, a `.bad-<stamp>`
-   copy of a damaged journal, `catalogue.bin`, `catalogue.stamp`, `uniq-records.txt`,
+   copy of a damaged journal, the backups `backup\<leaf>-<yyyymmdd-hhmmss>.jsonl` beside each
+   journal (the newest 10 per leaf; only that exact name is ever deleted), `catalogue.bin`, `catalogue.stamp`, `uniq-records.txt`,
    `uniq-groups.txt`, `uniq-excluded.txt`, `uniq-geometry.txt`, `uniq-relics.txt` and the gray
    icons under `gray\`; and per mod, under
    `mods\<leaf>\` (`ut_folders.h`), that mod's journal set, its own `uniquetab.ini`,
@@ -221,7 +222,8 @@ These are release blockers, not preferences.
     - **The uninstall deletes by name.** `undeploy.bat --purge` runs `tools\journal_guard.ps1`
       first: every `tq-uniq-items*.jsonl` in the mod folder and in each `mods\<mod>\` (and in
       `journal_dir` and its `mods\<mod>\` when the main `uniquetab.ini` sets one), whatever the
-      rest of its name, refuses the purge when it holds a row or a pending row or cannot be read.
+      rest of its name, refuses the purge when it holds a row or a pending row or cannot be read,
+      and so does any `tq-uniq-items*.jsonl` in a `backup\` folder beside the journals.
       The purge then deletes only the generated files it names and the contents of `gray\` and
       `plates\` by their patterns, and `rd` without `/s`: never `mods\`, a journal, a settings,
       buttons or groups file, an export or an unknown file. A new generated file is added to that
@@ -253,6 +255,28 @@ These are release blockers, not preferences.
     them, and with the mod's arguments AddSource does not scan the folder. A
     painted background carries its game as FNV-1a 32 of the tag (`latticeLeafName`); a game leaf is
     57 characters at most where it is made (`utSaveSetLeaf`: 48, '-', 8 hex digits).
+
+20. **A move keeps its pre-image, and the writer keeps its floor** (1.1.3; `src\ut_rescue.cpp`).
+    - `commitWith` tests the address space first (`roomForMove`: a 16 MB reserve, or four times
+      the journal's last text, released at once; before the lock, allocating nothing): no room =
+      the move refused untouched, one WARN, latched for the session. It then copies the rows (the
+      pre-image) ON ITS OWN: a copy that throws refuses the move with the rows untouched - nothing
+      is ever assigned back from a pre-image that was not made. Every restore is
+      `g_rows->swap(pre)` (no allocation). `rebuildIndex` never throws: a failure leaves
+      `g_indexWhole` false and every reader of `g_index` / `g_at` / `g_collected` scans the rows
+      (`rowsAt`, `journalRows`, `collectedNow`). No `catch (...)` may leave the rows changed for a
+      later write to persist.
+    - A FIRM row is settled and not unresolved. Between two good writes of one set the firm rows
+      drop by at most ONE (`kFirmDropMax`: one take; every other change keeps or raises the count -
+      the list is at `g_firmBase`). `writeFile`, under `g_cs` and before the `.tmp`, refuses rows
+      with fewer firm rows than `g_firmBase - 1` (`g_firmBase` = the firm count at the load of the
+      set, after its settle, and at every good write; reset with the set): nothing written, one
+      ERROR with both counts, READ-ONLY for the session. A change of that rule needs the proof
+      redone: never a percentage.
+    - The backups (`backup\<leaf>-<yyyymmdd-hhmmss>.jsonl` beside the journal, once per opening,
+      before the first write, only of a file with rows, the newest 10 per leaf) never block a
+      write and are never restored by the mod; the open says when the journal has no rows and its
+      newest backup has some.
 
 ## 3. The architecture, by file
 
@@ -1228,6 +1252,21 @@ with the scan (`journalIndexBypass`) after deposits, takes, a split, a cancel, a
 The writer, the file and its flush and rename are unchanged; the whole-file write per move is the
 pause that is left.
 
+**Out of memory, the floor and the backups (1.1.3).** The format is unchanged; the writer gained
+three rules (invariant 20). A move whose pre-image cannot be copied, or whose 16 MB reserve fails,
+is refused before anything changes (1.1.0 to 1.1.2 assigned an empty pre-image over the rows, and
+the worker wrote the empty journal: a valid file, read back as an empty collection with no
+warning). The writer refuses rows that lost more than one firm row since the last good write or
+the load. Before an opened set's first write replaces a file with rows, the file is copied to
+`backup\<leaf>-<yyyymmdd-hhmmss>.jsonl` in the journal's own folder (so `journal_dir` and
+`mods\<leaf>\` follow); a backup path over MAX_PATH is skipped with one WARN (`journalOpenSet`'s
+refusal of long paths is unchanged). At the open, a journal with no rows against a newest backup
+whose header `entries` is not 0 is one WARN naming both and how to restore it, once per backup in
+a process; a journal with rows is never warned about (its backup is the session's start, and the
+takes since explain a shrink). `journal: WRITE FAILED` is said once, then at most once a minute with the
+count. `test_journal` section Q drives each of these under a failing global `operator new`
+(`journalTestDropRows`, `journalTestMoveRoom` are the tests' tools).
+
 **Pending rows.** A deposit's row is `"pending":"in"` and a take's `"pending":"out"` until the
 character's next save; the character-save watch (`ut_store.cpp`, reading `Player.chr` under the
 game's `SaveData` folder, read only) settles them. A row the game never saved - a crash in
@@ -1284,7 +1323,7 @@ once collide on the build's PDB).
 | `tools\build_test_catalogue.bat` | the whole generator end to end against a 2.10 game folder: the outputs byte-compared with `data\oracle\`, a fresh install into empty folders, the stamp, the error paths, the peak working set; with `TQ_TEST_MODS_DIR` set, every custom game under it byte-compared with `build_catalogue.py --game-mod` and measured (`tools\test_gameview.py`; without it one skip line); pass 7 builds the start-up game and then every custom game inside ONE 128 MB build arena (the high-water per game, nothing outgrown, no foreign free, the release in one piece) and pass 8 reads every set through the in-game reader on its own area (`--reader` repeats it over an installed game folder) |
 | `tools\build_test_arena.bat` | the build arena `src\gen\gen_heap.*`: the reserve, the free lists, split and merge, the reset and decommit per pair, the outgrow path, a free from another thread refused, the release refused while bound, a churn of small blocks timed against a private heap |
 | `tools\build_test_config.bat` | the settings table: every row's default matches its member, the writer, the parser, the clamp, and the path rules |
-| `tools\build_test_journal.bat` | the journal TQ-1: reader and writer, the format gate, the pending rows, the reconciliation verdicts; then `--load` over `data\allitems\tq-uniq-items-all.jsonl` (every row read, none dropped, the take's round trip for every record) |
+| `tools\build_test_journal.bat` | the journal TQ-1: reader and writer, the format gate, the pending rows, the reconciliation verdicts; section Q (1.1.3) under a failing global `operator new`: a failed write, an unmade pre-image (the 1.1.2 wipe), a mutation and an index rebuild that throw, the writer's floor (dropped rows refused, the legal sequences written), the backups (one per opening, none of an empty file, the prune, the WARN at the open) and the move's memory check; then `--load` over `data\allitems\tq-uniq-items-all.jsonl` (every row read, none dropped, the take's round trip for every record) |
 | `tools\build_test_proto.bat` | the prototypes' replica assembly, over every catalogue record |
 | `tools\build_test_search.bat` | the search's pure half, no game and no fixtures: the staging and the free of a captured line vector over a fake engine vector (inline and heap strings, the small-string edge, malformed shapes refused, every free counted), the keep rule, the fold, the matching, the highlight and the count, the key gate's decisions and the field's edits, the Backspace repeat, the group marks, the mark's colour and geometry, and the real Transfer page's map walk over a fake VS2012 map with its label forms; the search text kept per game (`ut_searchsave.h`: the round trip, each key part refusing alone, a damaged row refusing the whole file, a 9,009-row file's time) and the index's start across a game switch |
 | `tools\build_test_store.bat` | the private table and `ut_depositgate.h` |
@@ -1298,7 +1337,7 @@ once collide on the build's PDB).
 | `tools\build_test_groups.bat` | the groups model `src\gen\ut_groups.h` / `ut_groups_default.h`, no game: the template (its 25 groups = the built-in table, the 14 collect_mi rules, `[auto] min = 1000`), the glob, first-match precedence and views, every refusal naming its line (GD's words), the auto groups and Other (a mod's unknown classes), the G line, the player's file (absent / loaded / refused; never written, renamed or created), the merge (and README's two examples over the shipped catalogue), the derived words, and the template over `data\oracle\catalogue.bin`: the oracle's grouping with collect_mi=1 and `nomi\`'s without |
 | `tools\build_test_lattice.bat` | the lattice painter `src\gen\lattice_gen.*`: a synthetic background sampled pixel by pixel, the base game's caravan background painted for a moved 16 x 12, the swap's decisions over a ledger of the textures' counts (`src\ut_coverstep.h`: a new grid while the copy is in, OFF -> ON, the engine's own write, the window gone or replaced, the world down, a failed write-back), and with `TQ_TEST_MODS_DIR` SVAERA's 20 x 20 background painted for 20 x 19 and a moved 16 x 15 |
 | `tools\build_test_padinput.bat` | the press machine `src\ut_padinput.h` over TQ's event record: GD's cases (the item on the cursor, the ground, a button, the polled release, a repeat, the editor's adopted drag); and the window procedure's clicks (`utPadMsgDecide` / `utPadMsgPoll`: the latch keeps its button, a lost release, a right press held, swapped buttons, a right release the pad never pressed, the pad and the label on the game's own Transfer page: their ground kept and claimed); the layout editor's claimed press, in the window and outside it, its drag and its UP (14); the EDIT button's press in the window, on the real Transfer page and on a screen pad (15) |
-| `tools\build_test_journalguard.bat` | the uninstall guard `tools\journal_guard.ps1` and `undeploy.bat --purge` (`tools\test_journal_guard.ps1`) on temp folders under `build\`: a row, a pending row, an empty or unreadable journal refuse, in the mod folder and in every `mods\<mod>\`; a `tq-uniq-items*.jsonl` of any other name is judged like a journal; after a purge `mods\`, the journals, the settings and every unknown file are still there |
+| `tools\build_test_journalguard.bat` | the uninstall guard `tools\journal_guard.ps1` and `undeploy.bat --purge` (`tools\test_journal_guard.ps1`) on temp folders under `build\`: a row, a pending row, an empty or unreadable journal, a backup in `backup\` refuse, in the mod folder and in every `mods\<mod>\`; a `tq-uniq-items*.jsonl` of any other name is judged like a journal; after a purge `mods\`, the journals, the settings and every unknown file are still there |
 | `build_model.bat` (repo root) | `tests\model_test.cpp` - the pure model over `data\oracle\catalogue.bin`; its first step packs `data\oracle\catalogue.json` into the bin only when the json is newer (`tools\pack_catalogue.py --if-newer`; `--dry-run` says what it would do), so a stale json never overwrites the committed bin |
 
 One environment variable: `TQ_GAME_DIR` names the game folder (the one that holds `TQ.exe`),

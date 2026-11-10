@@ -1,8 +1,8 @@
 // ut_rescue.cpp - the journal (TQ-1): the mod's own record of every stored copy, and its CSV export.
 //
 // TQ PORT of GD's ut_rescue.cpp. See ut_rescue.h for what stayed GD's and what TQ forced. The mod
-// writes only its own files here (tq-uniq-items*.jsonl, tq-uniq-items*.csv, the .bad- copy aside;
-// a mod's set in its folder mods\<leaf>\, ut_folders.h),
+// writes only its own files here (tq-uniq-items*.jsonl, tq-uniq-items*.csv, the .bad- copy aside,
+// the backups in backup\ beside the journal; a mod's set in its folder mods\<leaf>\, ut_folders.h),
 // always whole and always atomically; the game's own save files are only ever READ (the character
 // save's last-write time, journalNewestCharacterSave).
 //
@@ -41,6 +41,7 @@
 #include "ut_rescue.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <string>
@@ -156,6 +157,39 @@ volatile LONG g_readOnly = 0;
 volatile LONG g_copyAside = 0;
 volatile LONG g_readOnlySaid = 0;
 
+// THE WRITER'S FLOOR. A FIRM row is settled ("pending" none) and not waiting for the container
+// check. Between two good writes of one set the firm rows drop by at most ONE: a take marks one
+// firm row "out" (journalTakeCommit, takeWhole from journalTakeRow and journalTakeShard) and its
+// own write follows before the next move (a failed write swaps the rows back). Nothing else
+// lowers the count: a deposit appends a row pending in, the cancel of an unsaved take and today's
+// rule (todaysRule) make rows firm, a shard split keeps its source's state and appends a row
+// pending out, and the save watch, the load's settle and the verdicts erase only rows pending
+// out or unresolved, or settle rows pending in. So rows about to be written with fewer firm rows
+// than g_firmBase - kFirmDropMax lost rows they should not have: nothing is written, READ-ONLY.
+// g_firmBase = the firm rows at the load of this set (after its settle) and at every good write.
+const size_t kFirmDropMax = 1;
+size_t g_firmBase = 0;
+bool g_firmKnown = false;   // false until the set is read; caller of both holds g_cs
+
+// THE MOVE'S MEMORY CHECK (roomForMove). Before a deposit or a take, kMoveRoomMin of address
+// space - or four times the journal's last text, when larger - must be had in one piece; it is
+// reserved and released at once. A process that ran out of it refuses every move from then on.
+const SIZE_T kMoveRoomMin = 16u << 20;
+volatile LONG g_textBytes = 0;     // the journal's last text, read or written
+volatile LONG g_noRoom = 0;        // the check failed: latched for the session
+volatile LONG g_probeForced = -1;  // the tests' answer (journalTestMoveRoom); -1 = the real check
+// journalFlushNow's failures in a row (under g_cs): the first is said, then once a minute
+unsigned int g_failRun = 0;
+unsigned long long g_failSaidAt = 0;
+
+// Caller holds g_cs.
+size_t firmRows() {
+    size_t n = 0;
+    for (size_t i = 0; i < g_rows->size(); ++i)
+        if ((*g_rows)[i].pending == kPendNone && !(*g_rows)[i].unresolved) ++n;
+    return n;
+}
+
 unsigned long long keyHash(const char* k) {
     unsigned long long h = 14695981039346656037ULL;
     for (const unsigned char* p = (const unsigned char*)k; p && *p; ++p) {
@@ -172,32 +206,48 @@ unsigned long long nowFileTime() {
 }
 
 // Caller holds g_cs. Two passes: the counts per key, then each key's run of positions in g_at.
+// Never throws: an allocation that fails leaves the index "not whole" (g_indexWhole false), and
+// every reader of g_index / g_at / g_collected then scans the rows, until the next rebuild.
 void rebuildIndex() {
     g_indexWhole = false;
     InterlockedIncrement(&g_factsGen);
-    g_index->clear();
-    g_collected = 0;
-    for (size_t i = 0; i < g_rows->size(); ++i) {
-        const Row& r = (*g_rows)[i];
-        KeyRows& k = (*g_index)[keyHash(r.key.c_str())];
-        ++k.all;
-        if (r.pending == kPendOut) continue;
-        ++k.collected;
-        ++g_collected;
-    }
-    unsigned int next = 0;
-    for (std::unordered_map<unsigned long long, KeyRows>::iterator it = g_index->begin();
-         it != g_index->end(); ++it) {
-        it->second.first = next;
-        next += it->second.all;
-        it->second.all = 0;   // counted again as the positions go in
-    }
-    g_at->resize(g_rows->size());
-    for (size_t i = 0; i < g_rows->size(); ++i) {
-        KeyRows& k = (*g_index)[keyHash((*g_rows)[i].key.c_str())];
-        (*g_at)[k.first + k.all++] = (unsigned int)i;
+    try {
+        g_index->clear();
+        g_collected = 0;
+        for (size_t i = 0; i < g_rows->size(); ++i) {
+            const Row& r = (*g_rows)[i];
+            KeyRows& k = (*g_index)[keyHash(r.key.c_str())];
+            ++k.all;
+            if (r.pending == kPendOut) continue;
+            ++k.collected;
+            ++g_collected;
+        }
+        unsigned int next = 0;
+        for (std::unordered_map<unsigned long long, KeyRows>::iterator it = g_index->begin();
+             it != g_index->end(); ++it) {
+            it->second.first = next;
+            next += it->second.all;
+            it->second.all = 0;   // counted again as the positions go in
+        }
+        g_at->resize(g_rows->size());
+        for (size_t i = 0; i < g_rows->size(); ++i) {
+            KeyRows& k = (*g_index)[keyHash((*g_rows)[i].key.c_str())];
+            (*g_at)[k.first + k.all++] = (unsigned int)i;
+        }
+    } catch (...) {
+        return;   // half built: not whole
     }
     g_indexWhole = true;
+}
+
+// The rows in the collection (caller holds g_cs): the index's count while it is whole, else the
+// rows counted one by one (no allocation either way).
+unsigned int collectedNow() {
+    if (g_indexWhole && !g_indexBypass) return g_collected;
+    unsigned int n = 0;
+    for (size_t i = 0; i < g_rows->size(); ++i)
+        if ((*g_rows)[i].pending != kPendOut) ++n;
+    return n;
 }
 
 // The positions of `key`'s rows, file order, from the index (caller holds g_cs); null = the index
@@ -255,6 +305,118 @@ void stampNow(char* out, size_t cap) {
     GetLocalTime(&st);
     _snprintf_s(out, cap, _TRUNCATE, "%04u%02u%02u-%02u%02u%02u", st.wYear, st.wMonth, st.wDay,
                 st.wHour, st.wMinute, st.wSecond);
+}
+
+// ---- the backups --------------------------------------------------------------------------------
+// <the journal's folder>\backup\<leaf>-<yyyymmdd-hhmmss>.jsonl (local time, as the .bad- stamp):
+// once per opening of a set, before its first write replaces the file, the file as it is on disk
+// (never one with no rows). The newest kBackupsKept of the leaf stay; only a name of exactly that
+// shape is ever deleted. A backup never blocks a write: whatever fails is one WARN. Nothing is
+// ever restored by the mod.
+const int kBackupsKept = 10;
+bool g_backupDue = false;   // caller holds g_cs
+
+// The open set's backup folder.
+bool backupDir(char* out, size_t cap) {
+    out[0] = 0;
+    const char* slash = strrchr(g_path, '\\');
+    if (!slash) return false;
+    return _snprintf_s(out, cap, _TRUNCATE, "%.*s\\backup", (int)(slash - g_path), g_path) > 0;
+}
+
+// True when `name` is exactly <leaf>-<8 digits>-<6 digits>.jsonl.
+bool backupNamed(const char* name, const char* leaf) {
+    const size_t n = strlen(leaf);
+    if (strncmp(name, leaf, n) != 0 || name[n] != '-') return false;
+    const char* d = name + n + 1;
+    for (int i = 0; i < 15; ++i)
+        if (i == 8 ? d[i] != '-' : (d[i] < '0' || d[i] > '9')) return false;
+    return strcmp(d + 15, ".jsonl") == 0;
+}
+
+// The backups of `leaf` in `dir`: how many, and the oldest and newest names (the stamp orders
+// them). No allocation.
+int scanBackups(const char* dir, const char* leaf, char* oldest, char* newest) {
+    oldest[0] = newest[0] = 0;
+    char glob[MAX_PATH];
+    if (_snprintf_s(glob, sizeof(glob), _TRUNCATE, "%s\\%s-*.jsonl", dir, leaf) < 0) return 0;
+    WIN32_FIND_DATAA fd;
+    const HANDLE h = FindFirstFileA(glob, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    int n = 0;
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !backupNamed(fd.cFileName, leaf)) continue;
+        ++n;
+        if (!oldest[0] || strcmp(fd.cFileName, oldest) < 0) strcpy_s(oldest, MAX_PATH, fd.cFileName);
+        if (!newest[0] || strcmp(fd.cFileName, newest) > 0) strcpy_s(newest, MAX_PATH, fd.cFileName);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+// Caller holds g_cs: the file on disk has rows and this opening has not replaced it yet.
+void backupBeforeWrite() {
+    char dir[MAX_PATH], bak[MAX_PATH], stamp[32];
+    stampNow(stamp, sizeof(stamp));
+    if (!backupDir(dir, sizeof(dir)) ||
+        strlen(dir) + 1 + strlen(g_leaf) + 1 + strlen(stamp) + strlen(".jsonl") >= MAX_PATH) {
+        logW("journal: no backup of %s this session - the backup's path would be over the %d "
+             "characters the game's file calls allow",
+             g_path, MAX_PATH - 1);
+        return;
+    }
+    _snprintf_s(bak, sizeof(bak), _TRUNCATE, "%s\\%s-%s.jsonl", dir, g_leaf, stamp);
+    CreateDirectoryA(dir, nullptr);   // there already: fine
+    if (!CopyFileA(g_path, bak, TRUE)) {
+        const DWORD e = GetLastError();
+        logW("journal: the backup %s could NOT be made (error %lu) - the journal is written all the "
+             "same", bak, e);
+        return;
+    }
+    logI("journal: the file as it was is kept as %s", bak);
+    char oldest[MAX_PATH], newest[MAX_PATH];
+    for (int i = 0; i < 64 && scanBackups(dir, g_leaf, oldest, newest) > kBackupsKept; ++i) {
+        char old[MAX_PATH];
+        _snprintf_s(old, sizeof(old), _TRUNCATE, "%s\\%s", dir, oldest);
+        if (!DeleteFileA(old)) break;
+    }
+}
+
+// The "entries" of a journal's header (its first line, read from the first 1 KB).
+bool headerEntries(const char* path, unsigned int* entries) {
+    const HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    char buf[1024];
+    DWORD got = 0;
+    const BOOL r = ReadFile(h, buf, sizeof(buf) - 1, &got, nullptr);
+    CloseHandle(h);
+    if (!r) return false;
+    buf[got] = 0;
+    if (char* nl = strchr(buf, '\n')) *nl = 0;
+    const char* e = strstr(buf, "\"entries\":");
+    if (!e || e[10] < '0' || e[10] > '9') return false;
+    *entries = (unsigned int)strtoul(e + 10, nullptr, 10);
+    return true;
+}
+
+// At the open (caller holds g_cs): one WARN when the journal read no rows and its newest backup
+// holds some, once per backup in a process. A journal with rows is never warned about: a backup
+// is the file at a session's start, so the takes since then explain any shrink.
+char g_backupSaid[MAX_PATH] = {};   // the backup the WARN last named
+void sayIfSmallerThanBackup(size_t rows) {
+    char dir[MAX_PATH], oldest[MAX_PATH], newest[MAX_PATH], bak[MAX_PATH];
+    if (rows || !backupDir(dir, sizeof(dir)) || !scanBackups(dir, g_leaf, oldest, newest)) return;
+    unsigned int held = 0;
+    if (_snprintf_s(bak, sizeof(bak), _TRUNCATE, "%s\\%s", dir, newest) < 0 || !headerEntries(bak, &held))
+        return;
+    if (held == 0 || strcmp(bak, g_backupSaid) == 0) return;
+    _snprintf_s(g_backupSaid, sizeof(g_backupSaid), _TRUNCATE, "%s", bak);
+    logW("***** journal: %s holds 0 row(s) and its newest backup %s holds %u - if the collection "
+         "was not emptied by taking items out, close the game and copy that backup over the "
+         "journal; every item taken out since that backup would then be in the collection twice "
+         "(the mod never restores one itself) *****",
+         g_path, bak, held);
 }
 
 void isoFromFileTime(unsigned long long ft, char* out, size_t cap) {
@@ -358,13 +520,27 @@ void buildText(std::string* out) {
                 "{\"journal\":\"%s\",\"format\":%u,\"written\":\"%s\",\"set\":\"%s\","
                 "\"entries\":%u,\"collected\":%u,\"pendingIn\":%u,\"pendingOut\":%u}\n",
                 UT_JOURNAL_NAME, (unsigned int)UT_JOURNAL_FORMAT, iso, g_leaf,
-                (unsigned int)g_rows->size(), g_collected, (unsigned int)pin, (unsigned int)pout);
+                (unsigned int)g_rows->size(), collectedNow(), (unsigned int)pin, (unsigned int)pout);
     out->append(hdr);
     for (size_t i = 0; i < g_rows->size(); ++i) appendRowLine(out, (*g_rows)[i]);
 }
 
 bool writeFile() {
     if (!g_rows || !g_path[0]) return false;
+    const size_t firm = firmRows();
+    if (g_firmKnown && firm + kFirmDropMax < g_firmBase) {
+        InterlockedExchange(&g_readOnly, 1);
+        InterlockedExchange(&g_readOnlySaid, 1);   // this line says it
+        logE("***** journal: the rows about to be written hold %u settled row(s) and %u were written "
+             "or read before - at most %u may go in one move. NOTHING was written: %s is left as it "
+             "is; READ-ONLY this session - restart the game *****",
+             (unsigned int)firm, (unsigned int)g_firmBase, (unsigned int)kFirmDropMax, g_path);
+        return false;
+    }
+    if (g_backupDue) {
+        g_backupDue = false;
+        backupBeforeWrite();
+    }
     if (InterlockedCompareExchange(&g_copyAside, 0, 1) == 1) {
         char stamp[32], aside[MAX_PATH];
         stampNow(stamp, sizeof(stamp));
@@ -376,8 +552,11 @@ bool writeFile() {
     }
     std::string text;
     buildText(&text);
+    InterlockedExchange(&g_textBytes, (LONG)text.size());
     if (!writeWholeFileAtomic(g_path, text.c_str(), text.size())) return false;
     InterlockedIncrement(&g_writes);
+    g_firmBase = firm;
+    g_firmKnown = true;
     return true;
 }
 
@@ -797,6 +976,7 @@ void readSetFile() {
         }
         return;
     }
+    InterlockedExchange(&g_textBytes, (LONG)f.size());
     const TextParse r = parseTextBuffer(f, g_path);
     if (!r.ok) {
         InterlockedExchange(&g_readOnly, 1);
@@ -1010,38 +1190,72 @@ bool leafOk(const char* leaf) {
     return true;
 }
 
+// Why the last commitWith refused before it tried a write (null = it did not): the caller's
+// REFUSED line says it. The moves run on the game thread only.
+const char* g_moveRefused = nullptr;
+const char* const kRefusedMemory = "the game is low on memory";
+
+// True when a move may start: the address space has room for its copy of the rows and the file's
+// text (kMoveRoomMin above). Allocates nothing; the first failure is one WARN and latches.
+bool roomForMove() {
+    if (InterlockedCompareExchange(&g_noRoom, 0, 0)) return false;
+    SIZE_T need = (SIZE_T)InterlockedCompareExchange(&g_textBytes, 0, 0) * 4u;
+    if (need < kMoveRoomMin) need = kMoveRoomMin;
+    const LONG forced = InterlockedCompareExchange(&g_probeForced, 0, 0);
+    bool room = forced > 0;
+    if (forced < 0) {
+        void* const p = VirtualAlloc(nullptr, need, MEM_RESERVE, PAGE_NOACCESS);
+        room = p != nullptr;
+        if (p) VirtualFree(p, 0, MEM_RELEASE);
+    }
+    if (room) return true;
+    if (InterlockedExchange(&g_noRoom, 1) == 0) {
+        logW("***** journal: the game is out of memory (no %u MB free in one piece) - deposits and "
+             "takes are refused until the game is restarted; the collection file is intact *****",
+             (unsigned int)(need >> 20));
+    }
+    return false;
+}
+
 // Runs `mutate` on the rows under the lock, writes the file, and on a failed write puts the
 // PRE-IMAGE back exactly (GD's journalDepositCommit, generalised to the take).
+// The pre-image is copied FIRST, on its own: when that copy fails there is nothing to put back, so
+// the move is refused with the rows untouched (1.1.2 assigned the still empty copy over them, and
+// the worker then wrote an empty journal). Every restore is a swap, which cannot throw.
 template <typename F>
 bool commitWith(F mutate, bool* rolledBack) {
     if (rolledBack) *rolledBack = false;
+    g_moveRefused = nullptr;
+    if (!roomForMove()) {   // before the lock: nothing has moved
+        g_moveRefused = kRefusedMemory;
+        return false;
+    }
     std::vector<Row> pre;
-    bool ok = false;
     EnterCriticalSection(&g_cs);
     try {
         pre = *g_rows;
+    } catch (...) {
+        LeaveCriticalSection(&g_cs);
+        g_moveRefused = kRefusedMemory;
+        logW("journal: no memory for the copy a move needs - the move is refused, the collection "
+             "is untouched");
+        return false;
+    }
+    bool ok = false;
+    try {
         ok = mutate();
-        if (ok) rebuildIndex();
     } catch (...) {
         ok = false;
     }
-    if (!ok) {
-        try {
-            *g_rows = pre;
-            rebuildIndex();
-        } catch (...) {
-        }
-    }
+    if (!ok) g_rows->swap(pre);   // the rows exactly as they were
+    rebuildIndex();
     LeaveCriticalSection(&g_cs);
     if (!ok) return false;
     if (journalFlushNow()) return true;
     EnterCriticalSection(&g_cs);
-    try {
-        *g_rows = pre;
-        rebuildIndex();
-        if (rolledBack) *rolledBack = true;
-    } catch (...) {
-    }
+    g_rows->swap(pre);
+    rebuildIndex();
+    if (rolledBack) *rolledBack = true;
     LeaveCriticalSection(&g_cs);
     InterlockedExchange(&g_dirty, 1);
     if (g_event) SetEvent(g_event);
@@ -1095,13 +1309,22 @@ bool journalInit(HMODULE selfModule, const char* journalDir) {
         g_csReady = true;
     }
     if (g_rows) return true;
+    // all three or none: g_rows set is what a second call takes for "already done"
+    std::vector<Row>* rows = nullptr;
+    std::unordered_map<unsigned long long, KeyRows>* index = nullptr;
+    std::vector<unsigned int>* at = nullptr;
     try {
-        g_rows = new std::vector<Row>();
-        g_index = new std::unordered_map<unsigned long long, KeyRows>();
-        g_at = new std::vector<unsigned int>();
+        rows = new std::vector<Row>();
+        index = new std::unordered_map<unsigned long long, KeyRows>();
+        at = new std::vector<unsigned int>();
     } catch (...) {
+        delete rows;
+        delete index;
         return false;
     }
+    g_index = index;
+    g_at = at;
+    g_rows = rows;
     char outDir[MAX_PATH] = {0};
     utModDirA(selfModule, outDir, sizeof(outDir));
     _snprintf_s(g_dir, sizeof(g_dir), _TRUNCATE, "%s", outDir);
@@ -1169,6 +1392,9 @@ bool journalOpenSet(const char* leaf, unsigned long long saveTime,
     InterlockedExchange(&g_readOnly, 0);
     InterlockedExchange(&g_copyAside, 0);
     InterlockedExchange(&g_readOnlySaid, 0);
+    g_firmBase = 0;
+    g_firmKnown = false;
+    g_backupDue = false;
     g_path[0] = g_csvPath[0] = g_leaf[0] = g_rel[0] = 0;
     if (want) {
         _snprintf_s(g_leaf, sizeof(g_leaf), _TRUNCATE, "%s", leaf);
@@ -1185,8 +1411,13 @@ bool journalOpenSet(const char* leaf, unsigned long long saveTime,
         sayUnreadModFolderJournal(leaf, rel);
         try {
             readSetFile();
+            const size_t rowsRead = g_rows->size();
+            if (!journalReadOnly()) sayIfSmallerThanBackup(rowsRead);
+            g_backupDue = rowsRead > 0;   // the file on disk has rows: kept before the first write
             settleAtLoad(saveTime, processStart, defer);
             rebuildIndex();
+            g_firmBase = firmRows();   // the writer's floor for this set (after the load's settle)
+            g_firmKnown = true;
         } catch (...) {
             g_rows->clear();
             rebuildIndex();
@@ -1196,7 +1427,7 @@ bool journalOpenSet(const char* leaf, unsigned long long saveTime,
         InterlockedExchange(&g_setOpen, 1);
     }
     const unsigned int rows = (unsigned int)g_rows->size();
-    const unsigned int collected = g_collected;
+    const unsigned int collected = collectedNow();
     LeaveCriticalSection(&g_cs);
     if (want) {
         logI("journal: set \"%s\" - %u row(s), %u in the collection, \"%s\"%s", g_leaf, rows,
@@ -1239,12 +1470,31 @@ bool journalFlushNow() {
     } catch (...) {
         ok = false;
     }
+    // A write that keeps failing is retried by the worker once a second: said the first time,
+    // then at most once a minute with the count.
+    const bool floorRefused = !ok && journalReadOnly();   // the writer's floor said it already
+    unsigned int failed = 0;
+    bool say = false;
+    if (!ok && !floorRefused) {
+        failed = ++g_failRun;
+        const unsigned long long t = GetTickCount64();
+        say = failed == 1 || t - g_failSaidAt >= 60000ull;
+        if (say) g_failSaidAt = t;
+    } else if (ok) {
+        failed = g_failRun;
+        g_failRun = 0;
+    }
     LeaveCriticalSection(&g_cs);
+    if (floorRefused) return false;
     if (!ok) {
-        logE("journal: WRITE FAILED (%s)", g_path);
+        if (say && failed == 1) logE("journal: WRITE FAILED (%s)", g_path);
+        else if (say)
+            logE("journal: WRITE FAILED (%s) - %u attempts have failed since the last good write",
+                 g_path, failed);
         InterlockedExchange(&g_dirty, 1);
         return false;
     }
+    if (failed) logI("journal: written again after %u failed attempt(s)", failed);
     logD("journal: wrote %u row(s) to %s", (unsigned int)n, g_path);
     return true;
 }
@@ -1270,8 +1520,15 @@ unsigned int journalRows(const char* key) {
     const unsigned long long h = keyHash(key);
     unsigned int n = 0;
     EnterCriticalSection(&g_cs);
-    std::unordered_map<unsigned long long, KeyRows>::const_iterator it = g_index->find(h);
-    if (it != g_index->end()) n = it->second.collected;
+    if (g_indexWhole && !g_indexBypass) {
+        std::unordered_map<unsigned long long, KeyRows>::const_iterator it = g_index->find(h);
+        if (it != g_index->end()) n = it->second.collected;
+    } else {   // a rebuild that threw: the rows counted one by one
+        for (size_t i = 0; i < g_rows->size(); ++i) {
+            const Row& r = (*g_rows)[i];
+            if (r.pending != kPendOut && r.key == key) ++n;
+        }
+    }
     LeaveCriticalSection(&g_cs);
     return n;
 }
@@ -1279,7 +1536,7 @@ unsigned int journalRows(const char* key) {
 unsigned int journalCollectedTotal() {
     if (!g_rows || !g_csReady || !journalSetKnown()) return 0;
     EnterCriticalSection(&g_cs);
-    const unsigned int n = g_collected;
+    const unsigned int n = collectedNow();
     LeaveCriticalSection(&g_cs);
     return n;
 }
@@ -1393,7 +1650,8 @@ bool journalDepositCommit(const UtReplicaCapture& cap, unsigned long long* seqOu
         },
         rolledBack);
     if (!ok) {
-        logW("deposit REFUSED: the journal could not be written - the item was not touched");
+        logW("deposit REFUSED: %s - the item was not touched",
+             g_moveRefused ? g_moveRefused : "the journal could not be written");
         return false;
     }
     if (seqOut) *seqOut = seq;
@@ -1433,7 +1691,8 @@ bool journalTakeCommit(const char* key, unsigned long long seq, bool* rolledBack
     if (!ok) {
         logW("take REFUSED: %s - nothing was handed out",
              stale ? "the page's copy is not the newest row (stale page)"
-                   : "the journal could not be written or has no such row");
+                   : g_moveRefused ? g_moveRefused
+                                   : "the journal could not be written or has no such row");
         return false;
     }
     logD("journal: take row %llu %s%s", seq, key, erased ? " (an unsaved deposit: erased)" : "");
@@ -1561,7 +1820,8 @@ bool journalTakeRow(const char* key, unsigned long long seq, bool* rolledBack, c
     if (!ok) {
         logW("take REFUSED: %s - nothing was handed out",
              stale ? "the page's copy is not the row its slot hands out (stale page)"
-                   : "the journal could not be written or has no such row");
+                   : g_moveRefused ? g_moveRefused
+                                   : "the journal could not be written or has no such row");
         return false;
     }
     logD("journal: take row %llu %s%s", seq, key, erased ? " (an unsaved deposit: erased)" : "");
@@ -1614,7 +1874,8 @@ bool journalTakeShard(const char* key, unsigned long long seq, unsigned long lon
     if (!ok) {
         logW("take REFUSED: %s - nothing was handed out",
              stale ? "the page's copy is not the row its slot hands out (stale page)"
-                   : "the journal could not be written or has no such row");
+                   : g_moveRefused ? g_moveRefused
+                                   : "the journal could not be written or has no such row");
         return false;
     }
     if (outSeq) *outSeq = shardSeq;
@@ -1883,6 +2144,20 @@ void journalIndexBypass(bool on) {
     EnterCriticalSection(&g_cs);
     g_indexBypass = on;
     LeaveCriticalSection(&g_cs);
+}
+
+void journalTestDropRows(size_t n) {
+    if (!g_rows || !g_csReady) return;
+    EnterCriticalSection(&g_cs);
+    g_rows->erase(g_rows->begin(), g_rows->begin() + (ptrdiff_t)(n < g_rows->size() ? n : g_rows->size()));
+    rebuildIndex();
+    LeaveCriticalSection(&g_cs);
+    InterlockedExchange(&g_dirty, 1);
+}
+
+void journalTestMoveRoom(int answer) {
+    InterlockedExchange(&g_probeForced, answer < 0 ? -1 : answer ? 1 : 0);
+    InterlockedExchange(&g_noRoom, 0);
 }
 
 void journalSetRelicCells(UtRelicCellsFn fn) { g_relicCells = fn; }

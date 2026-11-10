@@ -892,9 +892,11 @@ scripts\uniquetab\
     uniquetab.state                where the collection was left (group, row, OWN)
     uniquetab.log                  the log (and its older copies)
     catalogue.bin, uniq-*.txt, gray\ ...   generated from your game
+    backup\                        the last 10 copies of each journal here (see "Backups")
     mods\
         <mod>\                     one folder per mod, named like its journal
             tq-uniq-items-<mod>.jsonl   that mod's collection
+            backup\                that mod's journal's last 10 copies
             uniquetab.ini          that mod's own settings (complete)
             uniquetab.state        where the collection was left in that mod
             uniquetab.log          that mod's lines of the log (every line is in the main log too)
@@ -905,6 +907,7 @@ scripts\uniquetab\
 | `tq-uniq-items.jsonl` | **this is your collection** (the main campaign) |
 | `tq-uniq-items-custom.jsonl`, `mods\<mod>\tq-uniq-items-<mod>.jsonl` | the same, for a custom map that names no mod and for a mod |
 | `tq-uniq-items*.jsonl.bad-<stamp>` | a journal the mod could not read, copied aside before it wrote a new one: what it held is still in it |
+| `backup\tq-uniq-items*-<yyyymmdd-hhmmss>.jsonl`, `mods\<mod>\backup\...` | a journal as it was before a session's first move changed it, the newest 10 of each kept (see "Backups") |
 | `tq-uniq-items*.csv` | the spreadsheet copies, with `export_csv` on, beside their journal |
 | `uniquetab.ini`, `mods\<mod>\uniquetab.ini` | your settings, and a mod's own (see "Settings") |
 | `uniquetab-buttons.ini`, `mods\<mod>\uniquetab-buttons.ini` | the buttons and words of the tab (see "Your buttons") |
@@ -920,8 +923,8 @@ will, and deleting it loses nothing you made.
 
 | folder | yours | the mod's |
 | --- | --- | --- |
-| `scripts\uniquetab\` | the journals `tq-uniq-items.jsonl` and `tq-uniq-items-custom.jsonl` (the collection) and their `.bad-<stamp>` copies (in `journal_dir` when that is set); `uniquetab.ini` (written at the first start with every option, then changed only by an upgrade, the layout editor's SAVE and `layout_edit=1` setting itself back to 0, each said in the log); `uniquetab-buttons.ini` (written once, then only its `[unassigned]` section, a new built-in group's button added once, and at the upgrade from 1.0.x the old rollover words carried into `[tab]` once); the optional `uniquetab-groups.ini` (never written) | `uniquetab.state`; the log `uniquetab.log` and its older copies; the spreadsheet copies `tq-uniq-items*.csv` (in `journal_dir` when that is set); the generated set `catalogue.bin`, `catalogue.stamp`, `uniq-records.txt`, `uniq-groups.txt`, `uniq-excluded.txt`, `uniq-geometry.txt`, `uniq-relics.txt`, `uniq-search.txt` and `gray\`; the layout plates in `plates\` |
-| `scripts\uniquetab\mods\<mod>\` | that mod's journal `tq-uniq-items-<mod>.jsonl` and its `.bad-<stamp>` copies (in `<journal_dir>\mods\<mod>\` when `journal_dir` is set), its own complete `uniquetab.ini` and its `uniquetab-buttons.ini` | its `.csv` (in `<journal_dir>\mods\<mod>\` when `journal_dir` is set), its `uniquetab.state` and `uniquetab.log`, and that game's generated set (the same names, `gray\` included) |
+| `scripts\uniquetab\` | the journals `tq-uniq-items.jsonl` and `tq-uniq-items-custom.jsonl` (the collection), their `.bad-<stamp>` copies and their backups in `backup\` (in `journal_dir` when that is set); `uniquetab.ini` (written at the first start with every option, then changed only by an upgrade, the layout editor's SAVE and `layout_edit=1` setting itself back to 0, each said in the log); `uniquetab-buttons.ini` (written once, then only its `[unassigned]` section, a new built-in group's button added once, and at the upgrade from 1.0.x the old rollover words carried into `[tab]` once); the optional `uniquetab-groups.ini` (never written) | `uniquetab.state`; the log `uniquetab.log` and its older copies; the spreadsheet copies `tq-uniq-items*.csv` (in `journal_dir` when that is set); the generated set `catalogue.bin`, `catalogue.stamp`, `uniq-records.txt`, `uniq-groups.txt`, `uniq-excluded.txt`, `uniq-geometry.txt`, `uniq-relics.txt`, `uniq-search.txt` and `gray\`; the layout plates in `plates\` |
+| `scripts\uniquetab\mods\<mod>\` | that mod's journal `tq-uniq-items-<mod>.jsonl`, its `.bad-<stamp>` copies and its backups in `backup\` (in `<journal_dir>\mods\<mod>\` when `journal_dir` is set), its own complete `uniquetab.ini` and its `uniquetab-buttons.ini` | its `.csv` (in `<journal_dir>\mods\<mod>\` when `journal_dir` is set), its `uniquetab.state` and `uniquetab.log`, and that game's generated set (the same names, `gray\` included) |
 
 The generated set: `catalogue.bin` is every collectable item of that game with its name, its
 icon and its size, and `catalogue.stamp` what it was built from (a change rebuilds it);
@@ -956,6 +959,16 @@ beside `uniquetab.ini` first, or that mod's collection shows empty.
 **Back up `tq-uniq-items*.jsonl`.** That file *is* the collection: every stored item, with its
 full identity, one item per line. It is plain text - you can open it and search it. Copy it
 somewhere safe as often as you would back up a save.
+
+**Backups.** The mod keeps copies of its own: each time a journal that holds items is opened (at a
+world load) and then first changed, the file as it was is copied to `backup\` beside it, named
+`<journal>-<yyyymmdd-hhmmss>.jsonl` (the date and time of the copy; a mod's in
+`mods\<mod>\backup\`). The newest 10 of each journal are kept and older ones deleted; nothing else
+in `backup\` is touched. When a journal opens with no items while its newest backup holds some,
+the log says so once, with the backup's name and its count. The
+mod never restores a backup itself. To restore one: close the game, then copy the backup over the
+journal under the journal's own name (`tq-uniq-items.jsonl`). A backup is the collection as it
+was then: an item taken out since comes back into it, so you may then have that item twice.
 
 **It does not travel with Steam Cloud.** Steam Cloud carries your characters, not the game
 folder, so on another machine your characters arrive without their collection. Copy the journal
@@ -1047,7 +1060,9 @@ problem, your `tq-uniq-items*.jsonl`).
 
 **Take everything out first.** The collection lives in the journal; the game itself does not know
 it exists, so a plugin you remove leaves your items in a file nothing reads. Take each item back
-into your inventory (or stash) while the mod is still installed.
+into your inventory (or stash) while the mod is still installed. The backups in `backup\` (and in
+each `mods\<mod>\backup\`) still hold those items: move them away by hand before
+`undeploy.bat --purge` (below).
 
 Then delete `scripts\uniquetab.asi`. The game runs, the pad under the grid is gone, and the Transfer
 page is back to normal. Delete `scripts\uniquetab\` as well if you want the journal, the settings
@@ -1058,10 +1073,10 @@ and the generated files gone.
 stamp, the lists, `uniq-search.txt`, `gray\` and `plates\` - each by its name, and refuses to
 while any collection still holds an item: it reads every `tq-uniq-items*.jsonl` in
 `scripts\uniquetab\` and in every `mods\<mod>\` folder - a copy you made under another name
-counts too - and refuses on a stored item, a taken one not yet saved, or a file it cannot read.
-Your own files stay (the journals, the ini files, the log, `uniquetab.state`, the `.csv` copies,
-any file it does not name), and so does `mods\`; delete `scripts\uniquetab\` by hand when you
-are done.
+counts too - and refuses on a stored item, a taken one not yet saved, a file it cannot read, or a
+backup in a `backup\` folder beside the journals. Your own files stay (the journals and their
+backups, the ini files, the log, `uniquetab.state`, the `.csv` copies, any file it does not
+name), and so does `mods\`; delete `scripts\uniquetab\` by hand when you are done.
 
 The loader (`dinput8.dll`) is shared with any other ASI mod you use, so delete it only if this was
 the only one. Neither script ever touches it.

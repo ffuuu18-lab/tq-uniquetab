@@ -17,10 +17,11 @@ rem journals tq-uniq-items*.jsonl, the ONLY copy of every deposited unique. --pu
 rem tools\journal_guard.ps1 first - it reads every tq-uniq-items*.jsonl of the folder and of every
 rem mods\<mod>\, whatever the rest of its name, and of the folder journal_dir names in uniquetab.ini
 rem (and its mods\<mod>\) when that is set - and deletes nothing when it exits non-zero (a
-rem journal with rows, an unreadable journal) or when the script is missing. Even then the purge
+rem journal with rows, an unreadable journal, a backup in a backup\ folder beside the journals) or
+rem when the script is missing. Even then the purge
 rem deletes only the generated files it names below; your own files and mods\ are never touched.
 rem Without --purge the folder is never touched. Empty the collection in the game, or move the
-rem journals away by hand, before a purge.
+rem journals away by hand, and move backup\ (and each mods\<mod>\backup\) away by hand, before a purge.
 setlocal enabledelayedexpansion
 
 set "ROOT=%~dp0"
@@ -98,7 +99,8 @@ if errorlevel 1 (
 rem GD's purge: only the files the mod GENERATES are deleted, each by its name. KEPT, because they
 rem are yours: uniquetab.ini (the settings), uniquetab-buttons.ini (the buttons, written once,
 rem then yours), uniquetab-groups.ini (yours: the mod never writes it), an old uniquetab-text.ini,
-rem the collection (tq-uniq-items*.jsonl whatever the rest of the name, their .bad- copies), the
+rem the collection (tq-uniq-items*.jsonl whatever the rest of the name, their .bad- copies, the
+rem backups in backup\), the
 rem spreadsheet copies (tq-uniq-items*.csv), uniquetab.log and its older copies, and
 rem uniquetab.state (where the collection was left; deleting it only resets that). mods\ holds one
 rem folder per mod - its collection, its own settings and buttons, and its generated set - and is

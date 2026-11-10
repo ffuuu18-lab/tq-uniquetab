@@ -3,7 +3,8 @@
 # The collection lives ONLY in the mod's journals: a deposited unique was removed from the game and
 # exists nowhere else. Removing the mod while a journal holds rows leaves those items in a file
 # nothing reads. This script exits 1 (REFUSE) when any journal of any save set holds at least one
-# row, or cannot be read. Exit 0 = safe to uninstall. It reads files and writes nothing.
+# row, or cannot be read, or when a backup of one is kept (backup\ beside the journals). Exit 0 =
+# safe to uninstall. It reads files and writes nothing.
 #
 # WHERE IT LOOKS (GD's per-custom-game scan): the mod folder itself (the main campaign's
 # tq-uniq-items.jsonl, tq-uniq-items-custom.jsonl, and a mod's journal an earlier version kept
@@ -155,6 +156,23 @@ foreach ($s in $sets) {
     foreach ($j in $files) {
         $seen++
         if ((Test-Journal $j ($s.Prefix + $j.Name)) -ne 0) { $verdict = 1 }
+    }
+    # The backups (backup\ beside the set's journals: the file as it was before a session's first
+    # write) are the player's data like the journals: any tq-uniq-items*.jsonl there refuses.
+    $bdir = Join-Path $s.Dir "backup"
+    if (Test-Path -LiteralPath $bdir -PathType Container) {
+        try {
+            $baks = @(Get-ChildItem -LiteralPath $bdir -File -Force -ErrorAction Stop |
+                Where-Object { $_.Name -like "tq-uniq-items*.jsonl" })
+        } catch {
+            Write-Host "[guard] REFUSE: the folder `"$bdir`" cannot be listed ($($_.Exception.Message))"
+            $verdict = 1
+            continue
+        }
+        if ($baks.Count -gt 0) {
+            Write-Host "[guard] REFUSE: $($s.Prefix)backup\ holds $($baks.Count) backup(s) of the collection - move them away by hand first"
+            $verdict = 1
+        }
     }
 }
 if ($verdict -ne 0) { exit 1 }

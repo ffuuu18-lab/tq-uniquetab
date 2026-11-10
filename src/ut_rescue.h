@@ -174,7 +174,9 @@ HANDLE journalEvent();
 // Worker thread: writes the file when a non-critical change is pending (a pending flag cleared),
 // or the CSV when only the export mode changed.
 void journalService();
-// The FULL write, callable from any thread; false = READ-ONLY or the atomic write failed.
+// The FULL write, callable from any thread; false = READ-ONLY or the atomic write failed. The
+// writer's floor: rows about to be written with more than one settled row fewer than the last
+// write or the load of this set are never written - one ERROR, READ-ONLY for the session.
 bool journalFlushNow();
 
 // ---- the table: counted in ROWS -------------------------------------------------------------
@@ -192,6 +194,9 @@ bool journalNewest(const char* key, UtReplicaCapture* out, unsigned long long* s
 // THE DEPOSIT'S ONE ALL-OR-NOTHING STEP (GD's journalDepositCommit): refuse if not usable,
 // append the row ("pending":"in"), write the whole file atomically on this thread, and on any
 // failure take the row out again (*rolledBack) and return false. TRUE means the row is ON DISK.
+// Every move (this, the takes below) is refused first, untouched, when the process has no 16 MB
+// of address space in one piece (one WARN, refused until the game restarts) or when the copy of
+// the rows its rollback needs cannot be made.
 bool journalDepositCommit(const UtReplicaCapture& cap, unsigned long long* seqOut,
                           bool* rolledBack);
 // THE TAKE'S step: row `seq` must be the newest in-collection row of `key`; it is marked taken
@@ -288,6 +293,13 @@ long journalFactsGen();
 // The tests' oracle (tools\test_journal.cpp): true = journalRowsOf / journalNewest ignore the
 // index and scan every row, as 1.1.1 did. The mod never calls it.
 void journalIndexBypass(bool on);
+// The tests' tool for the writer's floor: drops the first `n` rows in memory, writes nothing and
+// marks the journal dirty (the next write must refuse). The mod never calls it.
+void journalTestDropRows(size_t n);
+// The tests' tool for the move's memory check: 0 = no room, 1 = room, -1 = the real check (a
+// 16 MB reserve, more for a large journal); every call clears the session's latch. The mod never
+// calls it.
+void journalTestMoveRoom(int answer);
 // The CSV's relic cells: `fn(key)` answers a relic / charm record's tier (0..3) and shards N; a
 // record it does not know (a unique) gets two empty cells. Null = every row's cells are empty.
 typedef bool (*UtRelicCellsFn)(const char* key, int* tier, unsigned* shards);
